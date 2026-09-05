@@ -1,0 +1,22 @@
+{
+  "name": "@omapkg/signer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "generate-key": "bun scripts/generate-key.ts"
+  },
+  "dependencies": {
+    "openpgp": "6.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "typescript": "latest",
+    "wrangler": "4.129.0"
+  }
+}

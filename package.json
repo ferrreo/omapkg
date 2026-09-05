@@ -1,0 +1,38 @@
+{
+  "name": "omapkg",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:pipeline": "tsc --noEmit --project services/pipeline/tsconfig.json",
+    "test": "bun test tests",
+    "db:migrate": "wrangler d1 migrations apply omapkg --local",
+    "deploy": "bun run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.12.9",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@flue/runtime": "2.0.3",
+    "better-auth": "1.7.2",
+    "effect": "4.0.0-rc.112",
+    "valibot": "1.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.54.4",
+    "@cloudflare/workers-types": "latest",
+    "@flue/vite": "2.0.3",
+    "@sveltejs/adapter-cloudflare": "7.2.9",
+    "@sveltejs/kit": "2.70.3",
+    "@sveltejs/vite-plugin-svelte": "latest",
+    "@types/bun": "latest",
+    "svelte": "5.57.0",
+    "svelte-check": "latest",
+    "typescript": "~6",
+    "vite": "8.2.2",
+    "wrangler": "4.129.0"
+  }
+}

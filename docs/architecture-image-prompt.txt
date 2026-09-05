@@ -1,0 +1,29 @@
+Use case: infographic-diagram
+Asset type: polished architecture overview image for an agentic Arch package platform
+Primary request: Create one high-resolution landscape technical architecture diagram, a single master schematic with three clearly separated provider zones and a left-to-right build pipeline. Audience: engineers and reviewers. Use a crisp, calm, flat technical infographic style rather than a dashboard.
+
+Scene/backdrop: clean 16:9 landscape canvas, deep charcoal background with a very subtle grid, generous whitespace, thin precise connectors, restrained accents. Three bounded zones with headings "CLOUDFLARE", "DIGITALOCEAN", and "AWS". Cloudflare controls request/review/runtime and delivery; DigitalOcean is the isolated build area; AWS is the signing backend.
+
+Main pipeline: large readable nodes in this exact order:
+"Submit request" -> "Human review" -> "Agent factory" -> "Generated recipe review" -> "Build" -> "Signing service" -> "Publish".
+Use one clear arrow per transition, no crossing arrows. Keep "Agent cannot bypass approval" next to Human review. Input label feeding Submit request: "Git / source archives / vendor packages".
+
+Cloudflare control/runtime group: "Workers (web app/API)", "Workflows (orchestration)", "Durable Objects (agent state)", "Sandbox (source inspection/vendor prep)", "AI Gateway", and a small external capsule "AI provider". Draw one short arrow from AI Gateway to AI provider.
+
+DigitalOcean Build group: "Online input preparation" -> "Disposable OFFLINE build + tests", with a clear air-gap divider. Supporting labels: "Linux build hosts", "Registry pull access", "No signing keys". Build hosts have no KMS access and no signing keys.
+
+Cloudflare private storage group: heading "Private storage and services"; sibling blocks "D1 (requests/approvals/audit)", "R2 (sources, artifacts, repo indexes, version history)", and "Private Container Registry". Keep them grouped without arrows that imply a processing chain. Keep "Signing service" as a separate blue flow block outside this storage group, before Publish, with annotation "Validate build evidence".
+
+Signing boundary: draw exactly one connected double-headed orthogonal elbow arrow labeled exactly "Signing API" between the top-right edge of Cloudflare "Signing service" and the bottom edge of "AWS KMS". Route from Signing service upward through empty space, right, then upward into AWS KMS. Place arrowheads at both actual node borders. Do not draw any second connector, request/response stub, line to a zone border, direct Build-to-AWS edge, or AWS-to-Publish edge. AWS KMS annotations: "Key storage + signing", "Private key never leaves KMS", "Only signature returned to signing service". The single double-headed Signing API line represents the request and returned signature.
+
+Delivery: Signing service -> "Publish" -> "Package users". Under Publish: "Cloudflare Worker / CDN". Show two artifact chips: "Published signed packages" and "Recipe-only restricted vendor software". All distribution passes through Worker / CDN; no public direct access to R2.
+
+Text (verbatim): "Agentic Arch Package Platform", "Submit request", "Human review", "Agent factory", "Generated recipe review", "Build", "Signing service", "Validate build evidence", "Publish", "Package users", "Agent cannot bypass approval", "Git / source archives / vendor packages", "Workers (web app/API)", "Workflows (orchestration)", "Durable Objects (agent state)", "Sandbox (source inspection/vendor prep)", "AI Gateway", "AI provider", "D1 (requests/approvals/audit)", "R2 (sources, artifacts, repo indexes, version history)", "Private Container Registry", "Online input preparation", "Disposable OFFLINE build + tests", "Linux build hosts", "Registry pull access", "No signing keys", "AWS KMS", "Key storage + signing", "Private key never leaves KMS", "Only signature returned to signing service", "Signing API", "Cloudflare Worker / CDN", "Published signed packages", "Recipe-only restricted vendor software", "Private storage and services", "CLOUDFLARE", "DIGITALOCEAN", "AWS".
+
+Composition/framing: wide poster, title upper-left, pipeline centered, supporting services in coherent groups, bottom Cloudflare delivery strip aligned cleanly. Keep labels large and readable at normal zoom. Maximum 16 primary nodes. Use minimal orthogonal arrows that never cross. No tiny footnotes.
+
+Style/medium: clean editorial technical infographic, flat vector-like geometry, high-contrast sans-serif typography, blue Cloudflare accents, teal DigitalOcean accents, amber AWS accents, pale neutral external nodes. No 3D or isometric decoration.
+
+Constraints: Render every label exactly, with correct capitalization and punctuation. Human approval is a hard gate before Agent factory. No agent bypass path. R2 remains private. Build has no KMS access. AWS KMS is the only key holder. Only the signature returns to Cloudflare Signing service. No model names, versions, BYOK, personal data, account identifiers, tokens, private registry paths, or deployment caveats. No logos or watermarks.
+
+Avoid: generic dashboard cards, clutter, crossing arrows, false storage chains, direct Build-to-AWS edges, AWS-to-Publish edges, orphan connector stubs, public R2 endpoints, signing keys outside KMS, extra stages, extra provider names, decorative code, stock imagery.

@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+node_modules/
+.svelte-kit/
+.wrangler/
+dist/
+build/
+coverage/
+worker/opr-worker
+.local/
+/artifacts/
+.tmp/
+/*.deb

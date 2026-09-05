@@ -1,0 +1,112 @@
+name: ARM worker acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      origin:
+        description: OPR HTTPS origin to test
+        required: true
+        type: string
+      arm_image:
+        description: Fully qualified private ARM builder image reference
+        required: true
+        type: string
+      arm_image_digest:
+        description: Immutable sha256 digest for arm_image
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm-worker-acceptance
+  cancel-in-progress: false
+
+jobs:
+  native-arm-worker:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      OPR_ORIGIN: ${{ inputs.origin }}
+      OPR_ARM_IMAGE: ${{ inputs.arm_image }}
+      OPR_ARM_IMAGE_DIGEST: ${{ inputs.arm_image_digest }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: worker/go.mod
+
+      - name: Compile and test ARM daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) ;;
+            *) echo "native ARM64 runner required; got $(uname -m)" >&2; exit 1 ;;
+          esac
+          case "$(docker info --format '{{.Architecture}}')" in
+            aarch64|arm64) ;;
+            *) echo "native ARM64 Docker daemon required" >&2; exit 1 ;;
+          esac
+          cd worker
+          go test ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w -X main.workerVersion=gha-arm-${GITHUB_RUN_ID}" \
+            -o "$RUNNER_TEMP/opr-worker" .
+          "$RUNNER_TEMP/opr-worker" version
+
+      - name: Enroll and run one approved ARM build
+        shell: bash
+        env:
+          OPR_ENROLLMENT_TOKEN: ${{ secrets.OPR_ENROLLMENT_TOKEN }}
+        run: |
+          set -euo pipefail
+          state_dir="$RUNNER_TEMP/opr-worker-state"
+          log_file="$RUNNER_TEMP/opr-worker.log"
+          mkdir -m 700 "$state_dir"
+          cleanup() {
+            find "$state_dir" -type f -exec shred -u {} + 2>/dev/null || true
+            rmdir "$state_dir" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          if [[ -z "${OPR_ENROLLMENT_TOKEN:-}" ]]; then
+            echo 'OPR_ENROLLMENT_TOKEN secret is required' >&2
+            exit 2
+          fi
+          if [[ "$OPR_ORIGIN" != https://* || "$OPR_ORIGIN" == *[[:space:]]* ]]; then
+            echo 'origin must be an HTTPS URL' >&2
+            exit 2
+          fi
+          if [[ ! "$OPR_ARM_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ || "$OPR_ARM_IMAGE" != *"@$OPR_ARM_IMAGE_DIGEST" ]]; then
+            echo 'arm_image must end with its sha256 digest' >&2
+            exit 2
+          fi
+          printf '%s\n' "$OPR_ENROLLMENT_TOKEN" \
+            | "$RUNNER_TEMP/opr-worker" enroll \
+              --origin "$OPR_ORIGIN" \
+              --name "gha-arm-${GITHUB_RUN_ID}" \
+              --architecture aarch64 \
+              --runtime docker \
+              --state-dir "$state_dir" \
+              --image "$OPR_ARM_IMAGE" \
+              --image-digest "$OPR_ARM_IMAGE_DIGEST" \
+              --token-stdin
+          unset OPR_ENROLLMENT_TOKEN
+
+          # The hosted runner starts clean. A pulled image proves that a job was
+          # claimed and that the daemon received its short-lived registry JWT.
+          "$RUNNER_TEMP/opr-worker" run --once --config "$state_dir/config.json" 2>&1 | tee "$log_file"
+          if grep -q '^job:' "$log_file"; then
+            echo 'ARM worker job failed' >&2
+            exit 1
+          fi
+          if ! docker image inspect "$OPR_ARM_IMAGE" >/dev/null 2>&1; then
+            echo 'no ARM job was claimed, or private builder image was not pulled' >&2
+            exit 1
+          fi
+          repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$OPR_ARM_IMAGE")"
+          grep -Fq "$OPR_ARM_IMAGE_DIGEST" <<<"$repo_digests"

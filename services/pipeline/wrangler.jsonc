@@ -1,0 +1,33 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "omapkg-pipeline",
+  "workers_dev": false,
+  "preview_urls": false,
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "omapkg",
+    "migrations_dir": "../../migrations"
+  }],
+  "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "omapkg-artifacts" }],
+  "durable_objects": {
+    "bindings": [{ "name": "Sandbox", "class_name": "Sandbox" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["FluePackageFactoryAgent", "Sandbox"] }
+  ],
+  "containers": [],
+  "services": [{ "binding": "SIGNER", "service": "omapkg-signer" }],
+  "workflows": [
+    { "name": "factory", "binding": "FACTORY", "class_name": "FactoryWorkflow" },
+    { "name": "publication", "binding": "PUBLICATION", "class_name": "PublicationWorkflow" }
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "http://localhost:5173",
+    "AI_GATEWAY_ID": "default",
+    "AI_GATEWAY_ACCOUNT_ID": "",
+    "AI_GATEWAY_BYOK_ALIAS": "default"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "omapkg-signer",
+  "main": "src/index.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "r2_buckets": [
+    { "binding": "ARTIFACTS", "bucket_name": "omapkg-artifacts" }
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "http://localhost:5173",
+    "CONTROL_ORIGIN": "http://localhost:5173",
+    "KEY_ID": "package-signing-v1",
+    "MAX_ARTIFACT_BYTES": "4294967296",
+    "SIGNING_MODE": "cloudflare-worker-secret"
+  },
+  "secrets": {
+    "required": ["SIGNER_TOKEN", "CONTROL_TOKEN"]
+  }
+}

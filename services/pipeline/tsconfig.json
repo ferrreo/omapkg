@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["@cloudflare/workers-types", "bun"]
+  },
+  "include": [
+    "./**/*.ts",
+    "../../src/lib/model.ts",
+    "../../src/lib/server/db.ts",
+    "../../src/lib/server/env.ts",
+    "../../src/lib/server/factory.ts",
+    "../../src/lib/server/github.ts",
+    "../../src/lib/server/policy.ts",
+    "../../src/lib/server/releases.ts",
+    "../../src/lib/server/requests.ts"
+  ]
+}

@@ -1,0 +1,20 @@
+pkgname=opr-hello-real
+pkgver=2.12
+pkgrel=1
+pkgdesc='GNU Hello smoke package for the OPR worker'
+arch=('x86_64')
+license=('GPL-3.0-or-later')
+options=('!debug')
+source=('hello-2.12.tar.gz')
+sha256sums=('cf04af86dc085268c5f4470fbae49b18afbc221b78096aab842d934a76bad0ab')
+
+build() {
+  cd "hello-$pkgver"
+  ./configure --prefix=/usr
+  make
+}
+
+package() {
+  cd "hello-$pkgver"
+  make DESTDIR="$pkgdir" install
+}

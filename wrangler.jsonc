@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "omapkg",
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "assets": { "binding": "ASSETS", "directory": ".svelte-kit/cloudflare" },
+  "observability": { "enabled": true },
+  "d1_databases": [{ "binding": "DB", "database_name": "omapkg", "migrations_dir": "migrations" }],
+  "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "omapkg-artifacts" }],
+  "services": [
+    { "binding": "PIPELINE", "service": "omapkg-pipeline" },
+    { "binding": "SIGNER", "service": "omapkg-signer" }
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "http://localhost:5173",
+    "AI_GATEWAY_ID": "default",
+    "SIGNING_KEY_ID": "package-signing-v1",
+    "QUARANTINE_HOURS": "48"
+  }
+}

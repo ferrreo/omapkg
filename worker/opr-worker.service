@@ -1,0 +1,30 @@
+[Unit]
+Description=OPR Arch package build worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=opr-worker
+Group=opr-worker
+WorkingDirectory=/var/lib/opr-worker
+Environment=HOME=/var/lib/opr-worker
+Environment=XDG_RUNTIME_DIR=/run/opr-worker
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/opr-worker run --config /var/lib/opr-worker/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+Delegate=yes
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/opr-worker
+RuntimeDirectory=opr-worker
+RuntimeDirectoryMode=0700
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

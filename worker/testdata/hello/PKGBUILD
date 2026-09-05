@@ -1,0 +1,10 @@
+pkgname=opr-hello
+pkgver=1
+pkgrel=1
+arch=('x86_64')
+source=('README')
+sha256sums=('d9e6892ff2c83807c34f4aeb06bff724068803d0e03470bfb81a8f5cbde5f090')
+
+package() {
+  install -Dm644 README "$pkgdir/usr/share/doc/$pkgname/README"
+}
