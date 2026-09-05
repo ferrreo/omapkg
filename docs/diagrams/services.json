@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "omapkg services",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1280,
+      730
+    ]
+  },
+  "components": [
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web app",
+      "sublabel": "SvelteKit on Workers",
+      "pos": [
+        80,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "Pipeline",
+      "sublabel": "Flue + Workflows",
+      "pos": [
+        540,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "signer",
+      "type": "security",
+      "label": "Signer",
+      "sublabel": "OpenPGP.js Worker",
+      "pos": [
+        1000,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "D1",
+      "sublabel": "Requests, reviews, jobs",
+      "pos": [
+        80,
+        70
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "build",
+      "type": "backend",
+      "label": "Linux build host",
+      "sublabel": "Go + rootless containers",
+      "pos": [
+        80,
+        555
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "objects",
+      "type": "database",
+      "label": "R2",
+      "sublabel": "Inputs, packages, signatures",
+      "pos": [
+        1000,
+        70
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "keys",
+      "type": "security",
+      "label": "AWS KMS (optional)",
+      "sublabel": "Go signing adapter",
+      "pos": [
+        1000,
+        555
+      ],
+      "size": [
+        200,
+        76
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "web-pipeline",
+      "from": "web",
+      "to": "pipeline",
+      "label": "service binding",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pipeline-signer",
+      "from": "pipeline",
+      "to": "signer",
+      "label": "signing intent",
+      "variant": "emphasis"
+    },
+    {
+      "id": "web-state",
+      "from": "web",
+      "to": "state",
+      "label": "SQL"
+    },
+    {
+      "id": "build-web",
+      "from": "build",
+      "to": "web",
+      "label": "claim / upload"
+    },
+    {
+      "id": "signer-objects",
+      "from": "signer",
+      "to": "objects",
+      "label": "read / sign"
+    },
+    {
+      "id": "signer-keys",
+      "from": "signer",
+      "to": "keys",
+      "label": "managed signing",
+      "variant": "dashed",
+      "labelAt": [
+        1100,
+        468
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Shared storage",
+      "items": [
+        "Web and pipeline share D1 and R2.",
+        "The signer reads artifacts directly from R2."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Separate credentials",
+      "items": [
+        "Build containers run offline without platform secrets.",
+        "The signer checks review and worker provenance."
+      ]
+    }
+  ]
+}

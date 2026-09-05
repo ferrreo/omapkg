@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Inside the package factory",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1280,
+      730
+    ]
+  },
+  "components": [
+    {
+      "id": "start",
+      "type": "frontend",
+      "label": "Approved request",
+      "sublabel": "Web app service call",
+      "pos": [
+        60,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "workflow",
+      "type": "cloud",
+      "label": "FactoryWorkflow",
+      "sublabel": "Durable steps and retries",
+      "pos": [
+        360,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "Flue agent",
+      "sublabel": "Durable Object execution",
+      "pos": [
+        660,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "revision",
+      "type": "backend",
+      "label": "Reviewable revision",
+      "sublabel": "PKGBUILD + pinned manifest",
+      "pos": [
+        960,
+        305
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "AI Gateway / OpenRouter",
+      "sublabel": "pi-ai model provider",
+      "pos": [
+        660,
+        70
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "sandbox",
+      "type": "cloud",
+      "label": "Cloudflare Sandbox",
+      "sublabel": "Inspect, resolve, lint",
+      "pos": [
+        660,
+        555
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "recipes",
+      "type": "external",
+      "label": "GitHub recipe repo",
+      "sublabel": "Pull request for review",
+      "pos": [
+        960,
+        555
+      ],
+      "size": [
+        200,
+        76
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "start-workflow",
+      "from": "start",
+      "to": "workflow",
+      "label": "enqueue",
+      "variant": "emphasis"
+    },
+    {
+      "id": "workflow-agent",
+      "from": "workflow",
+      "to": "agent",
+      "label": "dispatch",
+      "variant": "emphasis"
+    },
+    {
+      "id": "agent-revision",
+      "from": "agent",
+      "to": "revision",
+      "label": "candidate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "agent-model",
+      "from": "agent",
+      "to": "model",
+      "label": "model calls"
+    },
+    {
+      "id": "agent-sandbox",
+      "from": "agent",
+      "to": "sandbox",
+      "label": "tool calls",
+      "labelAt": [
+        760,
+        468
+      ]
+    },
+    {
+      "id": "revision-recipes",
+      "from": "revision",
+      "to": "recipes",
+      "label": "open PR",
+      "labelAt": [
+        1060,
+        468
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Evidence before review",
+      "items": [
+        "Factory tools pin sources and collect license evidence.",
+        "Valibot validates the submitted candidate."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Human approval",
+      "items": [
+        "Area and security reviewers approve the exact revision.",
+        "The agent cannot approve, build, sign, or promote."
+      ]
+    }
+  ]
+}
