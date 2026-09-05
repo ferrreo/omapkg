@@ -1,8 +1,7 @@
 import { error, json, type RequestHandler } from '@sveltejs/kit';
 import type { Release } from '$lib/model';
 import { query } from '$lib/server/db';
-import { publicRelease } from '$lib/server/releases';
-import { finalDescription } from '$lib/server/descriptions';
+import { catalogRelease, stringList } from '$lib/server/catalog';
 
 type DetailRow = Release & {
   artifact_filename: string | null;
@@ -18,29 +17,6 @@ type DetailRow = Release & {
   recipe?: string;
 };
 
-function sources(value: string): Array<{ name: string; url: string; sha256: string }> {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is { name: string; url: string; sha256: string } => {
-      if (!item || typeof item !== 'object') return false;
-      const row = item as Record<string, unknown>;
-      return typeof row.name === 'string' && typeof row.url === 'string' && typeof row.sha256 === 'string';
-    });
-  } catch {
-    return [];
-  }
-}
-
-function list(value: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
 export const GET: RequestHandler = async ({ platform, params, url }) => {
   if (!platform?.env?.DB) return json({ error: 'Catalog is unavailable.' }, { status: 503 });
   const name = params.name ?? '';
@@ -52,15 +28,12 @@ export const GET: RequestHandler = async ({ platform, params, url }) => {
     WHERE r.name=? AND r.channel ${dev ? '= \'dev\'' : "IN ('stable','withdrawn')"} ORDER BY r.published_at DESC, r.id DESC`, name);
   if (!rows.length) error(404, 'Package not found.');
   const versions = rows.map((row) => {
-    const release = publicRelease(row, url.origin, dev);
+    const release = catalogRelease(row, url.origin, dev);
     if (!release) return null;
     return {
       ...release,
-      description: finalDescription(row, row.name),
-      source: { upstreamUrl: row.upstream_url, files: sources(row.source_json) },
-      license: row.license,
-      dependencies: list(row.dependencies_json),
-      smokeCommands: list(row.smoke_commands_json),
+      dependencies: stringList(row.dependencies_json),
+      smokeCommands: stringList(row.smoke_commands_json),
       explanation: row.explanation,
     };
   }).filter(Boolean);

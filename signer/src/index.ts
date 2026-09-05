@@ -1,3 +1,4 @@
+import { signingURL } from '../../src/lib/signing-url';
 import * as openpgp from 'openpgp';
 import { createHash } from 'node:crypto';
 
@@ -126,27 +127,6 @@ function maxArtifactBytes(env: Env): number {
   return value;
 }
 
-function controlURL(env: Env, pathname: string): URL {
-  const origin = new URL(env.CONTROL_ORIGIN);
-  if (origin.username || origin.password || origin.search || origin.hash || !['https:', 'http:'].includes(origin.protocol)) {
-    throw new Error('CONTROL_ORIGIN must be an absolute HTTP(S) URL without credentials');
-  }
-  const url = new URL(pathname, origin);
-  if (url.origin !== origin.origin) throw new Error('control request escaped configured origin');
-  return url;
-}
-
-function kmsURL(env: Env, pathname: string): URL {
-  if (!env.KMS_SIGNER_URL) throw new Error('managed KMS signer URL is not configured');
-  const origin = new URL(env.KMS_SIGNER_URL);
-  if (origin.username || origin.password || origin.search || origin.hash || !['https:', 'http:'].includes(origin.protocol)) {
-    throw new Error('KMS_SIGNER_URL must be an absolute HTTP(S) URL without credentials');
-  }
-  const url = new URL(pathname, origin);
-  if (url.origin !== origin.origin) throw new Error('KMS signer request escaped configured origin');
-  return url;
-}
-
 function signingMode(env: Env): 'cloudflare-worker-secret' | 'managed-kms' {
   if (env.SIGNING_MODE === 'managed-kms' || env.SIGNING_MODE === 'managedKMS') return 'managed-kms';
   if (env.SIGNING_MODE && env.SIGNING_MODE !== 'cloudflare-worker-secret') throw new Error('SIGNING_MODE is invalid');
@@ -178,7 +158,7 @@ async function getIdentity(env: Env): Promise<Identity> {
   let armored: string;
   if (mode === 'managed-kms') {
     if (!env.KMS_SIGNER_TOKEN) throw new Error('managed KMS signer token is not configured');
-    const response = await fetchNoRedirect(kmsURL(env, '/v1/public-key'), {
+    const response = await fetchNoRedirect(signingURL(env.KMS_SIGNER_URL, 'KMS_SIGNER_URL', '/v1/public-key'), {
       headers: { authorization: `Bearer ${env.KMS_SIGNER_TOKEN}`, accept: 'application/json' },
     });
     if (!response.ok) throw new Error(`managed KMS signer returned ${response.status}`);
@@ -291,7 +271,7 @@ async function drainReader(body: ReadableStream<Uint8Array>): Promise<void> {
 }
 
 async function fetchIntent(request: Request, env: Env, intentId: string): Promise<SignIntent> {
-  const url = controlURL(env, `/api/internal/signing-intents/${encodeURIComponent(intentId)}`);
+  const url = signingURL(env.CONTROL_ORIGIN, 'CONTROL_ORIGIN', `/api/internal/signing-intents/${encodeURIComponent(intentId)}`);
   const response = await fetchNoRedirect(url, {
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, accept: 'application/json' },
     signal: request.signal,
@@ -446,7 +426,7 @@ async function signArtifactManaged(request: Request, env: Env, intent: SignInten
   const digested = digestAndForward(bounded);
   let response: Response;
   try {
-    response = await fetchNoRedirect(kmsURL(env, '/v1/sign'), {
+    response = await fetchNoRedirect(signingURL(env.KMS_SIGNER_URL, 'KMS_SIGNER_URL', '/v1/sign'), {
       method: 'POST',
       headers: { authorization: `Bearer ${env.KMS_SIGNER_TOKEN}`, 'content-type': 'application/octet-stream' },
       body: digested.body,
@@ -583,7 +563,7 @@ async function persistSignature(env: Env, intent: SignIntent, identity: Identity
 }
 
 async function recordAudit(env: Env, intent: SignIntent, identity: Identity, signature: { key: string; sha256: string; filename: string }, publicKeyKey: string): Promise<void> {
-  const url = controlURL(env, '/api/internal/signing-events');
+  const url = signingURL(env.CONTROL_ORIGIN, 'CONTROL_ORIGIN', '/api/internal/signing-events');
   const response = await fetchNoRedirect(url, {
     method: 'POST',
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, 'content-type': 'application/json' },

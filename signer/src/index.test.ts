@@ -531,3 +531,37 @@ test('reuses an existing valid signature after a transient audit failure', async
     globalThis.fetch = originalFetch;
   }
 }, { timeout: 30_000 });
+
+test('signing transports reject nonlocal HTTP and allow HTTPS or loopback development', async () => {
+  const originalFetch = globalThis.fetch;
+  const request = () => new Request('https://signer.internal/v1/sign', {
+    method: 'POST', headers: { authorization: 'Bearer review-test-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ intentId: 'intent-transport' }),
+  });
+  const observed: Array<{ url: string; authorization: string | null }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    observed.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
+    return new Response('stubbed service unavailable', { status: 503 });
+  }) as typeof fetch;
+  try {
+    for (const origin of ['http://control.example', 'https://control.example', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://[::1]:5173']) {
+      observed.length = 0;
+      await signer.fetch(request(), {
+        ARTIFACTS: {} as R2Bucket, SIGNER_TOKEN: 'review-test-token', CONTROL_TOKEN: 'dummy-control-token',
+        CONTROL_ORIGIN: origin, PUBLIC_ORIGIN: 'https://omapkg.example', KEY_ID: 'test',
+        OPR_SIGNING_PRIVATE_KEY_B64: btoa(generatedKey.privateKey),
+      });
+      expect(observed).toEqual(origin === 'http://control.example' ? [] : [{
+        url: `${origin}/api/internal/signing-intents/intent-transport`, authorization: 'Bearer dummy-control-token',
+      }]);
+    }
+    observed.length = 0;
+    await signer.fetch(request(), {
+      ARTIFACTS: {} as R2Bucket, SIGNER_TOKEN: 'review-test-token', CONTROL_TOKEN: 'dummy-control-token',
+      CONTROL_ORIGIN: 'https://control.example', PUBLIC_ORIGIN: 'https://omapkg.example', KEY_ID: 'test',
+      OPR_SIGNING_PRIVATE_KEY_B64: '', SIGNING_MODE: 'managed-kms',
+      KMS_SIGNER_URL: 'http://kms.example', KMS_SIGNER_TOKEN: 'dummy-kms-token',
+    });
+    expect(observed).toHaveLength(0);
+  } finally { globalThis.fetch = originalFetch; }
+});

@@ -1,0 +1,223 @@
+.filter-bar {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-bottom: var(--space-xl);
+  min-width: 0;
+}
+
+.filter-bar .field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.field {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.field label,
+.field__label {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.field input,
+.field select,
+.field textarea {
+  background: var(--color-surface);
+  border: var(--border-width) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-strong);
+  min-height: 2.9em;
+  padding: 0 var(--space-sm);
+  width: 100%;
+}
+
+.field textarea {
+  min-height: 7rem;
+  padding-block: var(--space-sm);
+  resize: vertical;
+}
+
+.field input:hover,
+.field select:hover,
+.field textarea:hover {
+  background: var(--color-surface-raised);
+}
+
+.field__hint {
+  color: var(--color-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  min-height: 1lh;
+}
+
+.field__hint--success {
+  color: var(--color-positive);
+}
+
+.field__hint--danger {
+  color: var(--color-danger);
+}
+
+.field__error {
+  color: var(--color-danger);
+}
+
+.consent-check {
+  align-items: flex-start;
+  color: var(--color-text-muted);
+  display: flex;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  gap: var(--space-sm);
+  line-height: 1.5;
+}
+
+.consent-check input {
+  accent-color: var(--color-accent);
+  flex: none;
+  height: 1.1rem;
+  margin: 0.2rem 0 0;
+  width: 1.1rem;
+}
+
+.sr-only {
+  clip: rect(0, 0, 0, 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  position: absolute;
+  width: 1px;
+}
+
+.form-grid {
+  display: grid;
+  gap: var(--space-lg);
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.form-grid .field--full {
+  grid-column: 1 / -1;
+}
+
+.team-grant-form,
+.team-grant-form__fields {
+  display: grid;
+  gap: var(--space-lg);
+  min-width: 0;
+}
+
+.team-grant-form__fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.team-checkboxes {
+  border: var(--border-width) solid var(--color-rule);
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.team-checkboxes legend {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  padding-inline: var(--space-xs);
+  text-transform: uppercase;
+}
+
+.team-option {
+  align-items: flex-start;
+  background: var(--color-canvas-deep);
+  border: var(--border-width) solid var(--color-rule-soft);
+  display: flex;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-sm);
+}
+
+.team-option input {
+  accent-color: var(--color-accent);
+  flex: none;
+  height: 1.1rem;
+  margin: 0.2rem 0 0;
+  width: 1.1rem;
+}
+
+.team-option__copy {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+.team-option__copy strong {
+  color: var(--color-text-strong);
+}
+
+.team-option__copy span {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.team-grant-form__actions {
+  align-items: center;
+  border-top: var(--border-width) solid var(--color-rule);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: space-between;
+  min-width: 0;
+  padding-top: var(--space-lg);
+}
+
+.team-members,
+.team-actions {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.team-actions form {
+  min-width: 0;
+}
+
+.form-actions {
+  align-items: center;
+  border-top: var(--border-width) solid var(--color-rule);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: space-between;
+  margin-top: var(--space-xl);
+  padding-top: var(--space-lg);
+}
+
+.form-notice {
+  border: var(--border-width) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: var(--space-md);
+}
+
+.form-notice--danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}

@@ -3,7 +3,7 @@ import { audit, now } from '../../src/lib/server/db';
 import type { Actor } from '../../src/lib/model';
 import type { Env } from '../../src/lib/server/env';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { enqueuePublication } from './publication-dispatch';
+import { enqueuePublication, parsePayload, mark } from './publication-dispatch';
 import type { PublicationPayload } from './publication-dispatch';
 
 type WorkflowBinding = {
@@ -17,27 +17,7 @@ type PublicationEnv = Env & {
 };
 
 const SYSTEM_ACTOR: Actor = { id: 'workflow:publication', role: 'admin', areas: [] };
-const BUILD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_BODY = 8 * 1024;
-
-function parsePayload(input: unknown): PublicationPayload {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('publication payload must be an object');
-  const buildId = (input as Record<string, unknown>).buildId;
-  if (typeof buildId !== 'string' || !BUILD_ID.test(buildId)) throw new Error('buildId is required');
-  return { buildId };
-}
-
-async function mark(env: PublicationEnv, buildId: string, status: 'dispatched' | 'completed' | 'failed', error?: string) {
-  await env.DB.prepare(`INSERT INTO publication_jobs(build_id,status,attempts,next_attempt_at,last_error,created_at,updated_at)
-    VALUES(?,?,1,?,?,?,?)
-    ON CONFLICT(build_id) DO UPDATE SET
-      status=CASE WHEN publication_jobs.status='completed' AND excluded.status<>'completed' THEN publication_jobs.status ELSE excluded.status END,
-      attempts=CASE WHEN publication_jobs.status='completed' AND excluded.status<>'completed' THEN publication_jobs.attempts ELSE publication_jobs.attempts+1 END,
-      next_attempt_at=CASE WHEN publication_jobs.status='completed' AND excluded.status<>'completed' THEN publication_jobs.next_attempt_at ELSE excluded.next_attempt_at END,
-      last_error=CASE WHEN publication_jobs.status='completed' AND excluded.status<>'completed' THEN publication_jobs.last_error ELSE excluded.last_error END,
-      updated_at=excluded.updated_at`)
-    .bind(buildId, status, status === 'failed' ? now() + 60 : now(), error?.slice(0, 1_000) ?? null, now(), now()).run();
-}
 
 export async function requeuePublications(envInput: Env, limit = 20): Promise<number> {
   const env = envInput as PublicationEnv;

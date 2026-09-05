@@ -235,7 +235,6 @@ export async function planDependencies(
   }
   const selected = new Map<string, PublishedPackage>();
   const selectedByName = new Map<string, PublishedPackage>();
-  const visiting = new Set<string>();
   const providers = (dependency: ReturnType<typeof parseArchRelation>) => published
     .filter((item) => item.row.architecture === input.architecture && dependency && satisfiesArchRelation(dependency, item.metadata))
     .sort(candidateOrder);
@@ -275,9 +274,7 @@ export async function planDependencies(
       checkConflicts(candidate);
       selected.set(candidate.row.release_id, candidate);
       selectedByName.set(candidate.row.name, candidate);
-      visiting.add(candidate.row.release_id);
       for (const nested of candidate.metadata.depends) resolve(nested, candidate.row.name);
-      visiting.delete(candidate.row.release_id);
     }
   };
 

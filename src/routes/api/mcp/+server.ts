@@ -2,8 +2,7 @@ import { json, type RequestEvent, type RequestHandler } from '@sveltejs/kit';
 import type { Actor, Architecture, Release } from '$lib/model';
 import { audit, query } from '$lib/server/db';
 import { PolicyError, requireMaintainer } from '$lib/server/policy';
-import { publicRelease } from '$lib/server/releases';
-import { finalDescription } from '$lib/server/descriptions';
+import { catalogPage, catalogRelease, stringList } from '$lib/server/catalog';
 import { readBody, requireJsonContentType, WorkerProtocolError } from '$lib/server/workers';
 
 const PROTOCOL = '2026-07-28';
@@ -93,27 +92,10 @@ function requestHeaders(event: RequestEvent, input: RpcRequest): Response | null
   return null;
 }
 
-function publicSources(value: string): Array<{ name: string; url: string; sha256: string }> {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is { name: string; url: string; sha256: string } => {
-      if (!item || typeof item !== 'object') return false;
-      const row = item as Record<string, unknown>;
-      return typeof row.name === 'string' && typeof row.url === 'string' && typeof row.sha256 === 'string';
-    });
-  } catch { return []; }
-}
-
 function publicRow(row: PublicRow, origin: string, includeDev = false) {
-  const release = publicRelease(row, origin, includeDev);
+  const release = catalogRelease(row, origin, includeDev);
   if (!release) return null;
-  return { ...release, description: finalDescription(row, row.name), source: { upstreamUrl: row.upstream_url, files: publicSources(row.source_json) }, license: row.license, dependencies: row.dependencies_json ? parseList(row.dependencies_json) : undefined, explanation: row.explanation };
-}
-
-function parseList(value: string): string[] {
-  try { const parsed: unknown = JSON.parse(value); return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []; }
-  catch { return []; }
+  return { ...release, dependencies: row.dependencies_json ? stringList(row.dependencies_json) : undefined, explanation: row.explanation };
 }
 
 function encodeCursor(offset: number): string {
@@ -155,20 +137,13 @@ async function packageSearch(event: RequestEvent, args: Record<string, unknown>)
   const channel = optionalChannel(args);
   if (args.architecture !== undefined && args.architecture !== 'x86_64' && args.architecture !== 'aarch64') throw new PolicyError(400, 'Invalid architecture filter.');
   if (args.surface !== undefined && args.surface !== 'binary' && args.surface !== 'recipe') throw new PolicyError(400, 'Invalid surface filter.');
-  const filters = ['r.channel=?'];
-  const values: unknown[] = [channel];
-  if (queryText) { filters.push('lower(r.name) LIKE ?'); values.push(`%${queryText.toLowerCase()}%`); }
-  if (args.surface !== undefined) { filters.push('r.surface=?'); values.push(args.surface); }
-  if (args.architecture !== undefined) { filters.push('r.architecture=?'); values.push(args.architecture); }
   const start = decodeCursor(args.cursor);
   const limit = optionalLimit(args.limit);
-  const rows = await query<PublicRow & { row_number: number }>(event.platform!.env.DB, `SELECT * FROM (
-      SELECT r.*,b.artifact_filename,b.artifact_sha256,b.artifact_size,v.sources_json AS source_json,v.license,v.description,v.recipe,v.explanation,q.upstream_url,
-        ROW_NUMBER() OVER (PARTITION BY r.name,r.architecture ORDER BY r.published_at DESC,r.id DESC) AS row_number
-      FROM releases r JOIN builds b ON b.id=r.build_id JOIN revisions v ON v.id=b.revision_id JOIN requests q ON q.id=v.request_id
-      WHERE ${filters.join(' AND ')}
-    ) catalog WHERE row_number=1
-    ORDER BY name COLLATE NOCASE,architecture,published_at DESC,id DESC LIMIT ? OFFSET ?`, ...values, limit + 1, start);
+  const rows = await catalogPage(event.platform!.env.DB, {
+    channel, search: queryText, limit: limit + 1, offset: start,
+    ...(args.surface === 'binary' || args.surface === 'recipe' ? { surface: args.surface } : {}),
+    ...(args.architecture === 'x86_64' || args.architecture === 'aarch64' ? { architecture: args.architecture } : {}),
+  });
   const items = rows.slice(0, limit).map((row) => publicRow(row, event.url.origin, channel === 'dev')).filter(Boolean);
   return { items, nextCursor: rows.length > limit ? encodeCursor(start + limit) : null };
 }
@@ -229,7 +204,7 @@ async function testGet(event: RequestEvent, actor: Actor | null, args: Record<st
     'SELECT attempt,sequence,text,created_at FROM build_logs WHERE build_id=? ORDER BY attempt,sequence LIMIT 500', args.buildId);
   await audit(event.platform!.env.DB, actor!.id, 'mcp.tests_read', args.buildId).run();
   return {
-    buildId: row.id, status: row.status, smokePassed: row.smoke_passed === 1, commands: parseList(row.smoke_commands_json),
+    buildId: row.id, status: row.status, smokePassed: row.smoke_passed === 1, commands: stringList(row.smoke_commands_json),
     error: row.error, startedAt: row.started_at, finishedAt: row.finished_at, logs,
   };
 }

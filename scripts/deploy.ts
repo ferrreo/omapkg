@@ -57,9 +57,9 @@ function productionURL(name: string): string {
   const value = values[name]?.trim() ?? '';
   let url: URL;
   try { url = new URL(value); }
-  catch { throw new Error(`${name} must be an absolute HTTP(S) URL`); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error(`${name} must be an absolute HTTP(S) URL without credentials or query parameters`);
+  catch { throw new Error(`${name} must be an absolute HTTPS URL`); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+    throw new Error(`${name} must be an absolute HTTPS URL without credentials or query parameters`);
   }
   return url.origin;
 }

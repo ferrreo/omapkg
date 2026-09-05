@@ -1,0 +1,238 @@
+@media (min-width: 40rem) {
+  .surface-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid .field--full {
+    grid-column: 1 / -1;
+  }
+
+  .detail-list__row {
+    grid-template-columns: minmax(8rem, 0.6fr) minmax(0, 1.4fr);
+  }
+
+  .audit-event {
+    grid-template-columns: minmax(8rem, 0.7fr) minmax(0, 1.3fr);
+  }
+
+  .audit-event__actor,
+  .audit-event__detail {
+    grid-column: 1 / -1;
+  }
+
+  .site-footer {
+    grid-template-columns: 1fr auto;
+  }
+}
+
+@media (min-width: 64rem) {
+  .public-nav {
+    padding-inline: var(--space-3xl);
+  }
+
+  .public-nav__links {
+    flex: 0 1 auto;
+  }
+
+  .public-intro h1 {
+    font-size: var(--text-md);
+  }
+
+  .section {
+    padding-inline: var(--space-3xl);
+  }
+
+  .surface-grid {
+    gap: var(--space-xl);
+  }
+
+  .manifest-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .filter-bar .field:first-child {
+    flex: 1.5 1 14rem;
+  }
+
+  .dashboard-grid,
+  .detail-grid {
+    grid-template-columns: minmax(0, 1.3fr) minmax(18rem, 0.7fr);
+  }
+
+  .audit-event {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr) minmax(0, 1.5fr) minmax(0, 2fr);
+  }
+
+  .manifest-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .audit-event__actor,
+  .audit-event__detail {
+    grid-column: auto;
+  }
+
+  .maintainer-rail {
+    padding-inline: var(--space-3xl);
+  }
+
+  .maintainer-rail__nav {
+    flex: 0 1 auto;
+  }
+
+  .maintainer-rail__foot {
+    flex: 0 1 auto;
+  }
+
+  .maintainer-topbar {
+    padding-inline: var(--space-3xl);
+  }
+
+  .maintainer-page {
+    padding-inline: var(--space-3xl);
+  }
+
+  .site-footer {
+    padding-inline: var(--space-3xl);
+  }
+}
+
+@media (max-width: 39.99rem) {
+  .public-nav__links a:not(.button) {
+    display: none;
+  }
+
+  .section__head,
+  .maintainer-page__head,
+  .notice-bar,
+  .site-footer {
+    align-items: start;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .public-nav {
+    padding-top: var(--space-lg);
+  }
+
+  .public-intro {
+    padding-inline: var(--space-md);
+  }
+
+  .workflow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow__step {
+    width: 100%;
+  }
+
+  .metric-strip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .metric {
+    min-width: 0;
+  }
+
+  .package-row {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr);
+    padding-right: 3rem;
+    position: relative;
+    row-gap: var(--space-xs);
+  }
+
+  .package-row > * {
+    grid-column: 1;
+    grid-row: auto;
+    justify-self: start;
+  }
+
+  .package-row > svg {
+    grid-column: auto;
+    grid-row: auto;
+    justify-self: auto;
+    position: absolute;
+    right: var(--space-md);
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .data-table {
+    min-width: 42rem;
+  }
+
+  .detail-list__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .form-actions .button {
+    width: 100%;
+  }
+
+  .team-checkboxes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .team-grant-form__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .team-grant-form__actions .button,
+  .team-actions .button {
+    width: 100%;
+  }
+
+  .team-actions,
+  .team-actions form {
+    width: 100%;
+  }
+
+  .release-actions form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .release-actions form.review-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-form .button {
+    width: 100%;
+  }
+
+  .release-promotion-form__controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .release-promotion-form__controls .button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 150ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 150ms !important;
+  }
+}

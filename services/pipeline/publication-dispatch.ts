@@ -15,14 +15,14 @@ type PublicationEnv = Env & {
 
 const BUILD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
-function parsePayload(input: unknown): PublicationPayload {
+export function parsePayload(input: unknown): PublicationPayload {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('publication payload must be an object');
   const buildId = (input as Record<string, unknown>).buildId;
   if (typeof buildId !== 'string' || !BUILD_ID.test(buildId)) throw new Error('buildId is required');
   return { buildId };
 }
 
-async function mark(env: PublicationEnv, buildId: string, status: 'dispatched' | 'completed' | 'failed', error?: string) {
+export async function mark(env: Pick<Env, 'DB'>, buildId: string, status: 'dispatched' | 'completed' | 'failed', error?: string) {
   await env.DB.prepare(`INSERT INTO publication_jobs(build_id,status,attempts,next_attempt_at,last_error,created_at,updated_at)
     VALUES(?,?,1,?,?,?,?)
     ON CONFLICT(build_id) DO UPDATE SET
