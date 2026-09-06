@@ -12,7 +12,7 @@ export const GET: RequestHandler = async (event) => {
   if (!object) error(404, 'Artifact not found.');
   return new Response(event.request.method === 'HEAD' ? null : object.body, { headers: {
     'Content-Type': 'application/octet-stream',
-    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(build.artifact_filename)}`,
+    'Content-Disposition': `attachment; filename="${encodeURIComponent(build.artifact_filename)}"; filename*=UTF-8''${encodeURIComponent(build.artifact_filename)}`,
     'Content-Length': String(object.size),
     'Cache-Control': 'private, no-store',
     ETag: object.httpEtag

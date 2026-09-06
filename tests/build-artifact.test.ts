@@ -23,7 +23,7 @@ test('build artifacts download privately with authorization and missing-object c
     expect(reads).toEqual([]);
     const response = await GET(event());
     expect(await response.text()).toBe('package');
-    expect(response.headers.get('Content-Disposition')).toBe("attachment; filename*=UTF-8''demo.pkg.tar.zst");
+    expect(response.headers.get('Content-Disposition')).toBe(`attachment; filename="demo.pkg.tar.zst"; filename*=UTF-8''demo.pkg.tar.zst`);
     expect(response.headers.get('Content-Type')).toBe('application/octet-stream');
     expect(response.headers.get('Content-Length')).toBe('7');
     expect(response.headers.get('Cache-Control')).toBe('private, no-store');
