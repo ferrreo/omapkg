@@ -456,3 +456,16 @@ test('template recipes bind deterministic shell and reject injected values and c
     expect(() => templateCommands({ id: 'go-v1', binary: 'demo', target })).toThrow();
   }
 });
+
+test('factory cannot emit a candidate when deterministic shell analysis fails', async () => {
+  const value = candidate();
+  let emitted = false;
+  const tool = makeSubmitCandidateTool(value.request, () => { emitted = true; }, () => ({
+    sourceKind: 'archive', upstreamUrl: value.request.upstreamUrl, normalizedUrl: value.sources[0].url,
+    sourceName: value.sources[0].name, sourceSha256: value.sources[0].sha256,
+    upstreamCommit: null, files: [], licenseFiles: [],
+  }), value.buildImages);
+  const harness = { sandbox: { exec: async () => ({ exitCode: 1, stdout: '', stderr: 'SC1072: syntax error' }) } };
+  await expect(tool.run({ data: value, harness } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow('Shell analysis failed');
+  expect(emitted).toBe(false);
+});
