@@ -10,7 +10,7 @@ const reason = v.pipe(v.string(), v.trim(), v.minLength(1), v.maxLength(2000), v
 const architecture = v.picklist(['x86_64', 'aarch64']);
 const schema = v.strictObject({
   schemaVersion: v.literal(1), pkgbase: name,
-  outputs: v.pipe(v.array(name), v.minLength(1), v.maxLength(128)),
+  outputs: v.pipe(v.array(name), v.minLength(1), v.maxLength(256)),
   collection: v.picklist(collections), lane: v.picklist(['system', 'opr']),
   role: v.picklist(['base-system', 'omarchy-default', 'optional', 'build-only']),
   origin: v.picklist(['arch', 'omarchy', 'upstream', 'aur-reference', 'alarm-reference']),
@@ -19,6 +19,8 @@ const schema = v.strictObject({
   license: v.string(), ownerArea: v.picklist(areas),
   architectures: v.pipe(v.array(architecture), v.minLength(1), v.maxLength(2)),
   artifactArchitecture: v.picklist(['any', 'native']),
+  portableOutputs: v.optional(v.pipe(v.array(name), v.maxLength(256))),
+  runtimeGroups: v.optional(v.pipe(v.array(v.pipe(v.array(name), v.minLength(1), v.maxLength(256))), v.minLength(1), v.maxLength(256))),
   architectureExceptions: v.pipe(v.array(v.strictObject({ architecture, reason })), v.maxLength(1)),
   sourceReference: v.nullable(v.strictObject({ url: v.string(), commit: v.pipe(v.string(), v.regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/)) })),
   rebuildOn: v.pipe(v.array(name), v.maxLength(256)),
@@ -49,6 +51,19 @@ export function parseCatalogManifest(input: unknown): CatalogManifest {
   }
   if (new Set(value.outputs).size !== value.outputs.length || new Set(value.architectures).size !== value.architectures.length ||
       new Set(value.rebuildOn).size !== value.rebuildOn.length) throw new PolicyError(400, 'Catalog lists cannot contain duplicate entries.');
+  if (value.portableOutputs && (new Set(value.portableOutputs).size !== value.portableOutputs.length || value.portableOutputs.some((name) => !value.outputs.includes(name)))) {
+    throw new PolicyError(400, 'Portable outputs must be unique names from this package output set.');
+  }
+  value.portableOutputs?.sort();
+  if (value.runtimeGroups) {
+    const covered = new Set(value.runtimeGroups.flat());
+    if (covered.size !== value.outputs.length || value.outputs.some((name) => !covered.has(name)) ||
+        value.runtimeGroups.some((group) => new Set(group).size !== group.length || group.some((name) => !value.outputs.includes(name)))) {
+      throw new PolicyError(400, 'Installation groups must cover every output using only unique names from this package.');
+    }
+    value.runtimeGroups = value.runtimeGroups.map((group) => group.sort()).sort((a, b) => a.join(' ') < b.join(' ') ? -1 : a.join(' ') > b.join(' ') ? 1 : 0);
+    if (new Set(value.runtimeGroups.map((group) => group.join(' '))).size !== value.runtimeGroups.length) throw new PolicyError(400, 'Installation groups cannot repeat.');
+  }
   const exceptions = new Set(value.architectureExceptions.map((entry) => entry.architecture));
   if (value.architectures.some((arch) => exceptions.has(arch)) ||
       requiredArchitectures.some((arch) => !value.architectures.includes(arch) && !exceptions.has(arch))) {
@@ -153,6 +168,8 @@ export function catalogManifestFromForm(form: FormData): CatalogManifest {
     role: text('role'), origin: text('origin'), upstreamUrl: text('upstreamUrl'), sourceKind: text('sourceKind'),
     description: text('description'), license: text('license'), ownerArea: text('ownerArea'), architectures,
     artifactArchitecture: text('artifactArchitecture'), rebuildOn: list('rebuildOn'),
+    ...(list('portableOutputs').length ? { portableOutputs: list('portableOutputs') } : {}),
+    ...(text('runtimeGroups').trim() ? { runtimeGroups: text('runtimeGroups').trim().split(/\r?\n/).filter((line) => line.trim()).map((line) => line.trim().split(/[\s,]+/)) } : {}),
     architectureExceptions: requiredArchitectures.filter((architecture) => !architectures.includes(architecture))
       .map((architecture) => ({ architecture, reason: text(`exception_${architecture}`) })),
     sourceReference: text('referenceUrl') || text('referenceCommit') ? { url: text('referenceUrl'), commit: text('referenceCommit') } : null,

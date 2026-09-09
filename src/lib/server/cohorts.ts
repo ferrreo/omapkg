@@ -6,6 +6,7 @@ import type { Actor, Revision } from '../model';
 import { getCatalogPackage, humanMaintainer, parseCatalogManifest, reviewReason } from './catalog-ownership';
 import { audit, now, query, sha256 } from './db';
 import { PolicyError } from './policy';
+import { reviewedPackageVersion } from './build-outputs';
 
 const digest = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/));
 const identifier = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/));
@@ -79,7 +80,7 @@ export async function cohortManifest(db: D1Database, actor: Actor | null, input:
       if (canonicalJson([...new Set(JSON.parse(revision.architectures_json) as string[])].sort()) !== canonicalJson(policy.architectures)) {
         throw new PolicyError(409, `${member.pkgbase}: recipe targets do not match the catalog policy.`);
       }
-      recipe = { id: revision.id, manifestSha256: revision.manifest_sha256, fullVersion: `${revision.version}-${revision.pkgrel ?? 1}`, requestId: revision.request_id };
+      recipe = { id: revision.id, manifestSha256: revision.manifest_sha256, fullVersion: reviewedPackageVersion(revision), requestId: revision.request_id };
     }
     members.push({ pkgbase: member.pkgbase, catalogRevision: record.revision, catalogSha256: record.manifest_sha256,
       policy, recipe, cause: member.cause, reason: member.reason });

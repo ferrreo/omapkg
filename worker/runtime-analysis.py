@@ -18,6 +18,8 @@ def inspect(filename):
     if package is None:
         raise ValueError("Cannot read native package metadata")
     elf_files = []
+    native_code = []
+    payload = {}
     findings = []
 
     def record(level, messages):
@@ -33,10 +35,27 @@ def inspect(filename):
 
     with tarfile.open(filename, "r") as archive:
         for entry in archive:
+            name = entry.name.rstrip("/")
+            if name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/")) or name in payload:
+                raise ValueError("Duplicate or unsafe package path")
+            if len(payload) >= 100000:
+                raise ValueError("Package payload inventory exceeds 100,000 entries")
+            digest = None
+            if entry.isfile():
+                with archive.extractfile(entry) as source:
+                    digest = hashlib.file_digest(source, "sha256").hexdigest()
+            payload[name] = [name, entry.type.decode("ascii"), entry.mode, entry.uid, entry.gid, entry.linkname, digest]
             if not entry.isfile():
                 continue
             with archive.extractfile(entry) as source:
-                if source.read(4) != b"\x7fELF":
+                magic = source.read(8)
+                if magic.startswith((b"\x7fELF", b"MZ", b"!<arch>\n", b"!<thin>\n")) or magic[:4] in (
+                    b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+                ) or (magic[:4] == b"\xca\xfe\xba\xbe" and 1 <= int.from_bytes(magic[4:8], "big") <= 32) or (magic[:4] == b"\xbe\xba\xfe\xca" and 1 <= int.from_bytes(magic[4:8], "little") <= 32):
+                    native_code.append(entry.name)
+                    if len(native_code) > 4096:
+                        raise ValueError("Native code inventory exceeds limit")
+                if magic[:4] != b"\x7fELF":
                     continue
                 source.seek(0)
                 elf = ELFFile(source)
@@ -72,8 +91,11 @@ def inspect(filename):
             record(level, messages)
     if len(findings) > 1024:
         raise ValueError("Dependency findings exceed limit")
-    return dict(schemaVersion=1, tool="namcap", toolVersion=Namcap.version.get_version(),
-                elf=elf_files, findings=findings, runtimeClosureComplete=False,
+    # Build environment metadata differs across native targets. Keep its exact
+    # bytes in the package hash; compare installable payload independently.
+    payload_json = json.dumps([payload[name] for name in sorted(payload) if name not in (".BUILDINFO", ".MTREE")], separators=(",", ":"), ensure_ascii=False)
+    return dict(schemaVersion=1, tool="namcap", toolVersion=Namcap.version.get_version(), payloadSha256=hashlib.sha256(payload_json.encode()).hexdigest(),
+                elf=elf_files, nativeCode=native_code, findings=findings, runtimeClosureComplete=False,
                 unknowns=["unexercised dlopen", "plugins", "runtime-selected subprocesses", "data paths"])
 
 

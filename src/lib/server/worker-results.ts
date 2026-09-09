@@ -1,9 +1,11 @@
 import type { Worker } from '../model';
-import { now, sha256 } from './db';
+import { id, now, sha256 } from './db';
 import { parsePackageMetadata, archRelationCovers } from './arch';
 import { type DependencyPlan, parseDependencyPlan, dependencyPlansEqual } from './dependency-plan';
 import { assertRuntimeEvidence, reviewedRuntimeExceptions } from './runtime-evidence';
 import { blockerStatements, parseDependencyBlockers } from './dependency-blockers';
+import { artifactInsert, assertExpectedFilename, buildArtifacts, sameArtifacts, storedOutputContract, MAX_BUILD_OUTPUTS } from './build-outputs';
+import { verifyOutputProvenance } from './build-output-evidence';
 import {
   type WorkerMetadata,
   requireLeaseToken,
@@ -134,7 +136,11 @@ export function validateArtifactFilename(value: unknown): string {
 
 function artifactMatches(left: ArtifactReference | null, right: ArtifactReference | null): boolean {
   if (!left || !right) return left === right;
-  return left.key === right.key && left.sha256 === right.sha256 && left.size === right.size && left.filename === right.filename;
+  return left.key === right.key && artifactBytesMatch(left, right);
+}
+
+function artifactBytesMatch(left: ArtifactReference, right: ArtifactReference): boolean {
+  return left.sha256 === right.sha256 && left.size === right.size && left.filename === right.filename;
 }
 
 export async function uploadArtifact(
@@ -151,18 +157,39 @@ export async function uploadArtifact(
   const token = requireLeaseToken(leaseToken);
   const build = await requireLease(db, buildId, worker.id, token);
   if (build.revision_surface !== 'binary') throw new WorkerProtocolError(409, 'Recipe builds cannot upload artifacts');
+  assertExpectedFilename(build, filename);
   const digest = await sha256(body);
   const reference: ArtifactReference = {
-    key: `private/builds/${build.id}/attempt-${build.attempt}/${digest}-${filename}`,
+    key: `private/builds/${build.id}/attempt-${build.attempt}/upload-${id()}/${digest}-${filename}`,
     sha256: digest,
     size: body.byteLength,
     filename
   };
+  if (storedOutputContract(build)) {
+    if (!body.byteLength) throw new WorkerProtocolError(400, 'Artifact must not be empty');
+    const existing = (await buildArtifacts(db, build)).find((item) => item.filename === filename);
+    if (existing) {
+      if (!artifactBytesMatch(existing, reference)) throw new WorkerProtocolError(409, 'Build output already has different bytes');
+      return existing;
+    }
+    try { await bucket.put(reference.key, body, { customMetadata: { buildId: build.id, sha256: digest } }); }
+    catch { throw new WorkerProtocolError(503, 'Artifact storage unavailable'); }
+    const timestamp = now();
+    try { await db.batch([artifactInsert(db, build, worker.id, token, reference, timestamp),
+      db.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at)
+        SELECT ?,'worker.artifact_uploaded',?,?,? WHERE changes()=1`)
+        .bind(`worker:${worker.id}`, build.id, JSON.stringify({ attempt: build.attempt, ...reference }), timestamp)]); }
+    catch (cause) { return databaseFailure(cause); }
+    const saved = (await buildArtifacts(db, build)).find((item) => item.filename === filename);
+    if (saved?.key !== reference.key) await bucket.delete(reference.key).catch(() => undefined);
+    if (!saved || !artifactBytesMatch(saved, reference)) throw new WorkerProtocolError(409, 'Worker output upload is fenced or conflicts');
+    return saved;
+  }
   const existing = build.artifact_key && build.artifact_sha256 !== null && build.artifact_size !== null && build.artifact_filename
     ? { key: build.artifact_key, sha256: build.artifact_sha256, size: build.artifact_size, filename: build.artifact_filename }
     : null;
   if (existing) {
-    if (!artifactMatches(existing, reference)) throw new WorkerProtocolError(409, 'Build already has a different artifact');
+    if (!artifactBytesMatch(existing, reference)) throw new WorkerProtocolError(409, 'Build already has a different artifact');
     return existing;
   }
   try {
@@ -182,7 +209,7 @@ export async function uploadArtifact(
         .bind(`worker:${worker.id}`, build.id, JSON.stringify({ attempt: build.attempt, sha256: digest, size: body.byteLength }), timestamp)
     ]);
   } catch (cause) {
-    await bucket.delete(reference.key).catch(() => undefined);
+    // ponytail: retain private bytes after an uncertain commit; prune only after attempt retention expires.
     return databaseFailure(cause);
   }
   const updated = await getBuildForWorker(db, build.id, worker.id);
@@ -193,7 +220,8 @@ export async function uploadArtifact(
     await bucket.delete(reference.key).catch(() => undefined);
     throw new WorkerProtocolError(409, 'Worker lease is fenced');
   }
-  if (!artifactMatches(uploaded, reference)) {
+  if (uploaded.key !== reference.key) await bucket.delete(reference.key).catch(() => undefined);
+  if (!artifactBytesMatch(uploaded, reference)) {
     await bucket.delete(reference.key).catch(() => undefined);
     throw new WorkerProtocolError(409, 'Build already has a different artifact');
   }
@@ -220,7 +248,7 @@ function parseInstalledSize(value: unknown): number {
 
 function parseCompleteInput(value: unknown): CompleteInput {
   const object = requireObject(value);
-  requireExactKeys(object, ['leaseToken', 'status', 'installedSize', 'error', 'artifact', 'provenance', 'provenanceSignature', 'smokePassed', 'dependencyBlockers']);
+  requireExactKeys(object, ['leaseToken', 'status', 'installedSize', 'error', 'artifact', 'artifacts', 'provenance', 'provenanceSignature', 'smokePassed', 'dependencyBlockers']);
   const leaseToken = requireLeaseToken(object.leaseToken);
   if (object.status !== 'succeeded' && object.status !== 'failed') throw new WorkerProtocolError(400, 'Invalid completion status');
   if (typeof object.smokePassed !== 'boolean') throw new WorkerProtocolError(400, 'Invalid smokePassed');
@@ -228,6 +256,11 @@ function parseCompleteInput(value: unknown): CompleteInput {
   if (object.installedSize !== undefined) result.installedSize = parseInstalledSize(object.installedSize);
   if (object.error !== undefined && object.error !== null) result.error = requireString(object.error, 'error', 16 * 1024);
   if (object.artifact !== undefined && object.artifact !== null) result.artifact = parseArtifactReference(object.artifact);
+  if (object.artifacts !== undefined) {
+    if (!Array.isArray(object.artifacts) || !object.artifacts.length || object.artifacts.length > MAX_BUILD_OUTPUTS) throw new WorkerProtocolError(400, 'Invalid output artifacts');
+    result.artifacts = object.artifacts.map(parseArtifactReference);
+    if (new Set(result.artifacts.map((item) => item.filename)).size !== result.artifacts.length) throw new WorkerProtocolError(400, 'Duplicate output artifacts');
+  }
   if (object.provenance !== undefined && object.provenance !== null) result.provenance = requireString(object.provenance, 'provenance', 512 * 1024);
   if (object.provenanceSignature !== undefined && object.provenanceSignature !== null) {
     const signature = decodeBase64(object.provenanceSignature, 'provenanceSignature');
@@ -350,13 +383,14 @@ async function verifyStoredArtifact(bucket: R2Bucket, artifact: ArtifactReferenc
   }
 }
 
-function terminalCompletionMatches(build: WorkerLease, input: CompleteInput, stored: ArtifactReference | null): boolean {
+function terminalCompletionMatches(build: WorkerLease, input: CompleteInput, stored: ArtifactReference | null, outputs: ArtifactReference[] | null): boolean {
   if (build.status !== input.status || build.lease_token !== input.leaseToken) return false;
   if (input.status === 'failed') {
-    return input.installedSize === undefined && !input.artifact && !input.provenance && !input.provenanceSignature &&
+    return input.installedSize === undefined && !input.artifact && !input.artifacts && !input.provenance && !input.provenanceSignature &&
       !input.smokePassed && (build.error ?? undefined) === input.error;
   }
-  return input.smokePassed && input.installedSize === (build.installed_size ?? undefined) && artifactMatches(input.artifact ?? null, stored) && build.provenance === input.provenance && build.provenance_signature === input.provenanceSignature;
+  const artifactsMatch = outputs ? !input.artifact && sameArtifacts(input.artifacts ?? [], outputs) : !input.artifacts && artifactMatches(input.artifact ?? null, stored);
+  return input.smokePassed && input.installedSize === (build.installed_size ?? undefined) && artifactsMatch && build.provenance === input.provenance && build.provenance_signature === input.provenanceSignature;
 }
 
 export async function completeJob(
@@ -373,14 +407,17 @@ export async function completeJob(
   if (input.status !== 'failed' && blockers.length) throw new WorkerProtocolError(400, 'Successful completion cannot contain dependency blockers');
   if (blockers.some((item) => item.phase === 'factory')) throw new WorkerProtocolError(400, 'Workers cannot report factory blockers');
   const blockersJSON = blockers.length ? JSON.stringify(blockers) : null;
-  if (input.status === 'failed' && (input.installedSize !== undefined || input.artifact || input.provenance || input.provenanceSignature || input.smokePassed)) {
+  if (input.status === 'failed' && (input.installedSize !== undefined || input.artifact || input.artifacts || input.provenance || input.provenanceSignature || input.smokePassed)) {
     throw new WorkerProtocolError(400, 'Failed completion contains success evidence');
   }
   const current = await getBuildForWorker(db, buildId, worker.id);
   if (!current || current.lease_token !== input.leaseToken) throw new WorkerProtocolError(409, 'Worker lease is fenced');
   const currentArtifact = storedArtifact(current);
+  const outputContract = storedOutputContract(current);
+  const outputs = outputContract ? await buildArtifacts(db, current) : [];
+  if (input.artifacts && !outputContract) throw new WorkerProtocolError(409, 'Output set requires a v2 lease');
   if (current.status === 'succeeded' || current.status === 'failed') {
-    if (terminalCompletionMatches(current, input, currentArtifact) && (current.dependency_blockers_json ?? null) === blockersJSON) return { status: current.status, idempotent: true };
+    if (terminalCompletionMatches(current, input, currentArtifact, outputContract ? outputs : null) && (current.dependency_blockers_json ?? null) === blockersJSON) return { status: current.status, idempotent: true };
     throw new WorkerProtocolError(409, 'Build already completed');
   }
   const build = await requireLease(db, buildId, worker.id, input.leaseToken);
@@ -390,15 +427,19 @@ export async function completeJob(
     if (build.revision_surface === 'binary' && input.installedSize === undefined) {
       throw new WorkerProtocolError(400, 'Successful binary completion requires installedSize');
     }
-    if (build.revision_surface === 'binary') {
+    if (outputContract) {
+      if (input.artifact || !input.artifacts || !sameArtifacts(input.artifacts, outputs)) throw new WorkerProtocolError(409, 'Completion output set does not match uploads');
+      for (const output of outputs) await verifyStoredArtifact(bucket, output);
+    } else if (build.revision_surface === 'binary') {
       if (!artifact || !input.artifact || !artifactMatches(input.artifact, artifact)) throw new WorkerProtocolError(409, 'Completion artifact does not match upload');
       await verifyStoredArtifact(bucket, artifact);
     } else if (artifact || input.artifact) {
       throw new WorkerProtocolError(409, 'Recipe completion cannot contain an artifact');
     }
     if (!input.provenance || !input.provenanceSignature) throw new WorkerProtocolError(400, 'Successful completion requires provenance');
-    await verifyProvenance(worker, build, artifact, input.provenance, input.provenanceSignature, input.installedSize);
-  } else if (input.installedSize !== undefined || input.smokePassed || input.artifact || input.provenance || input.provenanceSignature) {
+    if (outputContract) await verifyOutputProvenance(worker, build, outputs, input.provenance, input.provenanceSignature, input.installedSize);
+    else await verifyProvenance(worker, build, artifact, input.provenance, input.provenanceSignature, input.installedSize);
+  } else if (input.installedSize !== undefined || input.smokePassed || input.artifact || input.artifacts || input.provenance || input.provenanceSignature) {
     throw new WorkerProtocolError(400, 'Failed completion contains success evidence');
   }
   const timestamp = now();

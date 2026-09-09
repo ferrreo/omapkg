@@ -118,7 +118,10 @@ test('cohort publication cannot fall through per-build path and native omissions
       .bind(`approval-${kind}`, revision.id, actor, kind, revision.manifest_sha256).run();
     await changeCohortPhase(service, owner, cohort.id, phaseInput(current, 'advance'));
     current = await getCohort(d1, cohort.id);
-    expect((await claimJob(d1, worker))?.id).toBe('cohort-build');
+    expect(await claimJob(d1, worker)).toBeNull();
+    const leased = await claimJob(d1, worker, { version: 'test-v2', runtime: 'podman', capabilities: ['multi-output-v2'] });
+    expect(leased?.id).toBe('cohort-build');
+    expect(leased?.outputContract?.outputs).toEqual([{ name: 'example', fullVersion: '2.0-1', architecture: 'x86_64' }]);
     await changeCohortPhase(service, owner, cohort.id, phaseInput(current, 'hold'));
     db.exec("UPDATE builds SET lease_expires_at=1 WHERE id='cohort-build'");
     expect(await claimJob(d1, worker)).toBeNull();
@@ -127,7 +130,7 @@ test('cohort publication cannot fall through per-build path and native omissions
     current = await getCohort(d1, cohort.id);
     const gate = await evaluateCohortGate(service, current);
     expect(gate.blockers.filter((item) => item.code === 'native-build').map((item) => item.architecture).sort()).toEqual(['aarch64', 'x86_64']);
-    db.exec("UPDATE builds SET status='succeeded' WHERE id='cohort-build'");
+    db.exec("UPDATE builds SET status='succeeded',finished_at=unixepoch() WHERE id='cohort-build'");
     expect(await enqueuePublication(service, 'cohort-build')).toEqual({ id: 'cohort-native-transition', dispatched: false });
     expect(db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').first<{ count: number }>()?.count).toBe(0);
     expect(() => db.prepare(`INSERT INTO releases(id,build_id,name,version,architecture,surface,channel,recipe_key,sbom_key,provenance_key,published_at)

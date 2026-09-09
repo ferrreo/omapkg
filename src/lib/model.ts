@@ -27,6 +27,7 @@ export interface Build {
   artifact_filename: string | null; installed_size: number | null; dependency_plan_json: string | null; provenance: string | null; provenance_signature: string | null;
   smoke_passed: number; error: string | null; created_at: number; started_at: number | null; finished_at: number | null;
   dependency_blockers_json?: string | null;
+  output_contract_json?: string | null;
 }
 export interface Worker {
   id: string; name: string; architecture: Architecture; public_key: string;

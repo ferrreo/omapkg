@@ -244,3 +244,34 @@ test('a reclaimed build can replace an upload from an expired worker lease', asy
     holder.close();
   }
 });
+
+test('v2 multipart outputs remain distinct, immutable and fenced to their attempt', async () => {
+  const { holder, db, worker } = await workerFixture();
+  const bucket = new MultipartBucket();
+  try {
+    const body = new Uint8Array([1, 2, 3, 4]); const digest = await sha256(body);
+    const seeded = await buildFixture(db, body.length, digest);
+    const job = (await claimJob(db, worker))!;
+    const contract = { schemaVersion: 2, cohort: { id: 'upload-cohort', revision: 1, manifestSha256: 'c'.repeat(64) }, outputs: [
+      { name: 'chunked', fullVersion: '2:1.0-1', architecture: 'x86_64' }, { name: 'chunked-docs', fullVersion: '2:1.0-1', architecture: 'any' },
+    ], runtimeGroups: [['chunked', 'chunked-docs']] };
+    // Fixture supplies a new lease with the same storage contract used by claimJob.
+    await db.prepare("UPDATE builds SET status='queued' WHERE id=?").bind(job.id).run();
+    await db.prepare("UPDATE builds SET status='leased',output_contract_json=? WHERE id=?").bind(JSON.stringify(contract), job.id).run();
+    const filenames = ['chunked-2:1.0-1-x86_64.pkg.tar.zst', 'chunked-docs-2:1.0-1-any.pkg.tar.zst'];
+    let previousUpload = '';
+    for (const filename of filenames) {
+      const input = { leaseToken: job.leaseToken, filename, size: body.length, sha256: digest };
+      const upload = activeUpload(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, job.id, input));
+      await uploadMultipartPart(db, bucket as unknown as R2Bucket, worker, job.id, upload.uploadId, 1, job.leaseToken, body);
+      const result = await completeMultipartUpload(db, bucket as unknown as R2Bucket, worker, job.id, upload.uploadId, { leaseToken: job.leaseToken });
+      expect(result.filename).toBe(filename);
+      expect(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, job.id, input)).toEqual({ completed: result });
+      previousUpload = upload.uploadId;
+    }
+    expect((await db.prepare('SELECT COUNT(*) AS count FROM build_artifacts WHERE build_id=?').bind(job.id).first<{ count: number }>())?.count).toBe(2);
+    expect((await db.prepare('SELECT artifact_key FROM builds WHERE id=?').bind(job.id).first<{ artifact_key: string | null }>())?.artifact_key).toBeNull();
+    await db.prepare("UPDATE builds SET attempt=attempt+1 WHERE id=?").bind(job.id).run();
+    await expect(completeMultipartUpload(db, bucket as unknown as R2Bucket, worker, job.id, previousUpload, { leaseToken: job.leaseToken })).rejects.toThrow('fenced');
+  } finally { holder.close(); }
+});

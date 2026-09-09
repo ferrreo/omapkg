@@ -79,6 +79,7 @@ var supportedWorkerCapabilities = [...]string{
 	"multipart-upload",
 	"registry-pull",
 	"runtime-analysis-v1",
+	"multi-output-v2",
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {
@@ -132,6 +133,8 @@ type DependencyPackage struct {
 }
 
 type Job struct {
+	OutputContract      *outputContract    `json:"outputContract,omitempty"`
+	Attempt             int64              `json:"attempt,omitempty"`
 	ID                  string             `json:"id"`
 	LeaseToken          string             `json:"leaseToken"`
 	LeaseExpiresAt      string             `json:"leaseExpiresAt"`
@@ -231,6 +234,7 @@ type CompleteRequest struct {
 	DependencyBlockers  []dependencyBlocker `json:"dependencyBlockers,omitempty"`
 	Error               string              `json:"error,omitempty"`
 	Artifact            *Artifact           `json:"artifact,omitempty"`
+	Artifacts           []Artifact          `json:"artifacts,omitempty"`
 	Provenance          string              `json:"provenance,omitempty"`
 	ProvenanceSignature string              `json:"provenanceSignature,omitempty"`
 	InstalledSize       *int64              `json:"installedSize,omitempty"`
@@ -382,6 +386,9 @@ func validArchDependency(value string) bool {
 }
 
 func validateJob(job Job, cfg Config) error {
+	if err := validateOutputContract(job); err != nil {
+		return err
+	}
 	if !idPattern.MatchString(job.ID) || job.LeaseToken == "" || job.RevisionID == "" {
 		return errors.New("job has invalid identity or lease")
 	}
@@ -512,7 +519,7 @@ func imageReferenceForJob(job Job, cfg Config) (string, error) {
 }
 
 func validateArtifactFilename(filename string) error {
-	if len(filename) > 128 || !namePattern.MatchString(filename) || path.Base(filename) != filename || !strings.HasSuffix(filename, ".pkg.tar.zst") {
+	if len(filename) > 233 || !dependencyFilenamePattern.MatchString(filename) || path.Base(filename) != filename {
 		return errors.New("artifact filename must be a safe .pkg.tar.zst basename")
 	}
 	return nil

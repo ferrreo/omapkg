@@ -28,6 +28,8 @@ type runtimeAnalysis struct {
 	Tool                   string             `json:"tool"`
 	ToolVersion            string             `json:"toolVersion"`
 	ELF                    []json.RawMessage  `json:"elf"`
+	NativeCode             *[]string          `json:"nativeCode,omitempty"`
+	PayloadSHA256          string             `json:"payloadSha256,omitempty"`
 	Findings               []analysisFinding  `json:"findings"`
 	RuntimeClosureComplete bool               `json:"runtimeClosureComplete"`
 	Unknowns               []string           `json:"unknowns"`

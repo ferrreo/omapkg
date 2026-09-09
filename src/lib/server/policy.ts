@@ -4,6 +4,7 @@ import { sha256 } from './db';
 import { isArchPkgver, parseArchDependency } from './arch';
 import { normalizeRequestDescription } from './descriptions';
 import { validateRecipePolicy } from '../../../services/pipeline/recipe-policy';
+import { reviewedPackageVersion } from './build-outputs';
 import { externalPackageSource } from '../distribution';
 
 export class PolicyError extends Error {
@@ -222,4 +223,6 @@ export async function validateRevision(revision: Revision) {
   if (lint.passed !== true) throw new PolicyError(409, 'Factory lint must pass before approval.');
   try { await validateRecipePolicy(revision); }
   catch (cause) { throw new PolicyError(409, cause instanceof Error ? cause.message : 'Recipe policy is invalid.'); }
+  try { reviewedPackageVersion(revision); }
+  catch (cause) { throw new PolicyError(409, cause instanceof Error ? cause.message : 'Package version is invalid.'); }
 }

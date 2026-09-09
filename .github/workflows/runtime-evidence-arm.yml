@@ -11,6 +11,14 @@ on:
         description: Immutable rollout tag
         required: true
         type: string
+      builder_image:
+        description: Existing digest-pinned ARM builder (supply with runtime_image to run regression without rebuilding images)
+        required: false
+        type: string
+      runtime_image:
+        description: Existing digest-pinned ARM runtime for regression
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -32,6 +40,7 @@ jobs:
         with:
           go-version-file: worker/go.mod
       - name: Build signature-verified ARM images
+        if: ${{ inputs.builder_image == '' && inputs.runtime_image == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -44,6 +53,7 @@ jobs:
           docker build -t "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG" \
             -f worker/images/aarch64/runtime.Dockerfile "$OPR_ARM_WORKDIR/context"
       - name: Push images with temporary rollout credential
+        if: ${{ inputs.builder_image == '' && inputs.runtime_image == '' }}
         shell: bash
         env:
           REGISTRY_ROLLOUT_AUTH: ${{ secrets.REGISTRY_ROLLOUT_AUTH }}
@@ -60,6 +70,30 @@ jobs:
           runtime=$(docker image inspect --format '{{index .RepoDigests 0}}' "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG")
           printf 'OPR_WORKER_E2E_IMAGE=%s\nOPR_WORKER_E2E_RUNTIME_IMAGE=%s\n' "$builder" "$runtime" >> "$GITHUB_ENV"
           printf '%s\n%s\n' "$builder" "$runtime"
+      - name: Pull retained images for native regression
+        if: ${{ inputs.builder_image != '' || inputs.runtime_image != '' }}
+        shell: bash
+        env:
+          BUILDER_IMAGE: ${{ inputs.builder_image }}
+          RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+          REGISTRY_NATIVE_TEST_AUTH: ${{ secrets.REGISTRY_NATIVE_TEST_AUTH }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          for image in "$BUILDER_IMAGE" "$RUNTIME_IMAGE"; do
+            [[ "$image" =~ ^registry\.cloudflare\.com/[a-f0-9]{32}/[a-z0-9._-]+@sha256:[a-f0-9]{64}$ ]]
+          done
+          export DOCKER_CONFIG="$RUNNER_TEMP/native-regression-auth"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_NATIVE_TEST_AUTH" > "$DOCKER_CONFIG/config.json"
+          chmod 600 "$DOCKER_CONFIG/config.json"
+          unset REGISTRY_NATIVE_TEST_AUTH
+          docker pull "$BUILDER_IMAGE"
+          docker pull "$RUNTIME_IMAGE"
+          test "$(docker image inspect --format '{{.Architecture}}' "$BUILDER_IMAGE")" = arm64
+          test "$(docker image inspect --format '{{.Architecture}}' "$RUNTIME_IMAGE")" = arm64
+          printf 'OPR_WORKER_E2E_IMAGE=%s\nOPR_WORKER_E2E_RUNTIME_IMAGE=%s\n' "$BUILDER_IMAGE" "$RUNTIME_IMAGE" >> "$GITHUB_ENV"
       - name: Native dependency and isolation regression
         shell: bash
         env:

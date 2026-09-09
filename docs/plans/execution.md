@@ -137,3 +137,53 @@ full dependency/ABI planning, independently reproduced critical builds, signed
 system/OPR/transaction manifests and activation, client/Omarchy integration,
 native boot/upgrade/recovery qualification, full-catalog rebuild coverage,
 operational capacity and human workflow/release/cutover acceptance.
+
+## Native output protocol
+
+Managed binary cohorts now lease an explicit v2 output contract. It binds the
+cohort revision, package identities, full versions, artifact architectures and
+native installation groups. Workers without the capability cannot claim that
+work. V1 jobs and historical v1 verification retain their existing contract.
+
+Each output gets an immutable artifact record under its build attempt. Both
+direct and multipart uploads enforce the expected set; unique upload storage
+keys isolate concurrent writers. Identical retries reuse the winning artifact
+reference. Attempt inputs and terminal results are retained independently of the
+mutable queue row, including the worker key and exact signed report.
+
+The native runner reads each artifact's actual `.PKGINFO`, checks its pkgbase,
+name, full version and architecture, then runs namcap and installation/smoke
+checks for every reviewed group. Conflicting split variants can use separate
+groups; every output must be covered. Mixed native/`any` outputs are supported.
+Portable outputs reject detected native code and carry a payload comparison
+hash; cohort qualification compares that hash across required native targets.
+The hash excludes `.BUILDINFO` and `.MTREE`, while the exact artifact hash still
+binds those build-specific bytes.
+
+The real captured Arch inventory contains 806 split bases. The largest captured
+base, `tesseract-data`, has 129 outputs; `vim`/`gvim` and other split alternatives
+have conflicting installation requirements. Output/admission validation now
+allows up to 256 outputs and explicit, reviewed installation groups instead of
+assuming every split result can be installed together. Transfer and evidence
+limits remain explicit; this does not establish measured capacity for every
+large package.
+
+Native x86 validation passed with four split outputs, an epoch and fractional
+pkgrel, a portable documentation package, a sibling dependency and two conflicting
+variants installed in separate groups. The prior single-output GNU Hello native
+isolation/runtime regression also passed. Application tests cover incomplete or
+changed output sets, missing group tests, native code in an `any` output, stale
+attempts, immutable evidence, private downloads and concurrent uploads. The full
+application suite passes 227 tests; web and pipeline production builds pass.
+
+The maintainer catalog form exposes portable outputs and installation groups;
+the build page shows expected/uploaded outputs and private artifact downloads.
+Fresh ARM regression, browser acceptance of these additions and central v2
+release signing/independent verification remain separate acceptance work. The
+ARM regression workflow can now pull retained pinned images without rebuilding
+or publishing images.
+
+Owned dependency/base/runtime locks are still pending. These successful native
+regressions use the preserved shadow builder/runtime inputs; they are not proof
+of owned-only inputs, full-catalog qualification or readiness to publish a system
+release. Phase verification continues to block on that missing evidence.

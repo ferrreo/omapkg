@@ -39,6 +39,7 @@ func findArtifact(output, packageName string) (string, error) {
 }
 
 type packageMetadata struct {
+	PackageBase   string   `json:"-"`
 	Name          string   `json:"name"`
 	FullVersion   string   `json:"fullVersion"`
 	Architecture  string   `json:"architecture"`
@@ -120,13 +121,18 @@ func parsePackageMetadata(data []byte) (packageMetadata, error) {
 		if !ok {
 			continue
 		}
-		if key == "pkgname" || key == "pkgver" || key == "arch" || key == "size" {
+		if key == "pkgbase" || key == "pkgname" || key == "pkgver" || key == "arch" || key == "size" {
 			if seen[key] {
 				return packageMetadata{}, fmt.Errorf("duplicate .PKGINFO field %q", key)
 			}
 			seen[key] = true
 		}
 		switch key {
+		case "pkgbase":
+			if !packageRelationNamePattern.MatchString(value) {
+				return packageMetadata{}, errors.New("package metadata build identity is invalid")
+			}
+			metadata.PackageBase = value
 		case "pkgname":
 			if !packageRelationNamePattern.MatchString(value) {
 				return packageMetadata{}, errors.New("package metadata package name is invalid")

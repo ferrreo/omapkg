@@ -9,6 +9,7 @@ import {
   validateArtifactFilename
 } from './workers';
 import { audit, id, now, sha256 } from './db';
+import { artifactInsert, assertExpectedFilename, buildArtifacts, storedOutputContract } from './build-outputs';
 
 export const UPLOAD_PART_SIZE = 8 * 1024 * 1024;
 export const MAX_UPLOAD_SIZE = MAX_ARTIFACT_BYTES;
@@ -204,7 +205,8 @@ export async function startMultipartUpload(
   const input = parseStartInput(value);
   const build = await requireWorkerLease(db, worker, buildId, input.leaseToken);
   if (build.revision_surface !== 'binary') throw new WorkerProtocolError(409, 'Build cannot accept an artifact upload');
-  const completed = completedArtifact(build);
+  assertExpectedFilename(build, input.filename);
+  const completed = storedOutputContract(build) ? (await buildArtifacts(db, build)).find((item) => item.filename === input.filename) : completedArtifact(build);
   if (completed) {
     if (completed.filename !== input.filename || completed.sha256 !== input.sha256 || completed.size !== input.size) {
       throw new WorkerProtocolError(409, 'Build already has a different artifact');
@@ -227,7 +229,7 @@ export async function startMultipartUpload(
     await markFailed(db, active, { reason: 'superseded worker lease' });
   }
   const uploadId = id();
-  const objectKey = `private/builds/${build.id}/attempt-${build.attempt}/${input.sha256}-${input.filename}`;
+  const objectKey = `private/builds/${build.id}/attempt-${build.attempt}/upload-${uploadId}/${input.sha256}-${input.filename}`;
   let multipart: R2MultipartUpload;
   try {
     multipart = await bucket.createMultipartUpload(objectKey, { customMetadata: { buildId: build.id, sha256: input.sha256 } });
@@ -429,6 +431,7 @@ export async function completeMultipartUpload(
   const existing = await getUpload(db, buildId, uploadId, worker.id);
   if (!existing || existing.lease_token !== leaseToken) throw new WorkerProtocolError(409, 'Upload lease is fenced');
   const build = await requireWorkerLease(db, worker, buildId, leaseToken);
+  if (existing.attempt !== build.attempt) throw new WorkerProtocolError(409, 'Upload lease is fenced');
   if (existing.status === 'completed') return uploadArtifactReference(existing);
   if (existing.status !== 'active') throw new WorkerProtocolError(409, 'Upload is no longer active');
   assertActiveUpload(existing, worker, build, leaseToken);
@@ -468,7 +471,9 @@ export async function completeMultipartUpload(
   const timestamp = now();
   try {
     await db.batch([
-      db.prepare(`UPDATE builds SET artifact_key = ?, artifact_sha256 = ?, artifact_size = ?, artifact_filename = ?
+      storedOutputContract(build)
+        ? artifactInsert(db, build, worker.id, leaseToken, uploadArtifactReference(existing, actual.sha256, actual.size), timestamp)
+        : db.prepare(`UPDATE builds SET artifact_key = ?, artifact_sha256 = ?, artifact_size = ?, artifact_filename = ?
         WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'leased' AND lease_expires_at > ? AND artifact_key IS NULL
           AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active')
           AND revision_id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = (SELECT request_id FROM revisions current_revision WHERE current_revision.id = builds.revision_id) ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
@@ -483,13 +488,12 @@ export async function completeMultipartUpload(
         .bind(`worker:${worker.id}`, buildId, JSON.stringify({ uploadId, sha256: actual.sha256, size: actual.size, filename: existing.filename }), timestamp)
     ]);
   } catch {
-    await bucket.delete(existing.object_key).catch(() => undefined);
+    // A commit may have succeeded before its response was lost; retain verified bytes for retry.
     await markFailed(db, existing, { reason: 'artifact metadata commit failed' });
     return databaseFailure();
   }
   const completed = await getUpload(db, buildId, uploadId, worker.id);
   if (!completed || completed.status !== 'completed') {
-    await bucket.delete(existing.object_key).catch(() => undefined);
     await markFailed(db, existing, { reason: 'artifact metadata commit was fenced' });
     throw new WorkerProtocolError(409, 'Upload lease is fenced');
   }

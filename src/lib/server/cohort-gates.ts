@@ -10,6 +10,10 @@ import type { Env } from './env';
 import { PolicyError, requireSecurity, validateRevision } from './policy';
 import { assertAttestation, assertReviewed, joinedBuild } from './release-evidence';
 import { verifyR2Object } from './release-storage';
+import { buildArtifacts, cohortOutputContract, storedOutputContract } from './build-outputs';
+import { verifyOutputProvenance } from './build-output-evidence';
+import { getBuildForWorker } from './worker-protocol';
+import type { Worker } from '../model';
 
 export interface CohortMatrixRow {
   pkgbase: string; architecture: Architecture; required: boolean; status: string;
@@ -102,6 +106,7 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
       gate.fences.push(authorityFence(env.DB, review.actor, review.kind, member.policy.ownerArea));
     }
     if (phaseIndex < 2) continue;
+    const portablePayloads = new Map<string, string>();
     for (const architecture of member.policy.architectures) {
       const build = builds.find((row) => row.architecture === architecture);
       const buildLink = build ? `/maintain/builds/${encodeURIComponent(build.id)}` : requestLink;
@@ -112,14 +117,27 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
       try {
         const joined = await joinedBuild(env, build.id);
         await assertReviewed(joined, env);
-        await assertAttestation(joined, env);
-        if (revision.surface === 'binary') {
-          if (member.policy.outputs.length !== 1 || member.policy.outputs[0] !== member.pkgbase || member.policy.artifactArchitecture !== 'native') {
-            throw new PolicyError(409, 'This output set requires multi-output build evidence. Single-output evidence cannot qualify it.');
+        if (build.output_contract_json) {
+          const worker = build.worker_id ? await env.DB.prepare('SELECT * FROM workers WHERE id=?').bind(build.worker_id).first<Worker>() : null;
+          const lease = worker ? await getBuildForWorker(env.DB, build.id, worker.id) : null;
+          if (!worker || worker.status !== 'active' || !lease || !build.provenance || !build.provenance_signature) throw new PolicyError(409, 'Native worker output evidence is missing.');
+          const contract = storedOutputContract(lease);
+          const expected = await cohortOutputContract(env.DB, { ...revision, pkgrel: revision.pkgrel ?? 1 }, architecture);
+          if (canonicalJson(contract) !== canonicalJson(expected)) throw new PolicyError(409, 'Output evidence belongs to a different cohort revision.');
+          const artifacts = await buildArtifacts(env.DB, lease);
+          await verifyOutputProvenance(worker, lease, artifacts, build.provenance, build.provenance_signature, build.installed_size ?? undefined);
+          if (verifyArtifacts) for (const artifact of artifacts) await verifyR2Object(env, artifact.key, artifact.sha256, artifact.size);
+          const report = JSON.parse(build.provenance) as { outputs: { packageMetadata: { name: string; architecture: string } }[];
+            runtimeTests: { analyses: { name: string; runtimeAnalysis: { payloadSha256: string } }[] }[] };
+          const portable = new Set(report.outputs.filter((output) => output.packageMetadata.architecture === 'any').map((output) => output.packageMetadata.name));
+          for (const analysis of report.runtimeTests.flatMap((test) => test.analyses).filter((item) => portable.has(item.name))) {
+            const previous = portablePayloads.get(analysis.name);
+            if (previous && previous !== analysis.runtimeAnalysis.payloadSha256) throw new PolicyError(409, `Portable output ${analysis.name} differs between native targets.`);
+            portablePayloads.set(analysis.name, analysis.runtimeAnalysis.payloadSha256);
           }
-          if (!build.artifact_key || !build.artifact_sha256 || !build.artifact_size) throw new PolicyError(409, 'Package bytes are missing.');
-          if (verifyArtifacts) await verifyR2Object(env, build.artifact_key, build.artifact_sha256, build.artifact_size);
-        }
+        } else if (revision.surface === 'binary') {
+          throw new PolicyError(409, 'Native binary evidence must bind every output to this exact cohort revision. Rebuild using a v2 worker.');
+        } else await assertAttestation(joined, env);
       } catch (cause) { block('native-evidence', message(cause), member.pkgbase, architecture, buildLink); }
       gate.fences.push(env.DB.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*) FROM builds
         WHERE id=? AND status='succeeded' AND smoke_passed=1 AND artifact_sha256 IS ? AND provenance_signature IS ?`)

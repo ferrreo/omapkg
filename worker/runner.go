@@ -31,6 +31,8 @@ type Runner struct {
 }
 
 type BuildResult struct {
+	Outputs            []buildOutput
+	RuntimeTests       []outputRuntimeTest
 	ArtifactPath       string
 	InstalledSize      int64
 	PackageMetadata    packageMetadata
@@ -248,14 +250,28 @@ func (r *Runner) smoke(ctx context.Context, artifact, jobName, imageRef string, 
 	if len(commands) == 0 {
 		return "", nil
 	}
-	installContainer := containerName(jobName, "smoke-install")
-	installImage := "opr-smoke-" + strings.TrimPrefix(installContainer, "opr-") + ":1"
+	installed, err := r.installOutputs(ctx, []string{artifact}, jobName, imageRef)
+	if err != nil {
+		return installed.log, err
+	}
+	defer installed.cleanup()
+	log, err := r.smokeInstalled(ctx, jobName, installed.ref, commands)
+	return installed.log + log, err
+}
+
+func (r *Runner) installOutputs(ctx context.Context, artifacts []string, jobName, imageRef string) (preparedImage, error) {
+	installContainer := containerName(jobName, "output-install")
+	installImage := "opr-output-" + strings.TrimPrefix(installContainer, "opr-") + ":1"
 	r.removeContainer(installContainer)
 	r.removeImage(installImage)
 	create := r.mutableContainerArgsForImage(installContainer, "none", "", nil, nil, "", imageRef)
 	create = withoutArgument(create, "--rm")
 	create = insertBeforeImage(create, "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER")
-	create = append(create, "/bin/sh", "-ceu", smokeInstallScript())
+	script := smokeInstallScript()
+	if len(artifacts) > 1 {
+		script = strings.Replace(script, "/package.pkg.tar.zst", "/package-*.pkg.tar.zst", 1)
+	}
+	create = append(create, "/bin/sh", "-ceu", script)
 	createArgs := append([]string{"create"}, withoutFirstArgument(create, "run")...)
 	log, err := r.run(ctx, createArgs...)
 	cleanup := func() {
@@ -264,44 +280,53 @@ func (r *Runner) smoke(ctx context.Context, artifact, jobName, imageRef string, 
 	}
 	if err != nil {
 		cleanup()
-		return log, fmt.Errorf("create smoke install container: %w", err)
+		return preparedImage{log: log}, fmt.Errorf("create smoke install container: %w", err)
 	}
-	copyArgs := []string{"cp"}
-	if runtimeKind(r.Runtime) == "docker" {
-		copyArgs = append(copyArgs, "-a")
-	}
-	copyArgs = append(copyArgs, artifact, installContainer+":/package.pkg.tar.zst")
-	cpLog, err := r.run(ctx, copyArgs...)
-	log += cpLog
-	if err != nil {
-		cleanup()
-		return log, fmt.Errorf("copy package into smoke container: %w", err)
+	for index, artifact := range artifacts {
+		target := "/package.pkg.tar.zst"
+		if len(artifacts) > 1 {
+			target = fmt.Sprintf("/package-%d.pkg.tar.zst", index)
+		}
+		copyArgs := []string{"cp"}
+		if runtimeKind(r.Runtime) == "docker" {
+			copyArgs = append(copyArgs, "-a")
+		}
+		copyArgs = append(copyArgs, artifact, installContainer+":"+target)
+		cpLog, err := r.run(ctx, copyArgs...)
+		log += cpLog
+		if err != nil {
+			cleanup()
+			return preparedImage{log: log}, fmt.Errorf("copy package into smoke container: %w", err)
+		}
 	}
 	installLog, err := r.startAndCollect(ctx, installContainer)
 	log += installLog
 	if err != nil {
 		cleanup()
-		return log, fmt.Errorf("install package for smoke test: %w", err)
+		return preparedImage{log: log}, fmt.Errorf("install package for smoke test: %w", err)
 	}
 	if _, err := r.run(ctx, "commit", installContainer, installImage); err != nil {
 		cleanup()
-		return log, fmt.Errorf("commit smoke image: %w", err)
+		return preparedImage{log: log}, fmt.Errorf("commit smoke image: %w", err)
 	}
 	if imageID, inspectErr := r.run(ctx, "image", "inspect", "--format", "{{.Id}}", installImage); inspectErr == nil {
 		log += "smoke image " + strings.TrimSpace(imageID) + "\n"
 	}
 	r.removeContainer(installContainer)
-	defer r.removeImage(installImage)
+	return preparedImage{ref: installImage, log: log, cleanup: func() { r.removeImage(installImage) }}, nil
+}
+
+func (r *Runner) smokeInstalled(ctx context.Context, jobName, image string, commands []string) (string, error) {
 	var script strings.Builder
 	script.WriteString("set -eu\n")
 	for _, command := range commands {
 		script.WriteString(command)
 		script.WriteByte('\n')
 	}
-	args := r.baseContainerArgsForImage(containerName(jobName, "smoke"), "none", "", nil, nil, "65534:65534", installImage)
+	args := r.baseContainerArgsForImage(containerName(jobName, "smoke"), "none", "", nil, nil, "65534:65534", image)
 	args = append(args, "/bin/sh", "-ceu", script.String())
 	smokeLog, smokeErr := r.runContainer(ctx, containerName(jobName, "smoke"), args...)
-	return log + smokeLog, smokeErr
+	return smokeLog, smokeErr
 }
 
 func smokeInstallScript() string {
@@ -438,6 +463,16 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 	log += buildLog
 	if err != nil {
 		return BuildResult{Log: log}, err
+	}
+	if job.OutputContract != nil {
+		result, err := r.finishOutputs(ctx, job, jobDir, output, jobName, prepared.ref, dependencyDir, buildEnvironment)
+		result.Log = log + result.Log
+		if err != nil {
+			return result, err
+		}
+		keepDirectory = true
+		result.Cleanup = func() { r.cleanupJobDirectory(jobDir, imageRef); _ = os.RemoveAll(jobDir) }
+		return result, nil
 	}
 	artifact, err := findArtifact(output, job.PackageName)
 	if err != nil {

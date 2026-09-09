@@ -23,6 +23,8 @@ export interface CatalogManifest {
   ownerArea: Area;
   architectures: Architecture[];
   artifactArchitecture: 'any' | 'native';
+  portableOutputs?: string[];
+  runtimeGroups?: string[][];
   architectureExceptions: Array<{ architecture: Architecture; reason: string }>;
   sourceReference: { url: string; commit: string } | null;
   rebuildOn: string[];

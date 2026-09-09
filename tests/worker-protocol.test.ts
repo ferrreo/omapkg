@@ -20,6 +20,13 @@ import {
   uploadArtifact
 } from '../src/lib/server/workers';
 import { TestD1, asD1 } from './d1';
+import { proposeCatalogPackage, approveCatalogPackage } from '../src/lib/server/catalog-ownership';
+import { proposeCohort, getCohort } from '../src/lib/server/cohorts';
+import { changeCohortPhase } from '../src/lib/server/cohort-phases';
+import { buildArtifacts, packageFilename } from '../src/lib/server/build-outputs';
+import { manifestDigest } from '../src/lib/server/policy';
+import { env as testEnv } from './release-fixtures';
+import type { Revision } from '../src/lib/model';
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((name) => name.endsWith('.sql')).sort()
   .map((name) => readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8')).join('\n');
@@ -83,14 +90,19 @@ async function seedBuild(db: D1Database, options: {
   surface?: 'binary' | 'recipe'; requestStatus?: string; approved?: boolean; architecture?: 'x86_64' | 'aarch64';
   buildImages?: Partial<Record<'x86_64' | 'aarch64', string>>;
   dependencies?: string[];
+  cohort?: boolean;
 } = {}) {
   const requestId = crypto.randomUUID();
   const revisionId = crypto.randomUUID();
   const buildId = crypto.randomUUID();
   const name = `package-${buildId.slice(0, 8)}`;
-  const recipe = `pkgname=${name}\npkgver=1\npkgrel=1\nsource=('https://example.com/${name}.tar.gz')\nsha256sums=('${'a'.repeat(64)}')\npackage() { install -Dm644 README \"$pkgdir/usr/share/${name}/README\"; }\n`;
+  const recipe = `pkgname=${name}\npkgver=${options.cohort ? '1.0.0' : '1'}\n${options.cohort ? 'epoch=2\n' : ''}pkgrel=1\nsource=('https://example.com/${name}.tar.gz')\nsha256sums=('${'a'.repeat(64)}')\npackage() { install -Dm644 README \"$pkgdir/usr/share/${name}/README\"; }\n`;
   const source = [{ name: `${name}.tar.gz`, url: `https://example.com/${name}.tar.gz`, sha256: 'a'.repeat(64) }];
-  const manifest = await sha256(buildId);
+  const sbom = options.cohort ? JSON.stringify({ oprEvidence: { packageVersion: { epoch: 2, pkgrel: '1' } } }) : '{}';
+  const manifest = options.cohort ? await manifestDigest({ id: revisionId, request_id: requestId, version: '1.0.0', recipe_sha256: await sha256(recipe),
+    sources_json: JSON.stringify(source), dependencies_json: JSON.stringify(options.dependencies ?? ['bash']), smoke_commands_json: JSON.stringify(['printf smoke']),
+    architectures_json: JSON.stringify([options.architecture ?? 'x86_64']), build_images_json: JSON.stringify(options.buildImages ?? {}), source_date_epoch: 1700000000,
+    image_digest: `ghcr.io/opr/builder@sha256:${'c'.repeat(64)}`, license: 'MIT', surface: options.surface ?? 'binary', sbom_json: sbom }) : await sha256(buildId);
   const timestamp = Math.floor(Date.now() / 1000);
   await db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind(requestId, name, source[0].url, 'archive', 'system', 'requestor', options.requestStatus ?? 'queued', timestamp, timestamp).run();
@@ -99,15 +111,15 @@ async function seedBuild(db: D1Database, options: {
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
     revisionId, requestId, '1.0.0', recipe, await sha256(recipe), manifest, JSON.stringify(source), JSON.stringify(options.dependencies ?? ['bash']),
     JSON.stringify(['printf smoke']), JSON.stringify([options.architecture ?? 'x86_64']), JSON.stringify(options.buildImages ?? {}),
-    1700000000, `ghcr.io/opr/builder@sha256:${'c'.repeat(64)}`, 'MIT', options.surface ?? 'binary', 'test', '{}', '{}', 'upstream-commit', 'https://github.com/opr/test/pull/1', 'review-commit', timestamp
+    1700000000, `ghcr.io/opr/builder@sha256:${'c'.repeat(64)}`, 'MIT', options.surface ?? 'binary', 'test', sbom, options.cohort ? '{"passed":true}' : '{}', 'upstream-commit', 'https://github.com/opr/test/pull/1', 'review-commit', timestamp
   ).run();
   if (options.approved !== false) {
-    await db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)').bind(crypto.randomUUID(), revisionId, 'area-reviewer', 'area', manifest, timestamp).run();
-    await db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)').bind(crypto.randomUUID(), revisionId, 'security-reviewer', 'security', manifest, timestamp).run();
+    await db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)').bind(crypto.randomUUID(), revisionId, options.cohort ? 'github:1' : 'area-reviewer', 'area', manifest, timestamp).run();
+    await db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)').bind(crypto.randomUUID(), revisionId, options.cohort ? 'github:2' : 'security-reviewer', 'security', manifest, timestamp).run();
   }
   await db.prepare(`INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES(?,?,?,?,?)`)
     .bind(buildId, revisionId, options.architecture ?? 'x86_64', 'queued', timestamp).run();
-  return { requestId, revisionId, buildId, recipe, source, manifest };
+  return { requestId, revisionId, buildId, name, recipe, source, manifest };
 }
 
 async function signedRequest(
@@ -526,5 +538,74 @@ test('worker dependency failure blocks parent, preserves evidence and fences cha
     expect(await db.prepare('SELECT relation,architecture FROM dependency_blockers WHERE request_id=?').bind(seeded.requestId).first<Record<string, unknown>>()).toEqual({ relation: 'missing>=2', architecture: 'x86_64' });
     expect((await completeJob(db, new MemoryR2() as unknown as R2Bucket, worker, job.id, input)).idempotent).toBe(true);
     await expect(completeJob(db, new MemoryR2() as unknown as R2Bucket, worker, job.id, { ...input, dependencyBlockers: [{ ...input.dependencyBlockers[0], relation: 'changed' }] })).rejects.toMatchObject({ status: 409 });
+  } finally { holder.close(); }
+});
+
+test('v2 cohort output completion binds every upload, version, architecture and attempt to signed evidence', async () => {
+  const { holder, db, worker, keys } = await fixture();
+  const bucket = new MemoryR2();
+  try {
+    const seeded = await seedBuild(db, { dependencies: [], cohort: true });
+    const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
+    const security = { id: 'github:2', role: 'security' as const, areas: ['system'] };
+    holder.exec("INSERT INTO team_memberships VALUES('1','system'),('2','security')");
+    const revision = (await db.prepare('SELECT * FROM revisions WHERE id=?').bind(seeded.revisionId).first<Revision>())!;
+    const policy = { schemaVersion: 1, pkgbase: seeded.name, outputs: [seeded.name, `${seeded.name}-docs`], collection: 'core', lane: 'system', role: 'base-system', origin: 'arch',
+      upstreamUrl: seeded.source[0].url, sourceKind: 'archive', description: 'Native split fixture', license: 'MIT', ownerArea: 'system', architectures: ['x86_64'],
+      artifactArchitecture: 'native', portableOutputs: [`${seeded.name}-docs`], architectureExceptions: [{ architecture: 'aarch64', reason: 'Explicit test-only target exception.' }], sourceReference: null, rebuildOn: [] };
+    const catalog = await proposeCatalogPackage(db, actor, policy, null, 'Test split ownership.');
+    await approveCatalogPackage(db, actor, seeded.name, 1, catalog.manifestSha256, 'area', 'Test owner.');
+    await approveCatalogPackage(db, security, seeded.name, 1, catalog.manifestSha256, 'security', 'Test security.');
+    let cohort = await proposeCohort(db, actor, 'split-cohort', null, { title: 'Split outputs', lane: 'system', systemVersion: '4.0.3-rc2', parentSnapshot: null, compatibleSystems: [],
+      members: [{ pkgbase: seeded.name, catalogRevision: 1, recipeRevisionId: revision.id, cause: 'rebuild', reason: 'Test native split.' }] }, 'Test scope.');
+    for (let i = 0; i < 2; i++) {
+      await changeCohortPhase(testEnv(holder), actor, cohort.id, { revision: cohort.current_revision, sequence: cohort.event_sequence, manifestSha256: cohort.manifest_sha256, action: 'advance', reason: 'Test reviewed phase.' });
+      cohort = await getCohort(db, cohort.id);
+    }
+    expect(await claimJob(db, worker)).toBeNull();
+    const job = (await claimJob(db, worker, { version: 'v2-test', runtime: 'podman', capabilities: ['multi-output-v2', 'runtime-analysis-v1'] }))!;
+    expect(job.outputContract?.outputs.map((output) => [output.fullVersion, output.architecture])).toEqual([['2:1.0.0-1', 'x86_64'], ['2:1.0.0-1', 'any']]);
+    const first = job.outputContract!.outputs[0]; const second = job.outputContract!.outputs[1];
+    const bytes = new TextEncoder().encode('first exact test output');
+    const uploaded = await Promise.all([0, 1].map(() => uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, packageFilename(first), bytes)));
+    expect(uploaded[0]).toEqual(uploaded[1]);
+    const artifact = uploaded[0];
+    expect(bucket.objects.size).toBe(1);
+    expect(await uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, artifact.filename, bytes)).toEqual(artifact);
+    await expect(uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, artifact.filename, new Uint8Array([1]))).rejects.toThrow('different bytes');
+    await expect(uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, 'surprise-1-1-any.pkg.tar.zst', bytes)).rejects.toThrow('expected output');
+    const report = {
+      schemaVersion: 2, attempt: job.attempt, outputContract: job.outputContract, buildId: job.id, revisionId: job.revisionId, workerId: worker.id,
+      recipeSha256: job.recipeSha256, architecture: job.architecture, imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch, sources: job.sources,
+      network: 'disabled', startedAt: '2026-09-09T00:00:00Z', finishedAt: '2026-09-09T00:01:00Z',
+      buildEnvironment: runtimeEvidence(job.imageDigest).buildEnvironment,
+      runtimeTests: job.outputContract!.runtimeGroups.map((group) => ({ outputs: group, environment: runtimeEvidence(job.imageDigest).runtimeEnvironment, smokePassed: true,
+        analyses: group.map((name, i) => ({ name, runtimeAnalysis: { ...runtimeEvidence(job.imageDigest).runtimeAnalysis, nativeCode: [] as string[], payloadSha256: String(i + 1).repeat(64) } })) })),
+      outputs: job.outputContract!.outputs.map((output) => ({ pkgbase: job.packageName, filename: packageFilename(output), artifactSha256: artifact.sha256,
+        packageMetadata: { ...output, installedSize: 10, depends: [], provides: [], conflicts: [], replaces: [] } })),
+    };
+    const v2Report = report;
+    const sign = async (value: unknown) => {
+      const provenance = JSON.stringify(value);
+      const signature = await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(provenance));
+      return { provenance, provenanceSignature: base64(signature) };
+    };
+    const evidence = await sign(v2Report);
+    const complete = { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20, smokePassed: true, artifacts: [artifact], ...evidence };
+    await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).rejects.toThrow('incomplete');
+    const other = await uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, packageFilename(second), bytes);
+    complete.artifacts.push(other);
+    const tampered = structuredClone(v2Report); tampered.runtimeTests[0].analyses[1].runtimeAnalysis.nativeCode = ['usr/lib/hidden.a'];
+    await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, ...await sign(tampered) })).rejects.toThrow('native code');
+    await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, ...await sign({ ...v2Report, attempt: 99 }) })).rejects.toThrow('leased inputs');
+    await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, ...await sign({ ...v2Report, runtimeTests: [] }) })).rejects.toThrow('matrix is incomplete');
+    expect(await completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).toEqual({ status: 'succeeded', idempotent: false });
+    expect(await completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).toEqual({ status: 'succeeded', idempotent: true });
+    await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, artifacts: [artifact] })).rejects.toThrow('already completed');
+    expect((await buildArtifacts(db, { id: job.id, attempt: job.attempt! })).length).toBe(2);
+    expect(() => holder.exec("UPDATE build_artifacts SET sha256='wrong'")).toThrow('immutable');
+    expect((await db.prepare('SELECT provenance_signature FROM build_attempt_results WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ provenance_signature: string }>())?.provenance_signature).toBe(complete.provenanceSignature);
+    expect((await db.prepare('SELECT output_contract_json FROM build_attempts WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ output_contract_json: string }>())?.output_contract_json).toBe(JSON.stringify(job.outputContract));
+    expect(() => holder.exec('DELETE FROM build_attempt_results')).toThrow('immutable');
   } finally { holder.close(); }
 });

@@ -321,25 +321,47 @@ func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, 
 	if err := sendLogs(parent, client, job, result.Log); err != nil {
 		return reportFailure(parent, client, job, &result, err)
 	}
-	artifactSHA, artifactSize, err := hashFile(result.ArtifactPath)
-	if err != nil {
-		return reportFailure(parent, client, job, &result, err)
-	}
 	var artifact *Artifact
-	if job.Surface == "binary" {
-		file, err := os.Open(result.ArtifactPath)
-		if err != nil {
-			return reportFailure(parent, client, job, &result, err)
-		}
-		response, uploadErr := client.uploadArtifact(parent, job.ID, job.LeaseToken, filepath.Base(result.ArtifactPath), file, artifactSize, artifactSHA)
-		_ = file.Close()
-		if uploadErr != nil {
-			return reportFailure(parent, client, job, &result, uploadErr)
-		}
-		artifact = &Artifact{Key: response.Key, SHA256: response.SHA256, Size: response.Size, Filename: filepath.Base(result.ArtifactPath)}
-	}
+	var artifacts []Artifact
+	var provenance string
 	finished := time.Now().UTC().Format(time.RFC3339Nano)
-	provenance, err := provenanceFor(job, cfg.WorkerID, artifactSHA, result, started, finished)
+	if job.OutputContract != nil {
+		for _, output := range result.Outputs {
+			digest, size, err := hashFile(output.Path)
+			if err != nil || digest != output.ArtifactSHA256 {
+				return reportFailure(parent, client, job, &result, errors.New("output bytes changed after analysis"))
+			}
+			file, err := os.Open(output.Path)
+			if err != nil {
+				return reportFailure(parent, client, job, &result, err)
+			}
+			response, err := client.uploadArtifact(parent, job.ID, job.LeaseToken, output.Filename, file, size, digest)
+			_ = file.Close()
+			if err != nil {
+				return reportFailure(parent, client, job, &result, err)
+			}
+			artifacts = append(artifacts, Artifact{Key: response.Key, SHA256: response.SHA256, Size: response.Size, Filename: response.Filename})
+		}
+		provenance, err = provenanceForOutputs(job, cfg.WorkerID, result, started, finished)
+	} else {
+		artifactSHA, artifactSize, hashErr := hashFile(result.ArtifactPath)
+		if hashErr != nil {
+			return reportFailure(parent, client, job, &result, hashErr)
+		}
+		if job.Surface == "binary" {
+			file, err := os.Open(result.ArtifactPath)
+			if err != nil {
+				return reportFailure(parent, client, job, &result, err)
+			}
+			response, uploadErr := client.uploadArtifact(parent, job.ID, job.LeaseToken, filepath.Base(result.ArtifactPath), file, artifactSize, artifactSHA)
+			_ = file.Close()
+			if uploadErr != nil {
+				return reportFailure(parent, client, job, &result, uploadErr)
+			}
+			artifact = &Artifact{Key: response.Key, SHA256: response.SHA256, Size: response.Size, Filename: filepath.Base(result.ArtifactPath)}
+		}
+		provenance, err = provenanceFor(job, cfg.WorkerID, artifactSHA, result, started, finished)
+	}
 	if err != nil {
 		return reportFailure(parent, client, job, &result, err)
 	}
@@ -351,6 +373,7 @@ func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, 
 		LeaseToken:          job.LeaseToken,
 		Status:              "succeeded",
 		Artifact:            artifact,
+		Artifacts:           artifacts,
 		Provenance:          provenance,
 		ProvenanceSignature: signProvenance(provenance, key),
 		InstalledSize:       &result.InstalledSize,
@@ -365,7 +388,9 @@ func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, 
 func reportFailure(ctx context.Context, client *Client, job Job, result *BuildResult, cause error) error {
 	var dependencyError *dependencyResolutionError
 	var blockers []dependencyBlocker
-	if errors.As(cause, &dependencyError) { blockers = dependencyError.Blockers }
+	if errors.As(cause, &dependencyError) {
+		blockers = dependencyError.Blockers
+	}
 	if result != nil {
 		if err := sendLogs(ctx, client, job, result.Log); err != nil {
 			cause = fmt.Errorf("%v; upload logs: %w", cause, err)

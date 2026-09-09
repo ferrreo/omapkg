@@ -27,7 +27,7 @@ const imageDigestPattern = /^sha256:[0-9a-f]{64}$/;
 
 const noncePattern = /^[0-9a-f]{32}$/;
 
-export const safeFilenamePattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\.pkg\.tar\.zst$/;
+export const safeFilenamePattern = /^[A-Za-z0-9][A-Za-z0-9@._+%~:-]{0,220}\.pkg\.tar\.zst$/;
 
 export class WorkerProtocolError extends Error {
   constructor(
@@ -39,7 +39,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 
@@ -78,6 +78,8 @@ export interface EnrollmentToken {
 }
 
 export interface WorkerJob {
+  attempt?: number;
+  outputContract?: import('./build-outputs').OutputContract;
   id: string;
   leaseToken: string;
   leaseExpiresAt: string;
@@ -108,6 +110,7 @@ export interface CompleteInput {
   installedSize?: number;
   error?: string;
   artifact?: ArtifactReference;
+  artifacts?: ArtifactReference[];
   provenance?: string;
   provenanceSignature?: string;
   smokePassed: boolean;
@@ -121,6 +124,7 @@ export interface ArtifactReference {
 }
 
 export interface WorkerLease extends Build {
+  output_contract_json?: string | null;
   revision_request_id: string;
   revision_name: string;
   revision_version: string;
@@ -491,7 +495,7 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
   try {
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
-        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json,
+        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json,
         b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at, b.dependency_blockers_json,
         q.name AS revision_name, r.request_id AS revision_request_id, r.version AS revision_version, r.recipe AS revision_recipe,
         r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,

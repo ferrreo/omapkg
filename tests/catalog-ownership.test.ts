@@ -29,6 +29,11 @@ test('catalog pins identity, requires both targets and keeps external packaging 
   expect(() => parseCatalogManifest({ ...catalogFixture(), upstreamUrl: 'https://aur.archlinux.org/example.git' })).toThrow('reference evidence');
   expect(() => parseCatalogManifest({ ...catalogFixture(), origin: 'alarm-reference' })).toThrow('immutable commit');
   expect(parseCatalogManifest({ ...catalogFixture(), architectures: ['x86_64'], architectureExceptions: [{ architecture: 'aarch64', reason: 'x86-only hardware driver' }] }).architectureExceptions).toHaveLength(1);
+  const outputs = ['vim', 'gvim', 'vim-runtime'];
+  expect(parseCatalogManifest({ ...catalogFixture('vim'), outputs, portableOutputs: ['vim-runtime'], runtimeGroups: [['vim', 'vim-runtime'], ['gvim', 'vim-runtime']] }).runtimeGroups).toHaveLength(2);
+  expect(() => parseCatalogManifest({ ...catalogFixture('vim'), outputs, runtimeGroups: [['vim', 'vim-runtime']] })).toThrow('every output');
+  expect(() => parseCatalogManifest({ ...catalogFixture('vim'), outputs, portableOutputs: ['unknown'] })).toThrow('Portable outputs');
+  expect(parseCatalogManifest({ ...catalogFixture('languages'), outputs: Array.from({ length: 129 }, (_, i) => `language-${i}`) }).outputs).toHaveLength(129);
   for (const upstream_url of ['https://aur.archlinux.org/example.git', 'https://mirror.archlinuxarm.org/aarch64/core/example.pkg.tar.xz']) {
     expect(() => parseFactoryRequest({ id: 'example', name: 'example', upstream_url, source_kind: 'git', area: 'system', declared_license: 'MIT' })).toThrow('authoritative upstream');
   }
