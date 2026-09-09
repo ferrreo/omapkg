@@ -312,7 +312,12 @@ func fetchDependencyKey(ctx context.Context, client *http.Client, rawURL string,
 	return nil
 }
 
-func dependencyPrepScript(dependencies []string, plan *DependencyPlan) (string, error) {
+func dependencyPrepScript(dependencies []string, plan *DependencyPlan, runtime string) (string, error) {
+	downloadSandbox := "DisableSandboxSyscalls"
+	// Docker's seccomp policy can reject Landlock; the outer OCI sandbox still applies.
+	if runtimeKind(runtime) == "docker" {
+		downloadSandbox += "\\nDisableSandboxFilesystem"
+	}
 	var script strings.Builder
 	script.WriteString("set -eu\n")
 	script.WriteString("command -v pacman >/dev/null 2>&1\n")
@@ -338,7 +343,7 @@ func dependencyPrepScript(dependencies []string, plan *DependencyPlan) (string, 
 		script.WriteString("pacman-key --gpgdir \"$keyring\" --add /opr/dependencies/public-key >/dev/null\n")
 		script.WriteString("printf '%s:6:\\n' \"$OPR_DEP_KEY_FINGERPRINT\" | gpg --batch --homedir \"$keyring\" --import-ownertrust >/dev/null\n")
 		script.WriteString("pacman-key --gpgdir \"$keyring\" --updatedb >/dev/null\n")
-		script.WriteString("sed -i '/^\\[options\\]$/a GPGDir = /tmp/opr-pacman-gnupg\\nLocalFileSigLevel = Required\\nDownloadUser = root\\nDisableSandboxSyscalls' \"$pacman_conf\"\n")
+		script.WriteString("sed -i '/^\\[options\\]$/a GPGDir = /tmp/opr-pacman-gnupg\\nLocalFileSigLevel = Required\\nDownloadUser = root\\n" + downloadSandbox + "' \"$pacman_conf\"\n")
 		script.WriteString("pacman --config \"$pacman_conf\" -Syu --noconfirm\n")
 		script.WriteString("set -- /opr/dependencies/*.pkg.tar.zst\n")
 		script.WriteString("pacman --config \"$pacman_conf\" -U --noconfirm -- \"$@\"\n")
@@ -351,7 +356,7 @@ func dependencyPrepScript(dependencies []string, plan *DependencyPlan) (string, 
 		script.WriteString("  test \"$(field Architecture)\" = \"$expected_arch\"\n")
 		script.WriteString("done < /opr/dependencies/plan.tsv\n")
 	} else {
-		script.WriteString("sed -i '/^\\[options\\]$/a DownloadUser = root\\nDisableSandboxSyscalls' \"$pacman_conf\"\n")
+		script.WriteString("sed -i '/^\\[options\\]$/a DownloadUser = root\\n" + downloadSandbox + "' \"$pacman_conf\"\n")
 	}
 	if len(dependencies) > 0 {
 		quoted := mapShellQuote(dependencies)

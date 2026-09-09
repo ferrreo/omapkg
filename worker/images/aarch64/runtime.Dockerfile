@@ -3,7 +3,7 @@ FROM scratch
 # Use the same signature-verified official rootfs context as the ARM builder.
 COPY . /
 RUN cp /etc/pacman.conf /tmp/opr-pacman.conf \
-    && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls' /tmp/opr-pacman.conf \
+    && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls\nDisableSandboxFilesystem' /tmp/opr-pacman.conf \
     && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm && rm /tmp/opr-pacman.conf
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8

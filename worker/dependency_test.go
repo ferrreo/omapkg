@@ -81,7 +81,7 @@ func TestDevelopmentDependencyPlanAllowsStableFallback(t *testing.T) {
 
 func TestDependencyPrepScriptVerifiesPlanAndKeepsNoNodeps(t *testing.T) {
 	plan, _ := dependencyPlanFixture()
-	script, err := dependencyPrepScript([]string{"glibc>=2.0"}, plan)
+	script, err := dependencyPrepScript([]string{"glibc>=2.0"}, plan, "podman")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestDependencyPrepScriptVerifiesPlanAndKeepsNoNodeps(t *testing.T) {
 
 func TestDependencyPrepScriptInstallsOnlyPacmanMissingRelations(t *testing.T) {
 	plan, _ := dependencyPlanFixture()
-	script, err := dependencyPrepScript([]string{"opr-lib=1.2-1", "tree"}, plan)
+	script, err := dependencyPrepScript([]string{"opr-lib=1.2-1", "tree"}, plan, "podman")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestDependencyPrepScriptInstallsOnlyPacmanMissingRelations(t *testing.T) {
 
 func TestDependencyPrepScriptUsesOnlyPacmanMissingRelations(t *testing.T) {
 	plan, _ := dependencyPlanFixture()
-	script, err := dependencyPrepScript([]string{"opr-lib=1.2-1", "tree"}, nil)
+	script, err := dependencyPrepScript([]string{"opr-lib=1.2-1", "tree"}, nil, "podman")
 	if err != nil {
 		t.Fatal(err)
 	}

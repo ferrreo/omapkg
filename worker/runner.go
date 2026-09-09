@@ -111,7 +111,7 @@ func (r *Runner) prepareDependenciesWithPlan(ctx context.Context, jobName, image
 	args := r.mutableContainerArgsForImage(container, "bridge", "", mounts, prepEnv, "", imageRef)
 	args = withoutArgument(args, "--rm")
 	args = insertBeforeImage(args, "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER")
-	prepScript, err := dependencyPrepScript(dependencies, plan)
+	prepScript, err := dependencyPrepScript(dependencies, plan, r.Runtime)
 	if err != nil {
 		return preparedImage{}, err
 	}
