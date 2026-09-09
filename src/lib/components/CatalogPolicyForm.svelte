@@ -1,0 +1,35 @@
+<script lang="ts">
+  import { enhance } from '$app/forms';
+  import { areas } from '$lib/model';
+  import { collections, requiredArchitectures, type CatalogManifest } from '$lib/distribution';
+  export let value: CatalogManifest | null = null;
+  export let revision: number | null = null;
+  export let action = '?/propose';
+  let busy = false;
+  let targets = value?.architectures ?? ['x86_64', 'aarch64'];
+  let collection = value?.collection ?? 'omapkg';
+  let role = value?.role ?? 'optional';
+</script>
+
+<form method="POST" {action} class="form-grid" use:enhance={() => { busy = true; return async ({ update }) => { await update(); busy = false; }; }}>
+  <input type="hidden" name="expectedRevision" value={revision ?? ''} />
+  <div class="field"><label for="catalog-name">Build package name</label><input id="catalog-name" name="pkgbase" value={value?.pkgbase ?? ''} required readonly={Boolean(value)} pattern="[a-z0-9][a-z0-9@._+\-]*" /><p class="field__hint">One build identity can produce several installable packages.</p></div>
+  <div class="field"><label for="catalog-outputs">Installable package names</label><input id="catalog-outputs" name="outputs" value={value?.outputs.join(' ') ?? ''} required /><p class="field__hint">Separate split-package names with spaces. Names must be unique across the catalog.</p></div>
+  <div class="field"><label for="catalog-collection">Repository</label><select id="catalog-collection" name="collection" bind:value={collection}>{#each collections as item}<option value={item}>{item}</option>{/each}</select></div>
+  <div class="field"><label for="catalog-role">Installation role</label><select id="catalog-role" name="role" bind:value={role}><option value="optional">Optional application</option><option value="base-system">Base system</option><option value="omarchy-default">Omarchy default</option><option value="build-only">Build tools only</option></select></div>
+  <div class="field"><label for="catalog-lane">Release policy</label><select id="catalog-lane" name="lane" value={value?.lane ?? 'opr'}><option value="opr">Independent OPR package</option><option value="system">Versioned system release</option></select><p class="field__hint">Core, extra, multilib and default-system packages must use system releases.</p></div>
+  <div class="field"><label for="catalog-owner">Responsible area</label><select id="catalog-owner" name="ownerArea" value={value?.ownerArea ?? 'development'}>{#each areas as area}<option value={area}>{area}</option>{/each}</select></div>
+  <div class="field field--full"><label for="catalog-description">Description</label><textarea id="catalog-description" name="description" required maxlength="500" rows="2">{value?.description ?? ''}</textarea></div>
+  <div class="field"><label for="catalog-source">Authoritative upstream URL</label><input id="catalog-source" name="upstreamUrl" type="url" required value={value?.upstreamUrl ?? ''} /><p class="field__hint">An AUR/ALARM page can be reference evidence, never the replacement's package source.</p></div>
+  <div class="field"><label for="catalog-source-kind">Source type</label><select id="catalog-source-kind" name="sourceKind" value={value?.sourceKind ?? 'git'}><option value="git">Git repository</option><option value="archive">Source archive</option></select></div>
+  <div class="field"><label for="catalog-origin">Packaging origin</label><select id="catalog-origin" name="origin" value={value?.origin ?? 'upstream'}><option value="upstream">Authoritative upstream</option><option value="arch">Arch packaging import</option><option value="omarchy">Omarchy packaging import</option><option value="aur-reference">AUR replacement proposal</option><option value="alarm-reference">ALARM replacement / ARM port</option></select></div>
+  <div class="field"><label for="catalog-license">Declared license</label><input id="catalog-license" name="license" value={value?.license ?? 'unknown'} required /><p class="field__hint">Evidence is independently checked during packaging review.</p></div>
+  <fieldset class="field field--full"><legend>Required build targets</legend><div class="release-actions">{#each requiredArchitectures as arch}<label><input type="checkbox" name="architectures" value={arch} bind:group={targets} /> {arch === 'x86_64' ? 'Intel/AMD 64-bit (x86_64)' : 'ARM64 (aarch64)'}</label>{/each}</div><p class="field__hint">Both targets are primary. A missing target needs an explicit reason reviewed by area and security owners.</p></fieldset>
+  {#each requiredArchitectures as arch}{#if !targets.includes(arch)}<div class="field field--full"><label for={`exception-${arch}`}>Why {arch} cannot be supported</label><input id={`exception-${arch}`} name={`exception_${arch}`} value={value?.architectureExceptions.find((item) => item.architecture === arch)?.reason ?? ''} required maxlength="2000" /></div>{/if}{/each}
+  <div class="field"><label for="catalog-artifact">Package content</label><select id="catalog-artifact" name="artifactArchitecture" value={value?.artifactArchitecture ?? 'native'}><option value="native">Native binary per architecture</option><option value="any">Architecture-independent content (any)</option></select><p class="field__hint">Any content still requires installation/runtime checks on each target.</p></div>
+  <div class="field"><label for="catalog-rebuild">Additional rebuild triggers</label><input id="catalog-rebuild" name="rebuildOn" value={value?.rebuildOn.join(' ') ?? ''} /><p class="field__hint">Space-separated providers. Measured ABI dependencies remain mandatory.</p></div>
+  <div class="field"><label for="catalog-reference">Original packaging reference URL</label><input id="catalog-reference" name="referenceUrl" type="url" value={value?.sourceReference?.url ?? ''} /></div>
+  <div class="field"><label for="catalog-reference-commit">Original immutable commit</label><input id="catalog-reference-commit" name="referenceCommit" value={value?.sourceReference?.commit ?? ''} /><p class="field__hint">Required with AUR/ALARM reference evidence.</p></div>
+  <div class="field field--full"><label for="catalog-reason">Reason for this proposal</label><textarea id="catalog-reason" name="reason" rows="2" required maxlength="2000"></textarea></div>
+  <div class="form-actions field--full"><button class="button button--primary" type="submit" disabled={busy}>{busy ? 'Saving proposal…' : 'Save for ownership review'}</button><p class="field__hint">Creates an immutable policy proposal. It does not admit a package, start a build or publish.</p></div>
+</form>

@@ -5,6 +5,7 @@ import { env } from 'cloudflare:workers';
 import type { FactoryWorkflowParams, PipelineEnv } from '../types';
 import { publicationEndpoint } from '../publication';
 import type { Env } from '../../../src/lib/server/env';
+import { catalogImportEndpoint } from '../catalog-import';
 
 setProvider(gatewayProvider(env as unknown as GatewayEnv));
 
@@ -55,6 +56,7 @@ async function enqueueFactory(request: Request, env: PipelineEnv): Promise<Respo
 const app: Fetchable = {
   fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === '/import') return catalogImportEndpoint(request, env as PipelineEnv);
     if (url.pathname === '/publish') return publicationEndpoint(request, env as unknown as Env);
     if (url.pathname !== '/factory') return new Response('Not Found', { status: 404 });
     return enqueueFactory(request, env as PipelineEnv);

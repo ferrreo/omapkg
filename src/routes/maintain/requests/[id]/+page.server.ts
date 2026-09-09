@@ -25,7 +25,10 @@ export const load: PageServerLoad = async (event) => {
   ]);
   const revisions = revisionRows.map((revision) => ({ ...revision, recipePolicy: revisionRecipePolicy(revision.sbom_json), runtimeExceptions: reviewedRuntimeExceptions(revision.sbom_json), description: finalDescription(revision, request.name) }));
   const blockers = await getDependencyBlockers(env.DB, request.id);
-  return { request, revisions, approvals, builds, events, factoryEvents, blockers };
+  const dependencyProposals = await query<{ id: string; blocker_id: string; status: string }>(env.DB,
+    `SELECT p.id,l.blocker_id,p.status FROM dependency_proposals p JOIN dependency_proposal_blockers l ON l.proposal_id=p.id
+      JOIN dependency_blockers d ON d.id=l.blocker_id WHERE d.request_id=? AND p.status<>'superseded'`, request.id);
+  return { request, revisions, approvals, builds, events, factoryEvents, blockers, dependencyProposals };
 };
 export const actions: Actions = {
   approveRequest: (event) => formAction(event, async () => startFactory(environment(event), event.locals.actor, event.params.id)),

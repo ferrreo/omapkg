@@ -4,6 +4,7 @@ import { sha256 } from './db';
 import { isArchPkgver, parseArchDependency } from './arch';
 import { normalizeRequestDescription } from './descriptions';
 import { validateRecipePolicy } from '../../../services/pipeline/recipe-policy';
+import { externalPackageSource } from '../distribution';
 
 export class PolicyError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -124,7 +125,9 @@ export function parseRequest(input: unknown) {
   let description: string;
   try { description = normalizeRequestDescription(value.description); }
   catch (cause) { throw new PolicyError(400, cause instanceof Error ? cause.message : 'Package description must be 1 to 500 characters.'); }
-  return { ...value, description, declared_license: parseDeclaredLicense(value.declared_license), upstream_url: publicSourceURL(value.upstream_url) };
+  const upstream = publicSourceURL(value.upstream_url);
+  if (externalPackageSource(upstream)) throw new PolicyError(400, 'Propose an OPR replacement using its authoritative upstream source. AUR/ALARM is reference evidence, not a package provider.');
+  return { ...value, description, declared_license: parseDeclaredLicense(value.declared_license), upstream_url: upstream };
 }
 
 function manifestJSON(value: string, label: string): unknown {

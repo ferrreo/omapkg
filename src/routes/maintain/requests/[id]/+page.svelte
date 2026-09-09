@@ -118,6 +118,9 @@
             <article class="workbench-panel">
               <h3>{blocker.relation ?? 'Unresolved runtime requirement'} · {blocker.architecture}</h3>
               <p class="prose">{blocker.detail}</p>
+              {#each data.dependencyProposals.filter((proposal) => proposal.blocker_id === blocker.id) as proposal}
+                <p><a class="button" href={`/maintain/dependencies/${proposal.id}`}>Review shared OPR proposal</a> <span class="timestamp">{proposal.status} · admission does not authorize publication</span></p>
+              {/each}
               {#if blocker.finding_sha256}<p class="hash">{blocker.finding_sha256}</p>{/if}
               {#if blocker.dependency_request_id}<p><a href={`/maintain/requests/${encodeURIComponent(blocker.dependency_request_id)}`}>Open linked dependency request</a></p>{/if}
               {#if blocker.resolution === 'dependency'}

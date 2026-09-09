@@ -7,6 +7,9 @@
 
   const links: Array<{ href: string; label: string; key: string; icon: IconName }> = [
     { href: '/maintain', label: 'Queue', key: 'queue', icon: 'archive' },
+    { href: '/maintain/catalog', label: 'Catalog', key: 'catalog', icon: 'package' },
+    { href: '/maintain/imports', label: 'Imports', key: 'imports', icon: 'download' },
+    { href: '/maintain/dependencies', label: 'Dependencies', key: 'dependencies', icon: 'lock' },
     { href: '/maintain/workers', label: 'Workers', key: 'workers', icon: 'server' },
     { href: '/maintain/images', label: 'Images', key: 'images', icon: 'box' },
     { href: '/maintain/releases', label: 'Releases', key: 'releases', icon: 'package' },
@@ -15,6 +18,9 @@
   ];
 
   const titles: Record<string, string> = {
+    catalog: 'Catalog ownership',
+    imports: 'Repository imports',
+    dependencies: 'Dependency admission',
     audit: 'Audit log',
     images: 'Build images',
     queue: 'Maintainer workspace',

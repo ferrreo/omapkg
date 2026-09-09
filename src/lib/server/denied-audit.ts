@@ -56,6 +56,7 @@ export function shouldAuditDenied(pathname: string, status: number): boolean {
     pathname === '/api/worker' || pathname.startsWith('/api/worker/') ||
     pathname === '/api/workers' || pathname.startsWith('/api/workers/') ||
     pathname === '/api/admin' || pathname.startsWith('/api/admin/') ||
+    pathname === '/api/maintain' || pathname.startsWith('/api/maintain/') ||
     pathname === '/api/internal' || pathname.startsWith('/api/internal/') ||
     pathname === '/api/feedback' || pathname.startsWith('/api/feedback/') ||
     pathname === '/api/mcp' || pathname.startsWith('/api/mcp/');

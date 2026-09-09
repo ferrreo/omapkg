@@ -152,4 +152,5 @@ export interface FactoryWorkflowBinding {
 
 export type PipelineEnv = Omit<FactoryEnv, 'FACTORY'> & {
   FACTORY?: FactoryWorkflowBinding;
+  CATALOG_IMPORT?: Workflow<{ jobId: string }>;
 };

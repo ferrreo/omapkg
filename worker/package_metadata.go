@@ -237,7 +237,7 @@ func parsePackageRelation(value string, provides, allowSoname bool) (string, err
 			return "", errors.New("relation comparison operator is invalid")
 		}
 	}
-	if packageRelationNamePattern.MatchString(name) {
+	if depRelationPattern.MatchString(name) {
 		return value, nil
 	}
 	if packageRelationSonameV1Pattern.MatchString(name) {

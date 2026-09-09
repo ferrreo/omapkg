@@ -28,7 +28,7 @@ export const handle: Handle = async ({ event, resolve }) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   response.headers.set('X-Frame-Options', 'DENY');
-  if (event.locals.user || event.url.pathname.startsWith('/maintain') || event.url.pathname.startsWith('/api/admin')) response.headers.set('Cache-Control', 'private, no-store');
+  if (event.locals.user || event.url.pathname.startsWith('/maintain') || event.url.pathname.startsWith('/api/admin') || event.url.pathname.startsWith('/api/maintain')) response.headers.set('Cache-Control', 'private, no-store');
   return response;
 };
 export const handleError: HandleServerError = ({ error }) => {

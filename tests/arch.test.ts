@@ -19,6 +19,8 @@ test('parses bounded native Arch package metadata and SONAME relations', () => {
   expect(parseArchRelation('lib:libOpenCL.so.1')).toEqual({ name: 'lib:libOpenCL.so.1', operator: null, version: null });
   expect(parseArchRelation('libOpenCL.so=1-64')).toEqual({ name: 'libOpenCL.so', operator: '=', version: '1-64' });
   expect(satisfiesArchRelation(parseArchRelation('lib:libOpenCL.so.1')!, metadata)).toBe(true);
+  expect(parseArchRelation('KSMBD-MODULE')).toEqual({ name: 'KSMBD-MODULE', operator: null, version: null });
+  expect(satisfiesArchRelation(parseArchRelation('KSMBD-MODULE')!, { ...valid, provides: ['KSMBD-MODULE'] })).toBe(true);
 });
 
 test('rejects malformed or non-canonical package metadata', () => {

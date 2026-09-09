@@ -3,6 +3,7 @@ import type { DependencyPlan } from './dependency-plan';
 import { revisionImage } from './policy';
 import { sha256, now } from './db';
 import { error } from '@sveltejs/kit';
+import { canonicalValue } from '../canonical-json';
 
 export const CLOCK_SKEW_SECONDS = 60;
 
@@ -315,16 +316,8 @@ export function databaseFailure(cause: unknown): never {
   throw new WorkerProtocolError(500, 'Worker protocol storage failure');
 }
 
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (isRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
-  }
-  return value;
-}
-
 export function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+  return JSON.stringify(canonicalValue(left)) === JSON.stringify(canonicalValue(right));
 }
 
 function parseJsonColumn(value: string, field: string): unknown {

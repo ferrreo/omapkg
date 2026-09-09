@@ -68,9 +68,13 @@ export async function actorFor(env: Env, userId: string): Promise<Actor> {
       await backfillGithubIdentity(env.DB, githubId, accessToken ?? undefined);
     } catch { /* profile display must not change immutable ID authorization */ }
   }
-  const rows = await env.DB.prepare('SELECT team FROM team_memberships WHERE github_id=?').bind(githubId).all<{ team: Team }>();
+  return actorForGithubId(env.DB, githubId, `user:${userId}`);
+}
+
+export async function actorForGithubId(db: D1Database, githubId: string, fallbackId = 'user:unknown'): Promise<Actor> {
+  const rows = await db.prepare('SELECT team FROM team_memberships WHERE github_id=?').bind(githubId).all<{ team: Team }>();
   const memberships = rows.results.map((row) => row.team);
   const role = memberships.includes('admin') ? 'admin' : memberships.includes('security') ? 'security' : memberships.length ? 'maintainer' : 'public';
-  return { id: githubId ? `github:${githubId}` : `user:${userId}`, role,
+  return { id: githubId ? `github:${githubId}` : fallbackId, role,
     areas: role === 'admin' || role === 'security' ? areas : memberships.filter((team) => areas.includes(team as typeof areas[number])) };
 }

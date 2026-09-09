@@ -18,7 +18,7 @@ export type PackageMetadata = {
 const ARCH_PACKAGE_NAME = /^[a-z0-9][a-z0-9@._+-]{0,63}$/;
 const ARCH_PKGVER = /^[A-Za-z0-9][A-Za-z0-9@._+%]{0,127}$/;
 const ARCH_VERSION = /^(?:[0-9]+:)?[A-Za-z0-9][A-Za-z0-9@._+%~^:-]{0,127}$/;
-const ARCH_DEPENDENCY = /^([a-z0-9][a-z0-9@._+-]{0,63})(?:(>=|<=|=|>|<)(.+))?$/;
+const ARCH_DEPENDENCY = /^([A-Za-z0-9][A-Za-z0-9@._+-]{0,63})(?:(>=|<=|=|>|<)(.+))?$/;
 const ARCH_SONAME = /^[A-Za-z0-9][A-Za-z0-9._+~-]{0,31}:[A-Za-z0-9][A-Za-z0-9._+~^-]{0,127}$/;
 const ARCH_SONAME_V1 = /^([A-Za-z0-9][A-Za-z0-9._+~-]{0,127}\.so)(?:=(.+))?$/;
 
@@ -44,7 +44,7 @@ function parseArchPackageVersion(value: string): { epoch: string; pkgver: string
 export function parseArchDependency(value: string): ArchDependency | null {
   if (typeof value !== 'string' || /\s/.test(value)) return null;
   const match = ARCH_DEPENDENCY.exec(value);
-  if (!match || !ARCH_PACKAGE_NAME.test(match[1])) return null;
+  if (!match) return null;
   const operator = (match[2] as ArchDependency['operator']) ?? null;
   const version = match[3] ?? null;
   if (operator && (!version || !parseArchPackageVersion(version))) return null;

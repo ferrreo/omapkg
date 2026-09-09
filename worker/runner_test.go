@@ -141,7 +141,10 @@ func TestPackageMetadataRejectsInvalidRelationsAndBounds(t *testing.T) {
 	if err != nil || len(ordinary.Depends) != 1 || ordinary.Depends[0] != "libfoo.so>=1-64" || len(ordinary.Conflicts) != 1 || ordinary.Conflicts[0] != "libfoo.so" {
 		t.Fatalf("lowercase .so package relation was rejected: %+v, err=%v", ordinary, err)
 	}
-	for _, relation := range []string{"depend = ../escape\n", "provides = demo>1\n", "provides = lib:libfoo.so.1=1-64\n", "depend = libOpenCL.so.1\n", "depend = libOpenCL.so>1-64\n", "conflict = demo with-space\n", "conflict = lib:libfoo.so.1\n", "conflict = libOpenCL.so=1-64\n"} {
+	if _, err := parsePackageMetadata([]byte(base + "depend = KSMBD-MODULE\nprovides = libOpenCL.so.1\nconflict = libOpenCL.so=1-64\n")); err != nil {
+		t.Fatalf("case-sensitive ALPM capability rejected: %v", err)
+	}
+	for _, relation := range []string{"depend = ../escape\n", "provides = demo>1\n", "provides = lib:libfoo.so.1=1-64\n", "depend = libOpenCL.so/1\n", "provides = libOpenCL.so>1-64\n", "conflict = demo with-space\n", "conflict = lib:libfoo.so.1\n"} {
 		if _, err := parsePackageMetadata([]byte(base + relation)); err == nil {
 			t.Fatalf("invalid relation accepted: %q", relation)
 		}

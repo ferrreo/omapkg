@@ -15,6 +15,7 @@ export class Sandbox extends CloudflareSandbox {
 
 export { FactoryWorkflow } from './workflow';
 export { PublicationWorkflow } from '../publication';
+export { CatalogImportWorkflow } from '../catalog-import';
 
 export default {
   async scheduled(_controller: ScheduledController, env: PipelineEnv) {

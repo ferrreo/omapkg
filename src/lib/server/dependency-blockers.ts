@@ -4,6 +4,7 @@ import { audit, now, query, sha256 } from './db';
 import { parseArchRelation, parsePackageMetadata, satisfiesArchRelation } from './arch';
 import { PolicyError, requireMaintainer } from './policy';
 import { submitRequest } from './requests';
+import { canonicalJson } from '../canonical-json';
 
 export type DependencyBlockerInput = {
   relation: string | null;
@@ -52,6 +53,21 @@ export async function blockerStatements(db: D1Database, context: {
       SELECT ?,q.id,?,?,?,?,?,?,?,?,? FROM requests q WHERE q.id=? AND ${guard}
       ON CONFLICT(id) DO NOTHING`).bind(key, context.scopeId, context.revisionId, context.architecture, blocker.relation, blocker.phase,
         blocker.resolution, blocker.findingSha256 ?? null, blocker.detail, context.timestamp, context.requestId, ...guardValues));
+    if (blocker.resolution === 'dependency' && blocker.relation) {
+      const proposalKey = await sha256(canonicalJson([blocker.relation, context.architecture]));
+      const draft = canonicalJson({ schemaVersion: 1, relation: blocker.relation, architecture: context.architecture,
+        name: parseArchRelation(blocker.relation)!.name.toLowerCase().replace(/[^a-z0-9@._+-]/g, '-').slice(0, 64), upstreamUrl: null, sourceKind: null, license: 'unknown',
+        origin: 'unknown', referenceUrl: null, targetPkgbase: null });
+      statements.push(db.prepare(`INSERT INTO dependency_proposals(id,proposal_key,revision,manifest_json,manifest_sha256,status,created_by,created_at)
+        SELECT ?,?,1,?,?,'proposed',?,? WHERE EXISTS (SELECT 1 FROM dependency_blockers WHERE id=? AND status='open')
+          AND NOT EXISTS (SELECT 1 FROM dependency_proposals WHERE proposal_key=?) ON CONFLICT DO NOTHING`)
+        .bind(proposalKey, proposalKey, draft, await sha256(draft), actor, context.timestamp, key, proposalKey));
+      statements.push(db.prepare(`INSERT INTO dependency_proposal_blockers(proposal_id,blocker_id)
+        SELECT p.id,? FROM dependency_proposals p WHERE p.proposal_key=?
+          AND p.revision=(SELECT MAX(revision) FROM dependency_proposals WHERE proposal_key=?)
+          AND EXISTS (SELECT 1 FROM dependency_blockers WHERE id=? AND status='open') ON CONFLICT DO NOTHING`)
+        .bind(key, proposalKey, proposalKey, key));
+    }
   }
   statements.push(
     db.prepare(`UPDATE requests SET status='blocked',updated_at=? WHERE id=? AND status IN ('generating','queued','building','failed')
@@ -81,12 +97,18 @@ async function currentBlocker(env: Env, actor: Actor | null, requestId: string, 
 }
 
 async function checkDependencyGraph(db: D1Database, parent: string, child: string, replacing: string): Promise<number> {
-  if (parent === child) throw new PolicyError(409, 'A request cannot depend on itself.');
+  return checkDependencyLinks(db, [{ parent, child, blockerId: replacing }]);
+}
+
+export async function checkDependencyLinks(db: D1Database, links: Array<{ parent: string; child: string; blockerId: string }>): Promise<number> {
+  if (!links.length || links.length > 64) throw new PolicyError(409, 'Link between 1 and 64 dependency requests per decision.');
+  if (links.some(({ parent, child }) => parent === child)) throw new PolicyError(409, 'A request cannot depend on itself.');
   const version = (await db.prepare('SELECT version FROM dependency_graph_state WHERE id=1').first<{ version: number }>())!.version;
   const edges = await query<{ request_id: string; dependency_request_id: string }>(db,
-    "SELECT DISTINCT request_id,dependency_request_id FROM dependency_blockers WHERE status='open' AND dependency_request_id IS NOT NULL AND id<>? LIMIT 4097", replacing);
+    `SELECT DISTINCT request_id,dependency_request_id FROM dependency_blockers WHERE status='open' AND dependency_request_id IS NOT NULL
+      AND id NOT IN (${links.map(() => '?').join(',')}) LIMIT 4097`, ...links.map((link) => link.blockerId));
+  edges.push(...links.map(({ parent, child }) => ({ request_id: parent, dependency_request_id: child })));
   if (edges.length > 4096) throw new PolicyError(409, 'Dependency request graph exceeds its admission budget.');
-  edges.push({ request_id: parent, dependency_request_id: child });
   const children = new Map<string, Set<string>>();
   for (const edge of edges) {
     if (!children.has(edge.request_id)) children.set(edge.request_id, new Set());

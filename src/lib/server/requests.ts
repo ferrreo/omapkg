@@ -5,6 +5,23 @@ import { audit, id, now, query } from './db';
 import { parseRequest, PolicyError, requireMaintainer, requireSecurity, validateRevision } from './policy';
 import { revisionRecipePolicy } from '../../../services/pipeline/recipe-policy';
 import { reviewedRuntimeExceptions } from './runtime-evidence';
+import { externalPackageSource } from '../distribution';
+
+export function pendingRequestStatements(db: D1Database, actor: Actor, value: ReturnType<typeof parseRequest>, requestId: string, timestamp: number): D1PreparedStatement[] {
+  const rateKey = `request:${actor.id}`;
+  return [
+    db.prepare(`INSERT INTO rateLimit(id,key,count,lastRequest) VALUES(?,?,1,?)
+      ON CONFLICT(key) DO UPDATE SET
+        count=CASE WHEN rateLimit.lastRequest<=? THEN 1 WHEN rateLimit.count<10 THEN rateLimit.count+1 ELSE 11 END,
+        lastRequest=CASE WHEN rateLimit.lastRequest<=? OR rateLimit.count<10 THEN ? ELSE rateLimit.lastRequest END`)
+      .bind(id(), rateKey, timestamp, timestamp - 3_600, timestamp - 3_600, timestamp),
+    db.prepare(`INSERT INTO requests(id,name,description,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at)
+      SELECT ?,?,?,?,?,?,?,?,'pending',?,? FROM rateLimit WHERE key=? AND count BETWEEN 1 AND 10`)
+      .bind(requestId, value.name, value.description, value.upstream_url, value.source_kind, value.area, value.declared_license, actor.id, timestamp, timestamp, rateKey),
+    db.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,?,?,?,? WHERE changes()=1`)
+      .bind(actor.id, 'request.created', requestId, JSON.stringify(value), timestamp),
+  ];
+}
 
 export async function submitRequest(env: Env, actor: Actor | null, input: unknown) {
   if (!actor) throw new PolicyError(401, 'Sign in with GitHub to request a package.');
@@ -14,22 +31,9 @@ export async function submitRequest(env: Env, actor: Actor | null, input: unknow
   if (existing) throw new PolicyError(409, 'An active request for this package already exists.');
   const timestamp = now();
   const requestId = id();
-  const rateKey = `request:${actor.id}`;
   let result: D1Result[];
   try {
-    result = await env.DB.batch([
-      env.DB.prepare(`INSERT INTO rateLimit(id,key,count,lastRequest) VALUES(?,?,1,?)
-        ON CONFLICT(key) DO UPDATE SET
-          count=CASE WHEN rateLimit.lastRequest<=? THEN 1 WHEN rateLimit.count<10 THEN rateLimit.count+1 ELSE 11 END,
-          lastRequest=CASE WHEN rateLimit.lastRequest<=? OR rateLimit.count<10 THEN ? ELSE rateLimit.lastRequest END`)
-        .bind(id(), rateKey, timestamp, timestamp - 3_600, timestamp - 3_600, timestamp),
-      env.DB.prepare(`INSERT INTO requests(id,name,description,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at)
-        SELECT ?,?,?,?,?,?,?,?,'pending',?,? FROM rateLimit WHERE key=? AND count BETWEEN 1 AND 10`)
-        .bind(requestId, value.name, value.description, value.upstream_url, value.source_kind, value.area, value.declared_license, actor.id, timestamp, timestamp, rateKey),
-      env.DB.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at)
-        SELECT ?,?,?,?,? WHERE changes()=1`)
-        .bind(actor.id, 'request.created', requestId, JSON.stringify(value), timestamp)
-    ]);
+    result = await env.DB.batch(pendingRequestStatements(env.DB, actor, value, requestId, timestamp));
   } catch (cause) {
     if (cause instanceof Error && /UNIQUE constraint failed: requests\.name/i.test(cause.message)) {
       throw new PolicyError(409, 'An active request for this package already exists.');
@@ -47,6 +51,7 @@ export async function getRequest(env: Env, requestId: string) {
 export async function startFactory(env: Env, actor: Actor | null, requestId: string, reason?: string) {
   const request = await getRequest(env, requestId) as PackageRequest & { factory_run_id?: string | null };
   const reviewer = requireMaintainer(actor, request.area);
+  if (externalPackageSource(request.upstream_url)) throw new PolicyError(409, 'This external packaging source needs a human-reviewed OPR replacement before generation.');
   if (reason !== undefined && (typeof reason !== 'string' || !reason.trim() || reason.length > 2_000)) {
     throw new PolicyError(400, 'Provide a regeneration reason, up to 2,000 characters.');
   }

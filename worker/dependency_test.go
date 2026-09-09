@@ -110,6 +110,12 @@ func TestDependencyPrepScriptVerifiesPlanAndKeepsNoNodeps(t *testing.T) {
 }
 
 func TestDependencyPrepScriptInstallsOnlyPacmanMissingRelations(t *testing.T) {
+	if !validArchDependency("KSMBD-MODULE") {
+		t.Fatal("native virtual capabilities are case-sensitive and may contain uppercase letters")
+	}
+	if _, err := parsePackageRelation("KSMBD-MODULE", true, true); err != nil {
+		t.Fatal(err)
+	}
 	plan, _ := dependencyPlanFixture()
 	script, err := dependencyPrepScript([]string{"opr-lib=1.2-1", "tree"}, plan, "podman")
 	if err != nil {

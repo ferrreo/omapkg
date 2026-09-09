@@ -33,6 +33,7 @@ var (
 	archPattern          = regexp.MustCompile(`^(x86_64|aarch64)$`)
 	namePattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+@%=-]{0,254}$`)
 	depNamePattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9@._+-]{0,63}$`)
+	depRelationPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._+-]{0,63}$`)
 	archVersionPattern   = regexp.MustCompile(`^([0-9]+:)?[A-Za-z0-9][A-Za-z0-9@._+%~^:-]{0,127}$`)
 	pkgverPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._+%]{0,127}$`)
 	workerVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
@@ -225,15 +226,15 @@ type Provenance struct {
 }
 
 type CompleteRequest struct {
-	LeaseToken          string    `json:"leaseToken"`
-	Status              string    `json:"status"`
+	LeaseToken          string              `json:"leaseToken"`
+	Status              string              `json:"status"`
 	DependencyBlockers  []dependencyBlocker `json:"dependencyBlockers,omitempty"`
-	Error               string    `json:"error,omitempty"`
-	Artifact            *Artifact `json:"artifact,omitempty"`
-	Provenance          string    `json:"provenance,omitempty"`
-	ProvenanceSignature string    `json:"provenanceSignature,omitempty"`
-	InstalledSize       *int64    `json:"installedSize,omitempty"`
-	SmokePassed         bool      `json:"smokePassed"`
+	Error               string              `json:"error,omitempty"`
+	Artifact            *Artifact           `json:"artifact,omitempty"`
+	Provenance          string              `json:"provenance,omitempty"`
+	ProvenanceSignature string              `json:"provenanceSignature,omitempty"`
+	InstalledSize       *int64              `json:"installedSize,omitempty"`
+	SmokePassed         bool                `json:"smokePassed"`
 }
 
 type fetchedSource struct {
@@ -374,10 +375,10 @@ func validArchDependency(value string) bool {
 	}
 	for _, operator := range []string{">=", "<=", "=", ">", "<"} {
 		if index := strings.Index(value, operator); index >= 0 {
-			return depNamePattern.MatchString(value[:index]) && validArchVersion(value[index+len(operator):])
+			return depRelationPattern.MatchString(value[:index]) && validArchVersion(value[index+len(operator):])
 		}
 	}
-	return depNamePattern.MatchString(value)
+	return depRelationPattern.MatchString(value)
 }
 
 func validateJob(job Job, cfg Config) error {

@@ -22,7 +22,8 @@
   "services": [{ "binding": "SIGNER", "service": "omapkg-signer" }],
   "workflows": [
     { "name": "factory", "binding": "FACTORY", "class_name": "FactoryWorkflow" },
-    { "name": "publication", "binding": "PUBLICATION", "class_name": "PublicationWorkflow" }
+    { "name": "publication", "binding": "PUBLICATION", "class_name": "PublicationWorkflow" },
+    { "name": "catalog-import", "binding": "CATALOG_IMPORT", "class_name": "CatalogImportWorkflow" }
   ],
   "vars": {
     "PUBLIC_ORIGIN": "http://localhost:5173",
