@@ -62,9 +62,9 @@ build() {
     echo 'offline build unexpectedly reached network' >&2
     return 1
   fi
-  ! touch /etc/opr-escape-test
-  test ! -e /var/run/docker.sock
-  test ! -e /run/podman/podman.sock
+  if touch /etc/opr-escape-test; then return 1; fi
+  test ! -e /var/run/docker.sock || return 1
+  test ! -e /run/podman/podman.sock || return 1
   ./configure --prefix=/usr
   make
 }
@@ -93,7 +93,7 @@ package() {
 		SmokeCommands: []string{
 			`test "$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n')" = lo`,
 			`! grep -q '^00000000' /proc/net/route`,
-			`! touch /etc/opr-escape-test`,
+			`if touch /etc/opr-escape-test; then exit 1; fi`,
 			`test -f /usr/share/man/man1/hello.1.gz || test -f /usr/share/man/man1/hello.1`,
 			`/usr/bin/hello --version | /usr/bin/grep -F '2.12'`,
 		},
