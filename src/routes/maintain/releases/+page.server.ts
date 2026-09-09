@@ -9,7 +9,9 @@ export const load: PageServerLoad = async (event) => {
   const { DB } = environment(event);
   const [releases, builds, crashQuarantines] = await Promise.all([
     query<Release>(DB, 'SELECT * FROM releases ORDER BY published_at DESC LIMIT 200'),
-    query<Build>(DB, 'SELECT * FROM builds WHERE id NOT IN (SELECT build_id FROM releases) ORDER BY created_at DESC LIMIT 100'),
+    query<Build & { cohort_id: string | null }>(DB, `SELECT b.*,c.cohort_id FROM builds b
+      LEFT JOIN cohort_recipe_ownership c ON c.recipe_revision_id=b.revision_id
+      WHERE b.id NOT IN (SELECT build_id FROM releases) ORDER BY b.created_at DESC LIMIT 100`),
     query<{ release_id: string; name: string; version: string; status: string; attempts: number; last_error: string | null }>(DB,
       `SELECT q.release_id,r.name,r.version,q.status,q.attempts,q.last_error FROM crash_quarantines q
         JOIN releases r ON r.id=q.release_id WHERE q.status<>'completed' ORDER BY q.updated_at DESC LIMIT 100`)

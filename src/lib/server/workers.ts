@@ -334,6 +334,10 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
       JOIN requests q ON q.id = r.request_id
       WHERE b.architecture = ?
         AND q.status IN ('queued', 'building')
+        AND NOT EXISTS (SELECT 1 FROM cohort_recipe_ownership owned JOIN cohorts cohort ON cohort.id=owned.cohort_id
+          WHERE owned.recipe_revision_id=r.id AND (cohort.phase<>'build' OR cohort.condition NOT IN ('ready','blocked')
+            OR NOT EXISTS(SELECT 1 FROM cohort_members member WHERE member.cohort_id=cohort.id
+              AND member.revision=cohort.current_revision AND member.recipe_revision_id=r.id)))
         AND r.pr_url IS NOT NULL AND r.commit_sha IS NOT NULL AND length(r.image_digest) > 0
         AND (b.status = 'queued' OR (b.status = 'leased' AND b.lease_expires_at IS NOT NULL AND b.lease_expires_at < ?))
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)

@@ -2,7 +2,7 @@ import { runtimeEvidence } from './runtime-fixtures';
 import { schema, MemoryR2, base64, env, insertBinaryRelease } from './release-fixtures';
 import { describe, expect, test } from 'bun:test';
 import { gunzipSync } from 'node:zlib';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { manifestDigest } from '../src/lib/server/policy';
 import { promoteBatch, publishBuild, publicRelease, quarantineRelease, rollbackRelease } from '../src/lib/server/releases';
 import { sha256 } from '../src/lib/server/db';
@@ -10,11 +10,8 @@ import type { Env } from '../src/lib/server/env';
 import { claimJob } from '../src/lib/server/workers';
 import { asD1, TestD1 } from './d1';
 
-const publicationSchema = [
-  '0001_initial.sql', '0003_distribution.sql', '0005_factory_run_id.sql', '0007_core_guards.sql', '0008_distribution_assertions.sql',
-  '0009_publication_jobs.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql',
-  '0018_worker_metadata.sql', '0019_crash_triage.sql', '0020_worker_lifecycle.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql', '0026_release_attestations.sql', '0028_dependency_evidence.sql',
-].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
+const publicationSchema = readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
+  .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
 
 test('R2 conditional reads require native unquoted etags', async () => {
   const r2 = new MemoryR2();

@@ -1,8 +1,8 @@
-import { redirect } from '@sveltejs/kit';
+import { error, redirect } from '@sveltejs/kit';
 import { getCatalogImport, listCatalogImports, listImportEntries, parseImportManifest, reviewImportEntry } from '$lib/server/catalog-imports';
 import { importBuildCoverage, reconcileCatalogImports, type ImportDifference } from '$lib/server/catalog-reconciliation';
 import { environment, field, formAction, maintainer } from '$lib/server/http';
-import { query } from '$lib/server/db';
+import { query, sha256 } from '$lib/server/db';
 import type { ImportEntry } from '$lib/imports';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -16,16 +16,20 @@ export const load: PageServerLoad = async (event) => {
   const differenceAfter = event.url.searchParams.get('differenceAfter') ?? '';
   const [detail, entries, captures, coverage, comparisons, observedVersions] = await Promise.all([
     getCatalogImport(DB, event.params.id), listImportEntries(DB, event.params.id, { search, disposition, after }), listCatalogImports(DB), importBuildCoverage(DB, event.params.id),
-    query<{ id: string; report_json: string; created_at: number }>(DB, "SELECT id,report_json,created_at FROM catalog_reconciliations WHERE candidate_import_id=? AND status='ready' ORDER BY created_at DESC,id LIMIT 20", event.params.id),
+    query<{ id: string; report_json: string; report_sha256: string; created_at: number }>(DB, "SELECT id,report_json,report_sha256,created_at FROM catalog_reconciliations WHERE candidate_import_id=? AND status='ready' ORDER BY created_at DESC,id LIMIT 20", event.params.id),
     query<{ version: string; target: string }>(DB, "SELECT json_extract(entry_json,'$.version') AS version,target_architecture AS target FROM catalog_import_entries WHERE import_id=? AND name='omarchy'", event.params.id),
   ]);
+  for (const comparison of comparisons) if (await sha256(comparison.report_json) !== comparison.report_sha256) error(409, 'Stored reconciliation integrity check failed.');
   const selected = comparisons.find((comparison) => comparison.id === reportId) ?? comparisons[0];
+  const summary = selected ? JSON.parse(selected.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] : null;
+  const baseline = summary ? await getCatalogImport(DB, summary.baselineId) : null;
   const differences = selected ? await query<{ item_json: string }>(DB, `SELECT item_json FROM catalog_reconciliation_items WHERE report_id=?
     AND (?='' OR kind=?) AND package_key>? ORDER BY package_key LIMIT 50`, selected.id, differenceKind, differenceKind, differenceAfter) : [];
   return { ...detail, entries: entries.map((entry) => ({ ...entry, metadata: JSON.parse(entry.entry_json) as ImportEntry })),
     captures: captures.filter((capture) => capture.id !== event.params.id && capture.status !== 'capturing').map((capture) => ({ ...capture, manifest: parseImportManifest(JSON.parse(capture.manifest_json)) })),
     coverage, comparisons: comparisons.map((comparison) => ({ id: comparison.id, summary: JSON.parse(comparison.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] })),
-    selectedReport: selected ? { id: selected.id, summary: JSON.parse(selected.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] } : null,
+    selectedReport: selected && summary ? { id: selected.id, summary } : null,
+    uncomparedBaselineSources: baseline && summary ? baseline.manifest.sources.filter((source) => source.status === 'captured' && source.entries > 0 && !summary.scope.includes(source.collection)) : [],
     differences: differences.map((item) => JSON.parse(item.item_json) as ImportDifference), observedVersions,
     search, disposition, after, differenceKind, canManage: actor.role !== 'maintainer' || actor.areas.includes('system') };
 };

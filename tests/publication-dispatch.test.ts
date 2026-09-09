@@ -4,6 +4,8 @@ import { asD1, TestD1 } from './d1';
 import { enqueuePublication } from '../services/pipeline/publication-dispatch';
 
 const schema = `
+CREATE TABLE builds(id TEXT PRIMARY KEY,revision_id TEXT);
+CREATE TABLE cohort_recipe_ownership(recipe_revision_id TEXT PRIMARY KEY,cohort_id TEXT NOT NULL);
 CREATE TABLE publication_jobs (
   build_id TEXT PRIMARY KEY,
   status TEXT NOT NULL,

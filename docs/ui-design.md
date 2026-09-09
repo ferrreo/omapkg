@@ -31,9 +31,9 @@ Spacing follows Omarchy's `em` scale: `.5`, `1`, `1.5`, `2`, `3`, `4`, `5`, `6`.
 
 ## Navigation and page shapes
 
-Public navigation keeps Omarchy's compact centered button rail, with the OMAPKG wordmark, package search, Packages, Docs, Privacy, and GitHub sign-in or Workspace. `⌘K`/`Ctrl-K` opens a native dialog with grouped results. The public landing page begins with a short one-line masthead, then puts catalog rows and request controls ahead of explanatory copy. It never displays made-up package counts, uptime, or adoption numbers.
+Public navigation keeps Omarchy's compact centered button rail, with the OMAPKG wordmark, package search, Packages, Repository status, Docs, Privacy, and GitHub sign-in or Workspace. `⌘K`/`Ctrl-K` opens a native dialog with grouped results. The public landing page begins with a short one-line masthead, then puts catalog rows and request controls ahead of explanatory copy. It never displays made-up package counts, uptime, or adoption numbers.
 
-Maintainer navigation uses a compact top rail and work surface: Queue, Workers, Images, Releases, Audit, Team, and public catalog. The request queue remains addressable at `/maintain/requests` from Queue and direct links. The main pane starts with evidence. Tables, diffs, manifests, and timeline rows sit directly on flat work surfaces; avoid nested cards and fake browser chrome. A release-affecting control states the target, evidence, reason, and resulting action before submission.
+Maintainer navigation uses a compact top rail and work surface: Inbox, Catalog, Cohorts, Releases, Operations, Audit, and public catalog. Contextual links place dependency proposals in Inbox, imports in Catalog, and worker/image/team controls in Operations. The request queue remains addressable at `/maintain/requests` from Inbox and direct links. The main pane starts with evidence. Tables, diffs, manifests, and timeline rows sit directly on flat work surfaces; avoid nested cards and fake browser chrome. A release-affecting control states the target, evidence, reason, and resulting action before submission.
 
 ## Route map
 
@@ -42,9 +42,14 @@ Maintainer navigation uses a compact top rail and work surface: Queue, Workers, 
 | `/` | Public | Catalogue + workflow diagram | Browse, request, Surface A/B explanation, build path |
 | `/packages` | Public | Filtered catalogue table | Search, surface, channel, architecture, source, status |
 | `/packages/[name]` | Public | Package evidence sheet | Version history, source/ref/digest, license, checksums, signatures, SBOM, attestation, tests, install path |
+| `/repository` | Public | Published repository state | Per-target database availability and binary/recipe counts, with no private import or draft progress |
 | `/request` | Public | Short intake form | Name + Git or direct download URL, input type, category, declared license; no PKGBUILD upload |
 | `/privacy` | Public | Consent policy | Crash report fields, opt-in boundary, redaction guidance, no automatic telemetry |
 | `/maintain` | Maintainer | Queue workbench | Area queue, security review, build/release stage summaries, honest empty states |
+| `/maintain/catalog` | Maintainer/security | Ownership policies | Immutable identities, source, repository/lane, both targets and independent admission |
+| `/maintain/imports` | Maintainer | Capture and reconciliation | Arch/Omarchy/existing-OPR capture, source gaps and baseline matching; absent external ARM baseline is new-target qualification |
+| `/maintain/dependencies` | Maintainer/security | Shared admission inbox | Proposed owned replacements, all blocked parents and explicit human decisions |
+| `/maintain/cohorts/[id]` | Maintainer/security/release | Cohort workbench | Overview, Changes, Phases, Tests, History; exact membership, native matrix, generated facts, reviewed narrative and server-derived progression |
 | `/maintain/requests/[id]` | Maintainer/security | Review workbench | Generated diff, source/dependency manifest, agent trace, approve/deny/return actions, audit link |
 | `/maintain/workers` | Maintainer/admin | Fleet table | Worker identity, daemon version/runtime/capabilities, architecture, heartbeat, lease state, pause/drain/resume, revoke, archive, enrollment token action |
 | `/maintain/images` | Maintainer/admin | Image registry | Registered digest-pinned images, architecture defaults, availability, audit-backed admin actions |

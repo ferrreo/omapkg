@@ -1,5 +1,6 @@
 import { now } from '../../src/lib/server/db';
 import type { Env } from '../../src/lib/server/env';
+import { cohortForBuild } from '../../src/lib/server/cohorts';
 
 export type PublicationPayload = { buildId: string };
 
@@ -38,6 +39,8 @@ export async function mark(env: Pick<Env, 'DB'>, buildId: string, status: 'dispa
 export async function enqueuePublication(envInput: Env, buildId: string): Promise<{ id: string; dispatched: boolean }> {
   const env = envInput as PublicationEnv;
   const payload = parsePayload({ buildId });
+  const cohort = await cohortForBuild(env.DB, buildId);
+  if (cohort) return { id: `cohort-${cohort.cohort_id}`, dispatched: false };
   const workflowId = `publish-${payload.buildId}`;
   await env.DB.prepare(`INSERT OR IGNORE INTO publication_jobs(build_id,status,attempts,next_attempt_at,created_at,updated_at)
     VALUES(?,'queued',0,?,?,?)`).bind(payload.buildId, now(), now(), now()).run();

@@ -3,6 +3,7 @@ import type { Env } from '../src/lib/server/env';
 import { asD1, TestD1 } from './d1';
 
 export const schema = `
+CREATE TABLE cohort_recipe_ownership(recipe_revision_id TEXT PRIMARY KEY,cohort_id TEXT NOT NULL);
 CREATE TABLE requests(id TEXT PRIMARY KEY,name TEXT,upstream_url TEXT,source_kind TEXT,area TEXT,requested_by TEXT,status TEXT,created_at INTEGER,updated_at INTEGER);
 CREATE TABLE revisions(id TEXT PRIMARY KEY,request_id TEXT,version TEXT,recipe TEXT,recipe_sha256 TEXT,manifest_sha256 TEXT,sources_json TEXT,dependencies_json TEXT,smoke_commands_json TEXT,architectures_json TEXT,source_date_epoch INTEGER,image_digest TEXT,license TEXT,surface TEXT,explanation TEXT,sbom_json TEXT,lint_json TEXT,upstream_commit TEXT,pr_url TEXT,commit_sha TEXT,created_at INTEGER,description TEXT);
 CREATE TABLE builds(id TEXT PRIMARY KEY,revision_id TEXT,status TEXT,architecture TEXT,worker_id TEXT,artifact_key TEXT,artifact_sha256 TEXT,artifact_size INTEGER,installed_size INTEGER,dependency_plan_json TEXT,artifact_filename TEXT,provenance TEXT,provenance_signature TEXT,smoke_passed INTEGER,created_at INTEGER);

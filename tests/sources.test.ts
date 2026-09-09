@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import type { Worker } from '../src/lib/model';
 import { sha256 } from '../src/lib/server/db';
 import { claimJob } from '../src/lib/server/workers';
@@ -41,17 +41,8 @@ function requestEvent(db: TestD1, reads: string[], request = new Request(source)
 }
 
 async function normalClaimFixture() {
-  const db = new TestD1(readFileSync('migrations/0001_initial.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0007_core_guards.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0011_build_images.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0014_package_metadata.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0015_installed_size.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0018_worker_metadata.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0019_crash_triage.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0020_worker_lifecycle.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0022_public_recipes.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0023_dependency_plan.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0028_dependency_evidence.sql', 'utf8'));
+  const db = new TestD1(readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
+    .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n'));
   const keys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKey = (() => {
     let binary = '';

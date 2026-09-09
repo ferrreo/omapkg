@@ -1,6 +1,6 @@
 export const areas = ['desktop', 'development', 'gaming', 'multimedia', 'productivity', 'system'] as const;
 export type Area = (typeof areas)[number];
-export const teams = [...areas, 'security', 'admin'] as const;
+export const teams = [...areas, 'security', 'release', 'admin'] as const;
 export type Team = (typeof teams)[number];
 export type Architecture = 'x86_64' | 'aarch64';
 export type BuildImageMap = Partial<Record<Architecture, string>>;

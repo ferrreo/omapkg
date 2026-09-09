@@ -23,10 +23,12 @@ const MAX_BODY = 8 * 1024;
 export async function requeuePublications(envInput: Env, limit = 20): Promise<number> {
   const env = envInput as PublicationEnv;
   const rows = await env.DB.prepare(`SELECT build_id FROM publication_jobs
-    WHERE status IN ('queued','failed') AND next_attempt_at<=? ORDER BY next_attempt_at,build_id LIMIT ?`).bind(now(), Math.min(Math.max(limit, 1), 100)).all<{ build_id: string }>();
+    WHERE status IN ('queued','failed') AND next_attempt_at<=?
+      AND NOT EXISTS(SELECT 1 FROM builds b JOIN cohort_recipe_ownership c ON c.recipe_revision_id=b.revision_id WHERE b.id=publication_jobs.build_id)
+    ORDER BY next_attempt_at,build_id LIMIT ?`).bind(now(), Math.min(Math.max(limit, 1), 100)).all<{ build_id: string }>();
   let dispatched = 0;
   for (const row of rows.results) {
-    try { await enqueuePublication(env, row.build_id); dispatched += 1; } catch { /* next cron run retries with backoff */ }
+    try { if ((await enqueuePublication(env, row.build_id)).dispatched) dispatched += 1; } catch { /* next cron run retries with backoff */ }
   }
   return dispatched;
 }

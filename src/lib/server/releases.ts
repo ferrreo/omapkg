@@ -2,6 +2,7 @@ import type { Env } from './env';
 import type { Actor, Release, Architecture } from '../model';
 import { PolicyError, requireMaintainer } from './policy';
 import { audit, id, now, query, sha256 } from './db';
+import { cohortForBuild } from './cohorts';
 import { attestationKey, releaseAttestation } from './release-attestation';
 import {
   fail,
@@ -68,6 +69,7 @@ async function publishBuildInner(env: Env, actor: Actor, buildId: string): Promi
   const existing = await loadReleaseByBuild(env, buildId);
   if (existing) return existing;
   const build = await joinedBuild(env, safeId(buildId, 'build ID'));
+  if (await cohortForBuild(env.DB, buildId)) fail(409, 'Cohort builds require coordinated distribution publication. Open the cohort release candidate.');
   if (build.build_status !== 'succeeded' || build.smoke_passed !== 1) fail(409, 'Only a successful build with passing smoke tests can enter quarantine.');
   if (!(env.SIGNER || env.SIGNER_URL)) fail(503, 'Signing service is not configured; publication is blocked.');
   if (!['queued', 'building', 'built'].includes(build.request_status)) fail(409, 'The package request is no longer publishable.');

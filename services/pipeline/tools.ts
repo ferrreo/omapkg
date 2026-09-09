@@ -1,6 +1,7 @@
 import { shellCheckCommand } from './shell-check';
 import { blockerStatements, parseDependencyBlockers } from '../../src/lib/server/dependency-blockers';
 import { audit, now, sha256 } from '../../src/lib/server/db';
+import { externalPackageSource } from '../../src/lib/distribution';
 import { redactText, normalizeSourceUrl, shellQuote, gitInspectCommand, sourceReadCommand } from './security';
 import type { SourceEvidence, FactoryRequest, FactoryEnv, FactoryCandidate } from './types';
 import {
@@ -600,11 +601,13 @@ export function parseFactoryRequest(row: {
 }): FactoryRequest {
   const upstreamRef = row.upstream_ref ?? null;
   if (upstreamRef !== null && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(upstreamRef)) throw new Error('upstream ref must be a commit SHA');
+  const upstreamUrl = normalizeSourceUrl(row.upstream_url).toString();
+  if (externalPackageSource(upstreamUrl)) throw new Error('Factory needs an authoritative upstream source; AUR/ALARM packaging requires a human-admitted OPR replacement.');
   return {
     id: row.id,
     name: row.name,
     descriptionHint: row.description ?? '',
-    upstreamUrl: normalizeSourceUrl(row.upstream_url).toString(),
+    upstreamUrl,
     sourceKind: row.source_kind,
     area: row.area,
     declaredLicense: row.declared_license,

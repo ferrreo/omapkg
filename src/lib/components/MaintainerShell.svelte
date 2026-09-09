@@ -6,21 +6,24 @@
   export let user: { id: string; name?: string; image?: string | null; githubUsername?: string | null } | null = null;
 
   const links: Array<{ href: string; label: string; key: string; icon: IconName }> = [
-    { href: '/maintain', label: 'Queue', key: 'queue', icon: 'archive' },
+    { href: '/maintain', label: 'Inbox', key: 'queue', icon: 'archive' },
     { href: '/maintain/catalog', label: 'Catalog', key: 'catalog', icon: 'package' },
-    { href: '/maintain/imports', label: 'Imports', key: 'imports', icon: 'download' },
-    { href: '/maintain/dependencies', label: 'Dependencies', key: 'dependencies', icon: 'lock' },
-    { href: '/maintain/workers', label: 'Workers', key: 'workers', icon: 'server' },
-    { href: '/maintain/images', label: 'Images', key: 'images', icon: 'box' },
+    { href: '/maintain/cohorts', label: 'Cohorts', key: 'cohorts', icon: 'box' },
     { href: '/maintain/releases', label: 'Releases', key: 'releases', icon: 'package' },
+    { href: '/maintain/workers', label: 'Operations', key: 'operations', icon: 'server' },
     { href: '/maintain/audit', label: 'Audit', key: 'audit', icon: 'log' },
-    { href: '/maintain/team', label: 'Team', key: 'team', icon: 'user' }
   ];
+  const sections: Record<string, Array<{ href: string; label: string; key: string }>> = {
+    queue: [{ href: '/maintain', label: 'Review queue', key: 'queue' }, { href: '/maintain/dependencies', label: 'Dependency proposals', key: 'dependencies' }],
+    catalog: [{ href: '/maintain/catalog', label: 'Ownership policies', key: 'catalog' }, { href: '/maintain/imports', label: 'Imports and matching', key: 'imports' }],
+    operations: [{ href: '/maintain/workers', label: 'Workers', key: 'workers' }, { href: '/maintain/images', label: 'Images', key: 'images' }, { href: '/maintain/team', label: 'Team access', key: 'team' }],
+  };
 
   const titles: Record<string, string> = {
     catalog: 'Catalog ownership',
     imports: 'Repository imports',
     dependencies: 'Dependency admission',
+    cohorts: 'Build cohorts',
     audit: 'Audit log',
     images: 'Build images',
     queue: 'Maintainer workspace',
@@ -30,7 +33,7 @@
     team: 'Maintainer team'
   };
 
-  $: activeKey = active === 'requests' ? 'queue' : active;
+  $: activeKey = ['requests', 'dependencies'].includes(active) ? 'queue' : active === 'imports' ? 'catalog' : ['workers', 'images', 'team'].includes(active) ? 'operations' : active;
   $: title = titles[active] || 'Maintainer workspace';
   $: userLabel = user?.githubUsername ? `@${user.githubUsername}` : user?.name || 'Signed-in maintainer';
 </script>
@@ -63,6 +66,12 @@
       <span class="maintainer-topbar__title">{title}</span>
       <span class="tag tag--accent"><Icon name="shield" size={13} />omapkg / maintain</span>
     </header>
+    {#if sections[activeKey]}<nav class="maintainer-section-nav" aria-label={`${links.find((link) => link.key === activeKey)?.label ?? 'Workspace'} sections`}>{#each sections[activeKey] as section}<a href={section.href} aria-current={active === section.key || (active === 'requests' && section.key === 'queue') ? 'page' : undefined}>{section.label}</a>{/each}</nav>{/if}
     <slot />
   </div>
 </div>
+
+<style>
+  .maintainer-section-nav { display: flex; justify-content: center; flex-wrap: wrap; gap: 1rem; margin-block: 1rem; padding-inline: 1rem; }
+  .maintainer-section-nav a[aria-current="page"] { font-weight: 700; text-decoration: underline; }
+</style>

@@ -4,6 +4,7 @@ import { asD1, TestD1 } from './d1';
 import { canonicalJson } from '../src/lib/canonical-json';
 import { packagePath, parseSystemVersion, type CatalogManifest } from '../src/lib/distribution';
 import { approveCatalogPackage, getCatalogPackage, listCatalogPackages, parseCatalogManifest, proposeCatalogPackage } from '../src/lib/server/catalog-ownership';
+import { parseFactoryRequest } from '../services/pipeline/tools';
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
   .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
@@ -28,6 +29,9 @@ test('catalog pins identity, requires both targets and keeps external packaging 
   expect(() => parseCatalogManifest({ ...catalogFixture(), upstreamUrl: 'https://aur.archlinux.org/example.git' })).toThrow('reference evidence');
   expect(() => parseCatalogManifest({ ...catalogFixture(), origin: 'alarm-reference' })).toThrow('immutable commit');
   expect(parseCatalogManifest({ ...catalogFixture(), architectures: ['x86_64'], architectureExceptions: [{ architecture: 'aarch64', reason: 'x86-only hardware driver' }] }).architectureExceptions).toHaveLength(1);
+  for (const upstream_url of ['https://aur.archlinux.org/example.git', 'https://mirror.archlinuxarm.org/aarch64/core/example.pkg.tar.xz']) {
+    expect(() => parseFactoryRequest({ id: 'example', name: 'example', upstream_url, source_kind: 'git', area: 'system', declared_license: 'MIT' })).toThrow('authoritative upstream');
+  }
 });
 
 test('catalog admission is immutable, independently reviewed, collision-safe and fenced against stale decisions', async () => {

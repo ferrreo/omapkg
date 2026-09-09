@@ -7,7 +7,7 @@
   export let data: PageData;
   export let form: ActionData;
 
-  const defaultTeams = ['desktop', 'development', 'gaming', 'multimedia', 'productivity', 'system', 'security', 'admin'] as const;
+  const defaultTeams = ['desktop', 'development', 'gaming', 'multimedia', 'productivity', 'system', 'security', 'release', 'admin'] as const;
   type TeamName = (typeof defaultTeams)[number];
   type MemberRecord = { accountId: string; github_username: string; avatar_url?: string | null; team: string; canRevoke: boolean };
   type UserSuggestion = { username: string; name?: string | null; avatarUrl?: string | null };
@@ -31,7 +31,7 @@
 
   const teamLabels: Record<TeamName, string> = {
     desktop: 'Desktop', development: 'Development', gaming: 'Gaming', multimedia: 'Multimedia',
-    productivity: 'Productivity', system: 'System', security: 'Security', admin: 'Admin'
+    productivity: 'Productivity', system: 'System', security: 'Security', release: 'Release', admin: 'Admin'
   };
   const teamDescriptions: Record<TeamName, string> = {
     desktop: 'Review desktop package requests.',
@@ -41,6 +41,7 @@
     productivity: 'Review productivity package requests.',
     system: 'Review system package requests.',
     security: 'Review security gates across every area.',
+    release: 'Authorize exact system and independent OPR releases. Separate from recipe review.',
     admin: 'Manage platform and team settings; includes Security.'
   };
 
