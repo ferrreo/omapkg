@@ -71,7 +71,10 @@ submission and again in the worker. Static analysis is an additional rejection
 check, not a sandbox or proof of safety.
 
 Build and smoke execution are offline, unprivileged containers. Dependency
-preparation has network access and never runs the candidate recipe. Runtime smoke
+preparation has network access and never runs the candidate recipe. Docker
+preparation disables the nested pacman downloader filesystem sandbox because Docker
+seccomp can prevent Landlock; outer container restrictions and package signature
+verification remain enabled. Runtime smoke
 uses a separately pinned minimal Arch image plus runtime dependencies, excluding
 the candidate's build-only dependency plan. Operators configure that image;
 recipe authors cannot select it. The report records base digest, prepared image
