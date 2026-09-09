@@ -61,10 +61,14 @@ func newRunner(cfg Config) (*Runner, error) {
 	if _, err := exec.LookPath(cfg.Runtime); err != nil {
 		return nil, fmt.Errorf("find %s: %w", cfg.Runtime, err)
 	}
+	if cfg.RuntimeImage == "" {
+		return nil, errors.New("runtimeImage must select a digest-pinned minimal runtime image")
+	}
 	return &Runner{
 		Runtime:      cfg.Runtime,
 		Image:        cfg.Image,
 		ImageDigest:  cfg.ImageDigest,
+		RuntimeImage: cfg.RuntimeImage,
 		Origin:       cfg.Origin,
 		StateDir:     cfg.StateDir,
 		BuildTimeout: defaultBuildTimeout,

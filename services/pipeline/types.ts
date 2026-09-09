@@ -1,3 +1,6 @@
+import type { RecipeTemplate } from './recipe-template';
+import type { PublicRecipeOptions } from './recipe';
+import type { RuntimeException } from '../../src/lib/server/runtime-evidence';
 import type { Architecture, Area, BuildImageMap, Revision, Source } from '../../src/lib/model';
 import type { GitHubEnv } from '../../src/lib/server/github';
 import type { VendorArtifactManifest } from './artifacts';
@@ -27,6 +30,7 @@ export interface VendorEvidence {
 
 export interface FactoryRequest {
   id: string;
+  generationId?: string;
   name: string;
   upstreamUrl: string;
   sourceKind: SourceKind;
@@ -76,12 +80,16 @@ export interface FactoryCandidate {
   vendorArtifact?: VendorArtifactManifest;
   /** Public client recipe. Internal recipe may use private sealed source URLs. */
   publicRecipe?: string | null;
+  publicRecipeOptions?: PublicRecipeOptions;
   pkgrel?: number;
   sourceDateEpoch: number;
   imageDigest: string;
   license: string;
   surface: Surface;
   description: string;
+  recipeMode?: 'template' | 'custom-shell';
+  template?: RecipeTemplate;
+  runtimeExceptions?: RuntimeException[];
   buildCommands: string[];
   packageCommands: string[];
   explanation: string;

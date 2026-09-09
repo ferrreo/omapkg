@@ -1,3 +1,4 @@
+import { runtimeEvidence } from './runtime-fixtures';
 import { schema, MemoryR2, base64, env, insertBinaryRelease } from './release-fixtures';
 import { describe, expect, test } from 'bun:test';
 import { gunzipSync } from 'node:zlib';
@@ -12,7 +13,7 @@ import { asD1, TestD1 } from './d1';
 const publicationSchema = [
   '0001_initial.sql', '0003_distribution.sql', '0005_factory_run_id.sql', '0007_core_guards.sql', '0008_distribution_assertions.sql',
   '0009_publication_jobs.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql',
-  '0018_worker_metadata.sql', '0019_crash_triage.sql', '0020_worker_lifecycle.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql',
+  '0018_worker_metadata.sql', '0019_crash_triage.sql', '0020_worker_lifecycle.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql', '0026_release_attestations.sql', '0028_dependency_evidence.sql',
 ].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
 
 test('R2 conditional reads require native unquoted etags', async () => {
@@ -38,7 +39,7 @@ describe('release boundary', () => {
       pr_url: 'https://github.com/example-owner/recipes/pull/1', commit_sha: 'c'.repeat(40), created_at: 1,
     };
     revision.manifest_sha256 = await manifestDigest(revision);
-    const provenance = JSON.stringify({ buildId: 'build-1', revisionId: revision.id, architecture: 'x86_64', recipeSha256: revision.recipe_sha256, artifactSha256: 'd'.repeat(64), imageDigest: revision.image_digest.split('@').at(-1), sourceDateEpoch: revision.source_date_epoch, network: 'disabled', sources });
+    const provenance = JSON.stringify({ buildId: 'build-1', revisionId: revision.id, architecture: 'x86_64', recipeSha256: revision.recipe_sha256, artifactSha256: 'd'.repeat(64), imageDigest: revision.image_digest.split('@').at(-1), sourceDateEpoch: revision.source_date_epoch, network: 'disabled', ...runtimeEvidence(revision.image_digest.split('@').at(-1)!), sources });
     db.prepare('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)').bind('request-1', 'hello', sources[0].url, 'archive', 'development', 'github:1', 'queued', 1, 1).run();
     db.prepare('INSERT INTO revisions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(
       revision.id, revision.request_id, revision.version, revision.recipe, revision.recipe_sha256, revision.manifest_sha256, revision.sources_json,
@@ -49,7 +50,7 @@ describe('release boundary', () => {
     db.prepare('INSERT INTO builds VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('build-1', revision.id, 'succeeded', 'x86_64', null, 'private/build-1/hello.pkg.tar.zst', 'd'.repeat(64), 10, null, null, 'hello-1.0.0-1-x86_64.pkg.tar.zst', provenance, 'AA==', 1, 1).run();
     db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?)').bind('approval-area', revision.id, 'github:1', 'area', revision.manifest_sha256, 1, null, null).run();
     db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?)').bind('approval-security', revision.id, 'github:2', 'security', revision.manifest_sha256, 1, null, null).run();
-    await expect(publishBuild(env(db), { id: 'github:1', role: 'maintainer', areas: ['development'] }, 'build-1')).rejects.toThrow('Package signing service is not configured');
+    await expect(publishBuild(env(db), { id: 'github:1', role: 'maintainer', areas: ['development'] }, 'build-1')).rejects.toThrow('Signing service is not configured');
     db.close();
   });
 
@@ -74,7 +75,7 @@ describe('release boundary', () => {
     const x86Worker = { id: 'worker-x86', name: 'x86', architecture: 'x86_64' as const, public_key: base64(await crypto.subtle.exportKey('raw', x86Keys.publicKey)), status: 'active' as const, enrolled_at: timestamp, last_seen_at: timestamp, daemon_version: null, runtime: null, capabilities_json: null, accepting_jobs: 1, paused_at: null, removed_at: null };
     const armWorker = { id: 'worker-arm', name: 'arm', architecture: 'aarch64' as const, public_key: base64(await crypto.subtle.exportKey('raw', armKeys.publicKey)), status: 'active' as const, enrolled_at: timestamp, last_seen_at: timestamp, daemon_version: null, runtime: null, capabilities_json: null, accepting_jobs: 1, paused_at: null, removed_at: null };
     const provenance = async (buildId: string, worker: typeof x86Worker | typeof armWorker, keys: CryptoKeyPair) => {
-      const value = JSON.stringify({ buildId, revisionId: revision.id, workerId: worker.id, recipeSha256: revision.recipe_sha256, artifactSha256: null, architecture: worker.architecture, imageDigest: imageDigest.split('@').at(-1), sourceDateEpoch: timestamp, sources: source, network: 'disabled', startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:01:00Z' });
+      const value = JSON.stringify({ buildId, revisionId: revision.id, workerId: worker.id, recipeSha256: revision.recipe_sha256, artifactSha256: null, architecture: worker.architecture, imageDigest: imageDigest.split('@').at(-1), sourceDateEpoch: timestamp, sources: source, network: 'disabled', ...runtimeEvidence(revision.image_digest.split('@').at(-1)!), startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:01:00Z' });
       return { value, signature: base64(await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(value))) };
     };
     const x86Provenance = await provenance('build-multiarch-x86', x86Worker, x86Keys);
@@ -105,6 +106,18 @@ describe('release boundary', () => {
 
       const service = env(db);
       service.ARTIFACTS = artifacts as unknown as R2Bucket;
+      service.SIGNER = { fetch: async (request: Request) => {
+        const input = await request.json() as { objectKey: string; objectKind: string };
+        expect(input.objectKind).toBe('attestation');
+        const key = `${input.objectKey}.sig`;
+        artifacts.objects.set(key, new Uint8Array([1]));
+        return Response.json({ signature: { key, sha256: 'a'.repeat(64) } });
+      } } as Fetcher;
+      const originalHead = artifacts.head.bind(artifacts);
+      artifacts.head = async (key: string) => {
+        const object = await originalHead(key);
+        return object && key.endsWith('.sig') ? { ...object, customMetadata: { signatureSha256: 'a'.repeat(64) } } : object;
+      };
       const maintainer = { id: 'github:1', role: 'maintainer' as const, areas: ['development'] };
       await publishBuild(service, maintainer, 'build-multiarch-x86');
       expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(revision.request_id).first<{ status: string }>()?.status).toBe('queued');

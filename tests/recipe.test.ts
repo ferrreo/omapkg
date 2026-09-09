@@ -5,9 +5,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { lintRecipe, renderPublicRecipe, renderRecipe } from '../services/pipeline/recipe';
-import { normalizeCandidate } from '../services/pipeline/revision';
+import { createFactoryRevision, normalizeCandidate } from '../services/pipeline/revision';
 import type { FactoryCandidate } from '../services/pipeline/types';
 import { factoryCandidateInputSchema, makeReadSourceFilesTool, makeSourceMaterializer, makeSubmitCandidateTool } from '../services/pipeline/tools';
+
+const shellHarness = { sandbox: { exec: async () => ({ exitCode: 0, stdout: 'ShellCheck version: test', stderr: '' }) } };
 
 const image = `ghcr.io/opr/builder@sha256:${'a'.repeat(64)}`;
 
@@ -47,7 +49,7 @@ describe('generated recipe source roots', () => {
       sourceName: value.sources[0].name, sourceSha256: value.sources[0].sha256,
       upstreamCommit: null, files: [], licenseFiles: [],
     }), { x86_64: image });
-    await expect(tool.run({ data: value } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow('aarch64');
+    await expect(tool.run({ data: value, harness: shellHarness } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow('aarch64');
     expect(emitted).toBe(false);
   });
 
@@ -232,7 +234,7 @@ describe('generated recipe source roots', () => {
       sourceKind: 'git', upstreamUrl: value.request.upstreamUrl, normalizedUrl: value.sources[0].url,
       sourceName: value.sources[0].name, sourceSha256, upstreamCommit: commit, files: [], licenseFiles: [],
     }), value.buildImages);
-    const result = await tool.run({ data: value } as unknown as Parameters<typeof tool.run>[0]);
+    const result = await tool.run({ data: value, harness: shellHarness } as unknown as Parameters<typeof tool.run>[0]);
     expect(result.output.publicRecipeSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(emitted?.publicRecipe).toContain(`git+${value.request.upstreamUrl}#commit=${commit}`);
     expect(emitted?.publicRecipe).not.toContain('/sources/');
@@ -252,7 +254,7 @@ describe('generated recipe source roots', () => {
         sourceKey: `sources/${vendorSha256}.tar`, components: [],
       },
     }), value.buildImages);
-    await expect(tool.run({ data: value } as unknown as Parameters<typeof tool.run>[0])).resolves.toBeDefined();
+    await expect(tool.run({ data: value, harness: shellHarness } as unknown as Parameters<typeof tool.run>[0])).resolves.toBeDefined();
     expect(emitted?.sources).toEqual(value.sources);
   });
 
@@ -271,7 +273,7 @@ describe('generated recipe source roots', () => {
       sourceName: value.sources[0].name, sourceSha256: value.sources[0].sha256, upstreamCommit: null, files: [], licenseFiles: [],
       vendorArtifact: trustedArtifact,
     }), value.buildImages);
-    await expect(tool.run({ data: value } as unknown as Parameters<typeof tool.run>[0])).resolves.toBeDefined();
+    await expect(tool.run({ data: value, harness: shellHarness } as unknown as Parameters<typeof tool.run>[0])).resolves.toBeDefined();
     expect(emitted?.vendorArtifact).toEqual(trustedArtifact);
   });
 
@@ -293,7 +295,7 @@ describe('generated recipe source roots', () => {
         sourceName: value.sources[0].name, sourceSha256: value.sources[0].sha256, upstreamCommit: null, files: [], licenseFiles: [],
         vendorArtifact: trustedArtifact,
       }), value.buildImages);
-      await expect(tool.run({ data: value } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow(/already extracted.*vendor-root/);
+      await expect(tool.run({ data: value, harness: shellHarness } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow(/already extracted.*vendor-root/);
       expect(emitted).toBe(false);
     }
   });
@@ -308,7 +310,7 @@ describe('generated recipe source roots', () => {
       sourceKind: 'archive', upstreamUrl: value.request.upstreamUrl, normalizedUrl: value.sources[0].url,
       sourceName: value.sources[0].name, sourceSha256: value.sources[0].sha256, upstreamCommit: null, files: [], licenseFiles: [],
     }), value.buildImages);
-    await expect(tool.run({ data: value } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow('unverified source');
+    await expect(tool.run({ data: value, harness: shellHarness } as unknown as Parameters<typeof tool.run>[0])).rejects.toThrow('unverified source');
     expect(emitted).toBe(false);
   });
 
@@ -431,4 +433,26 @@ describe('generated recipe source roots', () => {
       },
     }))).toThrow(/does not match/);
   });
+});
+import { validateRecipePolicy } from '../services/pipeline/recipe-policy';
+import { templateCommands } from '../services/pipeline/recipe-template';
+
+test('template recipes bind deterministic shell and reject injected values and command overrides', async () => {
+  for (const template of [{ id: 'make-v1', binary: 'demo' }, { id: 'go-v1', binary: 'demo', target: './cmd/demo' }] as const) {
+    const value = candidate({ recipeMode: 'template', template, buildCommands: [], packageCommands: [], smokeCommands: [], makeDependencies: ['go'] });
+    const draft = await createFactoryRevision(value);
+    await validateRecipePolicy(draft.revision);
+    expect(renderRecipe(value)).toBe(draft.revision.recipe);
+    expect(JSON.parse(draft.revision.smoke_commands_json)).toEqual(["'/usr/bin/demo' --version"]);
+    await expect(validateRecipePolicy({ ...draft.revision, recipe: draft.revision.recipe + '\neval "$payload"\n' })).rejects.toThrow('deterministic');
+    await expect(validateRecipePolicy({ ...draft.revision, smoke_commands_json: '["true"]' })).rejects.toThrow('deterministic');
+    await expect(createFactoryRevision({ ...value, buildCommands: ['echo injected'] })).rejects.toThrow('empty command arrays');
+    await expect(createFactoryRevision({ ...value, publicRecipe: 'eval "$payload"' })).rejects.toThrow('deterministic rendering inputs');
+  }
+  for (const binary of ['demo;curl attacker', '$(id)', '../demo', 'demo"', '-option']) {
+    expect(() => templateCommands({ id: 'make-v1', binary })).toThrow();
+  }
+  for (const target of ['-toolexec=attacker', '../outside', './cmd/../../escape', './$(id)', './cmd;id']) {
+    expect(() => templateCommands({ id: 'go-v1', binary: 'demo', target })).toThrow();
+  }
 });

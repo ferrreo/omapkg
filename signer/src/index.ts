@@ -1,6 +1,7 @@
 import { signingURL } from '../../src/lib/signing-url';
 import * as openpgp from 'openpgp';
 import { createHash } from 'node:crypto';
+import { assertRuntimeEvidence, type RuntimeException } from '../../src/lib/server/runtime-evidence';
 
 const MAX_INTENT_BYTES = 8 * 1024;
 const DEFAULT_MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024;
@@ -29,7 +30,7 @@ export interface Env {
   OPR_SIGNING_FINGERPRINT?: string;
 }
 
-type SignKind = 'package' | 'database';
+type SignKind = 'package' | 'database' | 'attestation';
 
 interface SignIntent {
   id: string;
@@ -56,12 +57,14 @@ interface SignIntent {
     manifestSha256: string;
     areaApproved: boolean;
     securityApproved: boolean;
+    runtimeExceptions?: RuntimeException[];
   };
   attestation: {
     provenance: string;
     provenanceSignature: string;
     workerPublicKey: string;
   };
+  statement?: string;
   signature?: { key: string; sha256: string; filename: string };
 }
 
@@ -202,7 +205,7 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
   if (!intent || intent.id === undefined || !ID.test(intent.id)) throw new Error('invalid signing intent identity');
   if (intent.status !== 'ready' && intent.status !== 'signed') throw new Error('signing intent is not active');
   if (intent.status === 'ready' && (!Number.isSafeInteger(intent.expiresAt) || intent.expiresAt <= now)) throw new Error('signing intent expired');
-  if (intent.kind !== 'package' && intent.kind !== 'database') throw new Error('invalid signing object kind');
+  if (intent.kind !== 'package' && intent.kind !== 'database' && intent.kind !== 'attestation') throw new Error('invalid signing object kind');
   if (!intent.keyFingerprint || intent.keyFingerprint.toLowerCase() !== identity.fingerprint) {
     throw new Error('signing key fingerprint mismatch');
   }
@@ -220,8 +223,12 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
   if (intent.kind === 'database' && !DATABASE_SUFFIXES.some((suffix) => artifact.filename.endsWith(suffix))) {
     throw new Error('database signature requires an Arch repository database filename');
   }
+  if (intent.kind === 'attestation' && (artifact.filename !== 'attestation.json' || artifact.size > 1024 * 1024)) {
+    throw new Error('invalid attestation object');
+  }
   const build = intent.build;
-  if (!build || !ID.test(build.id) || !build.revisionId || build.status !== 'succeeded' || build.surface !== 'binary' || build.smokePassed !== true) {
+  if (!build || !ID.test(build.id) || !build.revisionId || build.status !== 'succeeded' ||
+      (build.surface !== 'binary' && !(intent.kind === 'attestation' && build.surface === 'recipe')) || build.smokePassed !== true) {
     throw new Error('build is not an attested successful binary build');
   }
   if (build.architecture !== 'x86_64' && build.architecture !== 'aarch64') throw new Error('invalid build architecture');
@@ -246,7 +253,7 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
       !Number.isFinite(Date.parse(provenance.startedAt)) || !Number.isFinite(Date.parse(provenance.finishedAt))) {
     throw new Error('build provenance does not match reviewed inputs');
   }
-  if (!SHA256.test(provenance.artifactSha256) || (intent.kind === 'package' && provenance.artifactSha256 !== artifact.sha256)) {
+  if ((build.surface === 'binary' && !SHA256.test(provenance.artifactSha256)) || (intent.kind === 'package' && provenance.artifactSha256 !== artifact.sha256)) {
     throw new Error('build provenance artifact digest does not match reviewed inputs');
   }
   if (build.workerId && build.workerId !== provenance.workerId) throw new Error('build worker does not match provenance');
@@ -259,6 +266,22 @@ async function verifyAttestation(intent: SignIntent): Promise<void> {
   const key = await crypto.subtle.importKey('raw', publicKey as unknown as BufferSource, { name: 'Ed25519' }, false, ['verify']);
   const valid = await crypto.subtle.verify('Ed25519', key, signature as unknown as BufferSource, new TextEncoder().encode(intent.attestation.provenance) as unknown as BufferSource);
   if (!valid) throw new Error('worker provenance signature is invalid');
+  if (intent.kind !== 'database') {
+    const provenance = JSON.parse(intent.attestation.provenance);
+    await assertRuntimeEvidence(provenance, provenance.imageDigest, intent.review.runtimeExceptions ?? []);
+  }
+  if (intent.kind === 'attestation') {
+    if (!intent.statement || createHash('sha256').update(intent.statement).digest('hex') !== intent.artifact.sha256) {
+      throw new Error('release statement does not match signing intent');
+    }
+    const statement = JSON.parse(intent.statement);
+    const evidence = statement.predicate?.runDetails?.byproducts?.find((item: { name: string }) => item.name === 'worker-provenance.json');
+    if (statement._type !== 'https://in-toto.io/Statement/v1' || statement.predicateType !== 'https://slsa.dev/provenance/v1' ||
+        !evidence || new TextDecoder().decode(decodeBase64(evidence.content, 'worker provenance')) !== intent.attestation.provenance ||
+        evidence.annotations?.signature !== intent.attestation.provenanceSignature || evidence.annotations?.publicKey !== intent.attestation.workerPublicKey) {
+      throw new Error('release statement does not bind worker evidence');
+    }
+  }
 }
 
 async function drainReader(body: ReadableStream<Uint8Array>): Promise<void> {

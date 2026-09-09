@@ -2,6 +2,7 @@ import type { Env } from './env';
 import type { Actor, Release, Architecture } from '../model';
 import { PolicyError, requireMaintainer } from './policy';
 import { audit, id, now, query, sha256 } from './db';
+import { attestationKey, releaseAttestation } from './release-attestation';
 import {
   fail,
   safeId,
@@ -68,7 +69,7 @@ async function publishBuildInner(env: Env, actor: Actor, buildId: string): Promi
   if (existing) return existing;
   const build = await joinedBuild(env, safeId(buildId, 'build ID'));
   if (build.build_status !== 'succeeded' || build.smoke_passed !== 1) fail(409, 'Only a successful build with passing smoke tests can enter quarantine.');
-  if (build.surface === 'binary' && !(env.SIGNER || env.SIGNER_URL)) fail(503, 'Package signing service is not configured; binary publication is blocked.');
+  if (!(env.SIGNER || env.SIGNER_URL)) fail(503, 'Signing service is not configured; publication is blocked.');
   if (!['queued', 'building', 'built'].includes(build.request_status)) fail(409, 'The package request is no longer publishable.');
   await assertReviewed(build, env);
   await assertAttestation(build, env);
@@ -112,10 +113,26 @@ async function publishBuildInner(env: Env, actor: Actor, buildId: string): Promi
   await immutableText(env, recipe, releaseRecipe, 'text/plain; charset=utf-8');
   await immutableText(env, sbom, build.sbom_json, 'application/json');
   await immutableText(env, provenance, build.provenance!, 'application/json');
+  const worker = await env.DB.prepare('SELECT public_key FROM workers WHERE id=?').bind(build.worker_id).first<{ public_key: string }>();
+  if (!worker) fail(409, 'Worker signing identity is unavailable.');
+  const statement = await releaseAttestation({
+    buildId: build.build_id, revisionId: build.revision_id, surface: build.surface,
+    artifactFilename: build.artifact_filename, artifactSha256: build.artifact_sha256,
+    recipe: releaseRecipe, recipeSha256: build.recipe_sha256, manifestSha256: build.manifest_sha256,
+    sbom: build.sbom_json, provenance: build.provenance!, provenanceSignature: build.provenance_signature!,
+    workerPublicKey: worker.public_key,
+  });
+  const statementKey = attestationKey(build.build_id);
+  await immutableText(env, statementKey, statement, 'application/vnd.in-toto+json');
+  await signingRequest(env, {
+    buildId: build.build_id, revisionId: build.revision_id, manifestSha256: build.manifest_sha256,
+    objectKey: statementKey, objectKind: 'attestation', artifactSha256: await sha256(statement),
+    artifactSize: new TextEncoder().encode(statement).byteLength, artifactFilename: 'attestation.json',
+  });
   const release: Release = {
     id: releaseId, build_id: build.build_id, name: build.request_name, version: releaseVersion,
     architecture, surface: build.surface, channel: 'dev', artifact_key: artifact?.key ?? null,
-    signature_key: signatureKey, recipe_key: recipe, sbom_key: sbom, provenance_key: provenance,
+    signature_key: signatureKey, recipe_key: recipe, sbom_key: sbom, provenance_key: provenance, attestation_key: statementKey,
     published_at: publishedAt, stable_at: null, batch_id: null, previous_release_id: null,
   };
   const devCurrent = await currentDev(env);
@@ -133,11 +150,11 @@ async function publishBuildInner(env: Env, actor: Actor, buildId: string): Promi
   const devSnapshot = context ? await snapshot(env, devFinal, architecture, context, publicationBatchId, 'dev') : null;
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(`INSERT INTO releases
-      (id,build_id,name,version,architecture,surface,channel,artifact_key,signature_key,recipe_key,sbom_key,provenance_key,published_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      (id,build_id,name,version,architecture,surface,channel,artifact_key,signature_key,recipe_key,sbom_key,provenance_key,published_at,attestation_key)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       release.id, release.build_id, release.name, release.version, release.architecture, release.surface,
       release.channel, release.artifact_key, release.signature_key, release.recipe_key, release.sbom_key,
-      release.provenance_key, release.published_at,
+      release.provenance_key, release.published_at, release.attestation_key,
     ),
     env.DB.prepare(`UPDATE requests SET status=CASE
         WHEN EXISTS (SELECT 1 FROM builds active WHERE active.revision_id=? AND active.status='leased') THEN 'building'
@@ -522,6 +539,8 @@ export type PublicRelease = {
   recipeUrl: string;
   sbomUrl: string;
   provenanceUrl: string;
+  attestationUrl: string | null;
+  attestationSignatureUrl: string | null;
   rollbackUrl: string;
   rollbackClientUrl: string;
 };
@@ -542,6 +561,8 @@ export function publicRelease(release: Release & { artifact_filename?: string | 
     surface: release.surface, channel: release.channel, publishedAt: release.published_at, stableAt: release.stable_at,
     artifact, recipeUrl: `${routeBase}/recipes/${segment(release.name)}/${segment(release.version)}/${release.architecture}/PKGBUILD`,
     sbomUrl: `${base}/repo/metadata/${release.id}/sbom.json`, provenanceUrl: `${base}/repo/metadata/${release.id}/provenance.json`,
+    attestationUrl: release.attestation_key ? `${base}/repo/metadata/${release.id}/attestation.json` : null,
+    attestationSignatureUrl: release.attestation_key ? `${base}/repo/metadata/${release.id}/attestation.json.sig` : null,
     rollbackUrl: `${base}/repo/rollback/${release.id}.json`, rollbackClientUrl: `${base}/repo/rollback/client.sh`,
   };
 }

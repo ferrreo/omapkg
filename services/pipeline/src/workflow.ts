@@ -1,5 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
-import { factoryEndpoint, type FactoryRunResult } from '../../../src/lib/server/factory';
+import { factoryEndpoint, type FactoryRunResult, type FactoryOutcome } from '../../../src/lib/server/factory';
 import { audit, now } from '../../../src/lib/server/db';
 import { PackageFactory } from './factory-agent';
 import { runFactoryWithRecovery } from '../workflow-retry';
@@ -15,12 +15,13 @@ function requestForFactory(params: FactoryWorkflowParams): Request {
 }
 
 export class FactoryWorkflow extends WorkflowEntrypoint<PipelineEnv, FactoryWorkflowParams> {
-  async run(event: Readonly<WorkflowEvent<FactoryWorkflowParams>>, step: WorkflowStep): Promise<FactoryRunResult> {
+  async run(event: Readonly<WorkflowEvent<FactoryWorkflowParams>>, step: WorkflowStep): Promise<FactoryOutcome> {
     return runFactoryWithRecovery({
-      step: step as unknown as Parameters<typeof runFactoryWithRecovery<FactoryRunResult>>[0]['step'],
+      step: step as unknown as Parameters<typeof runFactoryWithRecovery<FactoryOutcome>>[0]['step'],
       generate: async () => {
         const response = await factoryEndpoint(requestForFactory(event.payload), this.env as unknown as FactoryEnv, PackageFactory);
-        const body = await response.json() as Partial<FactoryRunResult> & { error?: string };
+        const body = await response.json() as Partial<FactoryRunResult> & { error?: string; status?: string };
+        if (response.ok && body.status === 'blocked') return { requestId: event.payload.requestId, status: 'blocked' as const };
         if (!response.ok || typeof body.revisionId !== 'string' || typeof body.pullRequestUrl !== 'string') {
           throw new Error(typeof body.error === 'string' ? body.error.slice(0, 1_000) : 'factory run failed');
         }

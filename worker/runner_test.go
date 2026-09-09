@@ -103,7 +103,7 @@ func TestPackageMetadataBindsOutputToJob(t *testing.T) {
 	}
 	dependencyPlan, _ := dependencyPlanFixture()
 	provenanceJob := Job{ID: "job-1", RevisionID: "revision-1", PackageName: "opr-hello", Version: "2.12", Pkgrel: 3, Architecture: "x86_64", RecipeSHA256: strings.Repeat("a", 64), ImageDigest: "sha256:" + strings.Repeat("b", 64), SourceDateEpoch: 1, DependencyPlan: dependencyPlan}
-	provenance, err := provenanceFor(provenanceJob, "worker-1", strings.Repeat("c", 64), metadata.InstalledSize, metadata, "2026-09-05T00:00:00Z", "2026-09-05T00:01:00Z")
+	provenance, err := provenanceFor(provenanceJob, "worker-1", strings.Repeat("c", 64), BuildResult{InstalledSize: metadata.InstalledSize, PackageMetadata: metadata}, "2026-09-05T00:00:00Z", "2026-09-05T00:01:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestPackageMetadataBindsOutputToJob(t *testing.T) {
 	if decoded.DependencyPlan == nil || decoded.DependencyPlan.Packages[0].ReleaseID != dependencyPlan.Packages[0].ReleaseID {
 		t.Fatal("provenance dependency plan was not preserved")
 	}
-	if _, err := provenanceFor(Job{}, "worker-1", "", metadata.InstalledSize+1, metadata, "2026-09-05T00:00:00Z", "2026-09-05T00:01:00Z"); err == nil {
+	if _, err := provenanceFor(Job{}, "worker-1", "", BuildResult{InstalledSize: metadata.InstalledSize + 1, PackageMetadata: metadata}, "2026-09-05T00:00:00Z", "2026-09-05T00:01:00Z"); err == nil {
 		t.Fatal("mismatched provenance installed size was accepted")
 	}
 	if _, err := readPackageMetadata(output, "artifact", Job{PackageName: "opr-hello", Version: "2.12", Pkgrel: 2, Architecture: "x86_64"}); err == nil {

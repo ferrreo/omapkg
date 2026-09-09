@@ -45,6 +45,24 @@ func validateDependencyPlan(plan *DependencyPlan, job Job, originRaw string) err
 	if len(plan.Packages) == 0 || len(plan.Packages) > maxDependencyPlanPackages {
 		return fmt.Errorf("dependency plan must contain 1 to %d packages", maxDependencyPlanPackages)
 	}
+	if plan.RuntimeReleaseIDs != nil {
+		seen := make(map[string]bool)
+		for _, id := range *plan.RuntimeReleaseIDs {
+			if seen[id] {
+				return errors.New("duplicate runtime release in dependency plan")
+			}
+			seen[id] = true
+			found := false
+			for _, item := range plan.Packages {
+				if item.ReleaseID == id {
+					found = true
+				}
+			}
+			if !found {
+				return errors.New("runtime dependency is outside frozen plan")
+			}
+		}
+	}
 	var total int64
 	seenRelease := make(map[string]struct{}, len(plan.Packages))
 	seenName := make(map[string]struct{}, len(plan.Packages))
@@ -321,6 +339,7 @@ func dependencyPrepScript(dependencies []string, plan *DependencyPlan) (string, 
 		script.WriteString("printf '%s:6:\\n' \"$OPR_DEP_KEY_FINGERPRINT\" | gpg --batch --homedir \"$keyring\" --import-ownertrust >/dev/null\n")
 		script.WriteString("pacman-key --gpgdir \"$keyring\" --updatedb >/dev/null\n")
 		script.WriteString("sed -i '/^\\[options\\]$/a GPGDir = /tmp/opr-pacman-gnupg\\nLocalFileSigLevel = Required\\nDownloadUser = root\\nDisableSandboxSyscalls' \"$pacman_conf\"\n")
+		script.WriteString("pacman --config \"$pacman_conf\" -Syu --noconfirm\n")
 		script.WriteString("set -- /opr/dependencies/*.pkg.tar.zst\n")
 		script.WriteString("pacman --config \"$pacman_conf\" -U --noconfirm -- \"$@\"\n")
 		script.WriteString("while IFS=$(printf '\\t') read -r expected_name expected_version expected_arch expected_filename; do\n")
@@ -343,7 +362,7 @@ func dependencyPrepScript(dependencies []string, plan *DependencyPlan) (string, 
 		script.WriteString("  mapfile -t missing_args < \"$missing_dependencies\"\n")
 		script.WriteString("  test \"${#missing_args[@]}\" -gt 0\n")
 		script.WriteString("  pacman --config \"$pacman_conf\"")
-		script.WriteString(" -S --noconfirm --needed -- \"${missing_args[@]}\"\nfi\n")
+		script.WriteString(" -Syu --noconfirm --needed -- \"${missing_args[@]}\"\nfi\n")
 	}
 	if plan != nil {
 		script.WriteString("pacman --config \"$pacman_conf\" -Scc --noconfirm\n")

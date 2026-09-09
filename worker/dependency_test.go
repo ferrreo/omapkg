@@ -96,7 +96,7 @@ func TestDependencyPrepScriptVerifiesPlanAndKeepsNoNodeps(t *testing.T) {
 		"pacman-key --gpgdir",
 		"pacman --config \"$pacman_conf\" -U --noconfirm --",
 		"pacman --config \"$pacman_conf\" -T",
-		"pacman --config \"$pacman_conf\" -S --noconfirm --needed -- \"${missing_args[@]}\"",
+		"pacman --config \"$pacman_conf\" -Syu --noconfirm --needed -- \"${missing_args[@]}\"",
 		"pacman --config \"$pacman_conf\" -Scc --noconfirm",
 		"trap cleanup EXIT",
 	} {

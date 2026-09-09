@@ -19,7 +19,9 @@ function database() {
   db.exec(readFileSync('migrations/0018_worker_metadata.sql', 'utf8'));
   db.exec(readFileSync('migrations/0019_crash_triage.sql', 'utf8'));
   db.exec(readFileSync('migrations/0020_worker_lifecycle.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0022_public_recipes.sql', 'utf8'));
   db.exec(readFileSync('migrations/0023_dependency_plan.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0028_dependency_evidence.sql', 'utf8'));
   db.exec(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at)
     VALUES('q','hello','https://github.com/example/hello','git','development','github:1','built',1,1)`);
   db.prepare(`INSERT INTO revisions(id,request_id,version,recipe,recipe_sha256,manifest_sha256,sources_json,dependencies_json,smoke_commands_json,
@@ -47,7 +49,9 @@ async function normalClaimFixture() {
   db.exec(readFileSync('migrations/0018_worker_metadata.sql', 'utf8'));
   db.exec(readFileSync('migrations/0019_crash_triage.sql', 'utf8'));
   db.exec(readFileSync('migrations/0020_worker_lifecycle.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0022_public_recipes.sql', 'utf8'));
   db.exec(readFileSync('migrations/0023_dependency_plan.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0028_dependency_evidence.sql', 'utf8'));
   const keys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKey = (() => {
     let binary = '';

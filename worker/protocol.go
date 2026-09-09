@@ -47,6 +47,7 @@ type Config struct {
 	PrivateKey       string `json:"privateKey"`
 	Image            string `json:"image,omitempty"`
 	ImageDigest      string `json:"imageDigest"`
+	RuntimeImage     string `json:"runtimeImage,omitempty"`
 	Architecture     string `json:"architecture"`
 	Runtime          string `json:"containerRuntime"`
 	StateDir         string `json:"stateDir"`
@@ -76,6 +77,7 @@ var supportedWorkerCapabilities = [...]string{
 	"offline-oci",
 	"multipart-upload",
 	"registry-pull",
+	"runtime-analysis-v1",
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {
@@ -112,6 +114,7 @@ type DependencyPlan struct {
 	PublicKeyURL         string              `json:"publicKeyUrl"`
 	PublicKeyFingerprint string              `json:"publicKeyFingerprint"`
 	Packages             []DependencyPackage `json:"packages"`
+	RuntimeReleaseIDs    *[]string           `json:"runtimeReleaseIds,omitempty"`
 }
 
 type DependencyPackage struct {
@@ -128,26 +131,28 @@ type DependencyPackage struct {
 }
 
 type Job struct {
-	ID                  string          `json:"id"`
-	LeaseToken          string          `json:"leaseToken"`
-	LeaseExpiresAt      string          `json:"leaseExpiresAt"`
-	RevisionID          string          `json:"revisionId"`
-	PackageName         string          `json:"packageName"`
-	Version             string          `json:"version"`
-	Pkgrel              int64           `json:"pkgrel,omitempty"`
-	Architecture        string          `json:"architecture"`
-	Recipe              string          `json:"recipe"`
-	RecipeSHA256        string          `json:"recipeSha256"`
-	SourceDateEpoch     int64           `json:"sourceDateEpoch"`
-	ImageDigest         string          `json:"imageDigest"`
-	ImageRef            string          `json:"imageRef,omitempty"`
-	Sources             []Source        `json:"sources"`
-	Dependencies        []string        `json:"dependencies"`
-	RuntimeDependencies []string        `json:"runtimeDependencies,omitempty"`
-	MakeDependencies    []string        `json:"makeDependencies,omitempty"`
-	DependencyPlan      *DependencyPlan `json:"dependencyPlan,omitempty"`
-	SmokeCommands       []string        `json:"smokeCommands"`
-	Surface             string          `json:"surface"`
+	ID                  string             `json:"id"`
+	LeaseToken          string             `json:"leaseToken"`
+	LeaseExpiresAt      string             `json:"leaseExpiresAt"`
+	RevisionID          string             `json:"revisionId"`
+	PackageName         string             `json:"packageName"`
+	Version             string             `json:"version"`
+	Pkgrel              int64              `json:"pkgrel,omitempty"`
+	Architecture        string             `json:"architecture"`
+	Recipe              string             `json:"recipe"`
+	PublicRecipe        string             `json:"publicRecipe,omitempty"`
+	RecipeSHA256        string             `json:"recipeSha256"`
+	SourceDateEpoch     int64              `json:"sourceDateEpoch"`
+	ImageDigest         string             `json:"imageDigest"`
+	ImageRef            string             `json:"imageRef,omitempty"`
+	Sources             []Source           `json:"sources"`
+	Dependencies        []string           `json:"dependencies"`
+	RuntimeDependencies []string           `json:"runtimeDependencies,omitempty"`
+	MakeDependencies    []string           `json:"makeDependencies,omitempty"`
+	DependencyPlan      *DependencyPlan    `json:"dependencyPlan,omitempty"`
+	SmokeCommands       []string           `json:"smokeCommands"`
+	RuntimeExceptions   []runtimeException `json:"runtimeExceptions,omitempty"`
+	Surface             string             `json:"surface"`
 }
 
 type ClaimResponse struct {
@@ -198,27 +203,31 @@ type ProvenanceSource struct {
 }
 
 type Provenance struct {
-	BuildID         string             `json:"buildId"`
-	RevisionID      string             `json:"revisionId"`
-	WorkerID        string             `json:"workerId"`
-	RecipeSHA256    string             `json:"recipeSha256"`
-	Pkgrel          int64              `json:"pkgrel,omitempty"`
-	InstalledSize   int64              `json:"installedSize"`
-	PackageMetadata packageMetadata    `json:"packageMetadata"`
-	DependencyPlan  *DependencyPlan    `json:"dependencyPlan,omitempty"`
-	ArtifactSHA256  string             `json:"artifactSha256"`
-	Architecture    string             `json:"architecture"`
-	ImageDigest     string             `json:"imageDigest"`
-	SourceDateEpoch int64              `json:"sourceDateEpoch"`
-	Sources         []ProvenanceSource `json:"sources"`
-	Network         string             `json:"network"`
-	StartedAt       string             `json:"startedAt"`
-	FinishedAt      string             `json:"finishedAt"`
+	BuildID            string               `json:"buildId"`
+	RevisionID         string               `json:"revisionId"`
+	WorkerID           string               `json:"workerId"`
+	RecipeSHA256       string               `json:"recipeSha256"`
+	Pkgrel             int64                `json:"pkgrel,omitempty"`
+	InstalledSize      int64                `json:"installedSize"`
+	PackageMetadata    packageMetadata      `json:"packageMetadata"`
+	DependencyPlan     *DependencyPlan      `json:"dependencyPlan,omitempty"`
+	ArtifactSHA256     string               `json:"artifactSha256"`
+	Architecture       string               `json:"architecture"`
+	ImageDigest        string               `json:"imageDigest"`
+	SourceDateEpoch    int64                `json:"sourceDateEpoch"`
+	Sources            []ProvenanceSource   `json:"sources"`
+	Network            string               `json:"network"`
+	StartedAt          string               `json:"startedAt"`
+	FinishedAt         string               `json:"finishedAt"`
+	BuildEnvironment   *environmentEvidence `json:"buildEnvironment,omitempty"`
+	RuntimeEnvironment *environmentEvidence `json:"runtimeEnvironment,omitempty"`
+	RuntimeAnalysis    *runtimeAnalysis     `json:"runtimeAnalysis,omitempty"`
 }
 
 type CompleteRequest struct {
 	LeaseToken          string    `json:"leaseToken"`
 	Status              string    `json:"status"`
+	DependencyBlockers  []dependencyBlocker `json:"dependencyBlockers,omitempty"`
 	Error               string    `json:"error,omitempty"`
 	Artifact            *Artifact `json:"artifact,omitempty"`
 	Provenance          string    `json:"provenance,omitempty"`
@@ -293,6 +302,11 @@ func validateConfig(cfg Config) error {
 	if cfg.Image != "" {
 		if err := validateImageReference(cfg.Image, cfg.ImageDigest); err != nil {
 			return fmt.Errorf("image: %w", err)
+		}
+	}
+	if cfg.RuntimeImage != "" {
+		if err := validateImageReference(cfg.RuntimeImage, cfg.RuntimeImage[strings.LastIndex(cfg.RuntimeImage, "@")+1:]); err != nil {
+			return fmt.Errorf("runtime image: %w", err)
 		}
 	}
 	if cfg.Runtime != "podman" && cfg.Runtime != "docker" {
@@ -427,6 +441,17 @@ func validateJob(job Job, cfg Config) error {
 	}
 	if err := validateDependencyPlan(job.DependencyPlan, job, cfg.Origin); err != nil {
 		return err
+	}
+	if len(job.RuntimeExceptions) > 16 {
+		return errors.New("too many runtime analysis exceptions")
+	}
+	for _, exception := range job.RuntimeExceptions {
+		if !sha256Pattern.MatchString(exception.FindingSHA256) || strings.TrimSpace(exception.Reason) == "" || len(exception.Reason) > 2000 {
+			return errors.New("invalid runtime analysis exception")
+		}
+	}
+	if len(job.PublicRecipe) > 2*1024*1024 || strings.IndexByte(job.PublicRecipe, 0) >= 0 {
+		return errors.New("invalid public recipe")
 	}
 	for _, command := range job.SmokeCommands {
 		if command == "" || len(command) > 8192 || strings.IndexByte(command, 0) >= 0 {
@@ -565,8 +590,8 @@ func compactErrorText(message string) string {
 	return strings.TrimSpace(message)
 }
 
-func provenanceFor(job Job, workerID, artifactSHA string, installedSize int64, metadata packageMetadata, started, finished string) (string, error) {
-	if metadata.InstalledSize != installedSize {
+func provenanceFor(job Job, workerID, artifactSHA string, result BuildResult, started, finished string) (string, error) {
+	if result.PackageMetadata.InstalledSize != result.InstalledSize {
 		return "", errors.New("package metadata installed size does not match provenance")
 	}
 	sources := make([]ProvenanceSource, len(job.Sources))
@@ -574,22 +599,25 @@ func provenanceFor(job Job, workerID, artifactSHA string, installedSize int64, m
 		sources[i] = ProvenanceSource{Name: source.Name, URL: source.URL, SHA256: source.SHA256}
 	}
 	value := Provenance{
-		BuildID:         job.ID,
-		RevisionID:      job.RevisionID,
-		WorkerID:        workerID,
-		RecipeSHA256:    job.RecipeSHA256,
-		Pkgrel:          job.Pkgrel,
-		InstalledSize:   installedSize,
-		PackageMetadata: metadata,
-		DependencyPlan:  job.DependencyPlan,
-		ArtifactSHA256:  artifactSHA,
-		Architecture:    job.Architecture,
-		ImageDigest:     job.ImageDigest,
-		SourceDateEpoch: job.SourceDateEpoch,
-		Sources:         sources,
-		Network:         "disabled",
-		StartedAt:       started,
-		FinishedAt:      finished,
+		BuildID:            job.ID,
+		RevisionID:         job.RevisionID,
+		WorkerID:           workerID,
+		RecipeSHA256:       job.RecipeSHA256,
+		Pkgrel:             job.Pkgrel,
+		InstalledSize:      result.InstalledSize,
+		PackageMetadata:    result.PackageMetadata,
+		DependencyPlan:     job.DependencyPlan,
+		ArtifactSHA256:     artifactSHA,
+		Architecture:       job.Architecture,
+		ImageDigest:        job.ImageDigest,
+		SourceDateEpoch:    job.SourceDateEpoch,
+		Sources:            sources,
+		Network:            "disabled",
+		StartedAt:          started,
+		FinishedAt:         finished,
+		BuildEnvironment:   result.BuildEnvironment,
+		RuntimeEnvironment: result.RuntimeEnvironment,
+		RuntimeAnalysis:    result.RuntimeAnalysis,
 	}
 	b, err := encodeJSON(value)
 	if err != nil {

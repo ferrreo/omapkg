@@ -77,7 +77,7 @@ ENV PATH=/opt/go/bin:/opt/rust/bin:${PATH}
 RUN set -eux; \
   apt-get update; \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    libarchive-tools rpm rpm2cpio squashfs-tools xz-utils; \
+    libarchive-tools rpm rpm2cpio squashfs-tools xz-utils shellcheck; \
   rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* \
     /usr/share/lintian /usr/share/zsh
 

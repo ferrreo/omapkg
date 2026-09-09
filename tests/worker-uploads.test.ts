@@ -27,7 +27,9 @@ const schema = readFileSync(new URL('../migrations/0001_initial.sql', import.met
   '\n' + readFileSync(new URL('../migrations/0018_worker_metadata.sql', import.meta.url), 'utf8') +
   '\n' + readFileSync(new URL('../migrations/0019_crash_triage.sql', import.meta.url), 'utf8') +
   '\n' + readFileSync(new URL('../migrations/0020_worker_lifecycle.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0023_dependency_plan.sql', import.meta.url), 'utf8');
+  '\n' + readFileSync(new URL('../migrations/0022_public_recipes.sql', import.meta.url), 'utf8') +
+  '\n' + readFileSync(new URL('../migrations/0023_dependency_plan.sql', import.meta.url), 'utf8') +
+  '\n' + readFileSync(new URL('../migrations/0028_dependency_evidence.sql', import.meta.url), 'utf8');
 
 class Multipart {
   readonly parts = new Map<number, Uint8Array>();

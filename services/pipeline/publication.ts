@@ -1,3 +1,4 @@
+import { resolveDependencyBlockers } from '../../src/lib/server/dependency-blockers';
 import { publishBuild } from '../../src/lib/server/releases';
 import { audit, now } from '../../src/lib/server/db';
 import type { Actor } from '../../src/lib/model';
@@ -55,6 +56,7 @@ export class PublicationWorkflow extends WorkflowEntrypoint<PublicationEnv, Publ
     try {
       return await step.do('publish-build', { retries: { limit: 3, delay: '30 seconds', backoff: 'exponential' }, timeout: '15 minutes' }, async () => {
         const release = await publishBuild(this.env, SYSTEM_ACTOR, input.buildId);
+        await resolveDependencyBlockers(this.env);
         await mark(this.env, input.buildId, 'completed');
         await this.env.DB.batch([audit(this.env.DB, SYSTEM_ACTOR.id, 'publication.completed', input.buildId, { releaseId: release.id })]);
         return { releaseId: release.id, channel: release.channel };

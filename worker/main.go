@@ -65,6 +65,7 @@ func enrollCommand(args []string) error {
 	stateDir := flags.String("state-dir", "", "worker state directory")
 	image := flags.String("image", "", "pinned builder image reference")
 	imageDigest := flags.String("image-digest", "", "pinned builder image digest")
+	runtimeImage := flags.String("runtime-image", "", "digest-pinned minimal runtime image")
 	runtime := flags.String("runtime", "podman", "container runtime (podman or docker)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -133,6 +134,7 @@ func enrollCommand(args []string) error {
 		PrivateKey:       encodePrivateKey(privateKey),
 		Image:            *image,
 		ImageDigest:      *imageDigest,
+		RuntimeImage:     *runtimeImage,
 		Architecture:     *architecture,
 		Runtime:          *runtime,
 		StateDir:         absoluteStateDir,
@@ -337,7 +339,7 @@ func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, 
 		artifact = &Artifact{Key: response.Key, SHA256: response.SHA256, Size: response.Size, Filename: filepath.Base(result.ArtifactPath)}
 	}
 	finished := time.Now().UTC().Format(time.RFC3339Nano)
-	provenance, err := provenanceFor(job, cfg.WorkerID, artifactSHA, result.InstalledSize, result.PackageMetadata, started, finished)
+	provenance, err := provenanceFor(job, cfg.WorkerID, artifactSHA, result, started, finished)
 	if err != nil {
 		return reportFailure(parent, client, job, &result, err)
 	}
@@ -361,12 +363,15 @@ func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, 
 }
 
 func reportFailure(ctx context.Context, client *Client, job Job, result *BuildResult, cause error) error {
+	var dependencyError *dependencyResolutionError
+	var blockers []dependencyBlocker
+	if errors.As(cause, &dependencyError) { blockers = dependencyError.Blockers }
 	if result != nil {
 		if err := sendLogs(ctx, client, job, result.Log); err != nil {
 			cause = fmt.Errorf("%v; upload logs: %w", cause, err)
 		}
 	}
-	completeErr := client.complete(ctx, job.ID, CompleteRequest{LeaseToken: job.LeaseToken, Status: "failed", Error: compactError(cause), SmokePassed: false})
+	completeErr := client.complete(ctx, job.ID, CompleteRequest{LeaseToken: job.LeaseToken, Status: "failed", Error: compactError(cause), SmokePassed: false, DependencyBlockers: blockers})
 	if completeErr != nil {
 		return fmt.Errorf("%v; complete failure: %w", cause, completeErr)
 	}

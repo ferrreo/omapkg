@@ -1,5 +1,6 @@
+import { runtimeEvidence } from './runtime-fixtures';
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { sha256 } from '../src/lib/server/db';
 import {
   WorkerProtocolError,
@@ -20,15 +21,8 @@ import {
 } from '../src/lib/server/workers';
 import { TestD1, asD1 } from './d1';
 
-const schema = readFileSync(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0007_core_guards.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0011_build_images.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0014_package_metadata.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0015_installed_size.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0018_worker_metadata.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0019_crash_triage.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0020_worker_lifecycle.sql', import.meta.url), 'utf8') +
-  '\n' + readFileSync(new URL('../migrations/0023_dependency_plan.sql', import.meta.url), 'utf8');
+const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((name) => name.endsWith('.sql')).sort()
+  .map((name) => readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8')).join('\n');
 
 class MemoryR2 {
   readonly objects = new Map<string, { body: Uint8Array; customMetadata: Record<string, string> }>();
@@ -211,7 +205,7 @@ test('pause drains dispatch while preserving active lease completion, then revok
       imageDigest: job.imageDigest,
       sourceDateEpoch: job.sourceDateEpoch,
       sources: job.sources,
-      network: 'disabled',
+      network: 'disabled', ...runtimeEvidence(job.imageDigest),
       startedAt,
       finishedAt
     });
@@ -365,7 +359,7 @@ test('claim freezes and returns an exact signed OPR dependency plan', async () =
     const dependencyReleaseProvenance = (dependencyPlan: unknown) => JSON.stringify({
       buildId: job.id, revisionId: job.revisionId, workerId: worker.id, recipeSha256: job.recipeSha256,
       artifactSha256: null, architecture: job.architecture, imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch,
-      sources: job.sources, network: 'disabled', startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:01:00Z', dependencyPlan,
+      sources: job.sources, network: 'disabled', ...runtimeEvidence(job.imageDigest), startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:01:00Z', dependencyPlan,
     });
     const badPlan = JSON.parse(JSON.stringify(job.dependencyPlan)) as Record<string, unknown>;
     (badPlan.packages as Array<Record<string, unknown>>)[0].sha256 = 'f'.repeat(64);
@@ -423,7 +417,7 @@ test('heartbeat, log, artifact, and signed provenance completion are fenced and 
       packageMetadata: { name: job.packageName, fullVersion: `${job.version}-${job.pkgrel ?? 1}`, architecture: job.architecture, installedSize: 4096,
         depends: ['bash', 'glibc', 'lib:libOpenCL.so.1'], provides: [], conflicts: [], replaces: [] },
       sources: job.sources,
-      network: 'disabled',
+      network: 'disabled', ...runtimeEvidence(job.imageDigest),
       startedAt,
       finishedAt
     });
@@ -493,7 +487,7 @@ test('job completion accepts verified multipart artifacts above the direct uploa
     const installedSize = 256 * 1024 * 1024;
     const provenance = JSON.stringify({ buildId: job.id, revisionId: job.revisionId, workerId: worker.id,
       recipeSha256: job.recipeSha256, artifactSha256: artifact.sha256, architecture: job.architecture,
-      imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch, sources: job.sources, network: 'disabled',
+      imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch, sources: job.sources, network: 'disabled', ...runtimeEvidence(job.imageDigest),
       installedSize, packageMetadata: { name: job.packageName, fullVersion: `${job.version}-${job.pkgrel ?? 1}`,
         architecture: job.architecture, installedSize, depends: ['bash'], provides: [], conflicts: [], replaces: [] },
       startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
@@ -517,4 +511,20 @@ test('Surface B recipe builds cannot upload artifacts', async () => {
   } finally {
     holder.close();
   }
+});
+
+
+test('worker dependency failure blocks parent, preserves evidence and fences changed retries', async () => {
+  const { db, holder, worker } = await fixture();
+  try {
+    const seeded = await seedBuild(db);
+    const job = (await claimJob(db, worker))!;
+    const input = { leaseToken: job.leaseToken, status: 'failed', error: 'missing runtime dependency', smokePassed: false,
+      dependencyBlockers: [{ phase: 'runtime', resolution: 'dependency', relation: 'missing>=2', detail: 'Approved repository could not resolve missing>=2' }] };
+    await completeJob(db, new MemoryR2() as unknown as R2Bucket, worker, job.id, input);
+    expect(await db.prepare('SELECT status FROM requests WHERE id=?').bind(seeded.requestId).first<Record<string, unknown>>()).toEqual({ status: 'blocked' });
+    expect(await db.prepare('SELECT relation,architecture FROM dependency_blockers WHERE request_id=?').bind(seeded.requestId).first<Record<string, unknown>>()).toEqual({ relation: 'missing>=2', architecture: 'x86_64' });
+    expect((await completeJob(db, new MemoryR2() as unknown as R2Bucket, worker, job.id, input)).idempotent).toBe(true);
+    await expect(completeJob(db, new MemoryR2() as unknown as R2Bucket, worker, job.id, { ...input, dependencyBlockers: [{ ...input.dependencyBlockers[0], relation: 'changed' }] })).rejects.toMatchObject({ status: 409 });
+  } finally { holder.close(); }
 });

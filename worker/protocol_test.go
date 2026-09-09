@@ -64,7 +64,7 @@ func TestDaemonMetadataIsFixedAndIndependent(t *testing.T) {
 	if metadata.Version != workerVersion || metadata.Runtime != "podman" {
 		t.Fatalf("metadata identity = %+v", metadata)
 	}
-	want := []string{"offline-oci", "multipart-upload", "registry-pull"}
+	want := []string{"offline-oci", "multipart-upload", "registry-pull", "runtime-analysis-v1"}
 	if strings.Join(metadata.Capabilities, ",") != strings.Join(want, ",") {
 		t.Fatalf("capabilities = %v, want %v", metadata.Capabilities, want)
 	}
@@ -272,7 +272,7 @@ func TestClientSignsClaim(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"version":"v0.1.0","runtime":"podman","capabilities":["offline-oci","multipart-upload","registry-pull"]}` {
+		if string(body) != `{"version":"v0.1.0","runtime":"podman","capabilities":["offline-oci","multipart-upload","registry-pull","runtime-analysis-v1"]}` {
 			t.Fatalf("claim metadata body = %s", body)
 		}
 		timestamp := request.Header.Get("X-OPR-Timestamp")
@@ -295,7 +295,7 @@ func TestClientSignsClaim(t *testing.T) {
 		Origin:     mustURL(t, server.URL),
 		WorkerID:   "worker-1",
 		PrivateKey: key,
-		Metadata:   WorkerMetadata{Version: "v0.1.0", Runtime: "podman", Capabilities: []string{"offline-oci", "multipart-upload", "registry-pull"}},
+		Metadata:   WorkerMetadata{Version: "v0.1.0", Runtime: "podman", Capabilities: []string{"offline-oci", "multipart-upload", "registry-pull", "runtime-analysis-v1"}},
 		HTTP:       server.Client(),
 	}
 	job, err := client.claim(context.Background())
@@ -314,7 +314,7 @@ func TestClientEnrollmentReportsMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"token":"enrollment-token","name":"worker-1","architecture":"x86_64","publicKey":"`+encodeStandardBase64(key.Public().(ed25519.PublicKey))+`","version":"v0.1.0","runtime":"podman","capabilities":["offline-oci","multipart-upload","registry-pull"]}` {
+		if string(body) != `{"token":"enrollment-token","name":"worker-1","architecture":"x86_64","publicKey":"`+encodeStandardBase64(key.Public().(ed25519.PublicKey))+`","version":"v0.1.0","runtime":"podman","capabilities":["offline-oci","multipart-upload","registry-pull","runtime-analysis-v1"]}` {
 			t.Fatalf("enrollment body = %s", body)
 		}
 		writer.Header().Set("Content-Type", "application/json")
@@ -322,7 +322,7 @@ func TestClientEnrollmentReportsMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &Client{Origin: mustURL(t, server.URL), WorkerID: "unused", PrivateKey: key, HTTP: server.Client()}
-	metadata := WorkerMetadata{Version: "v0.1.0", Runtime: "podman", Capabilities: []string{"offline-oci", "multipart-upload", "registry-pull"}}
+	metadata := WorkerMetadata{Version: "v0.1.0", Runtime: "podman", Capabilities: []string{"offline-oci", "multipart-upload", "registry-pull", "runtime-analysis-v1"}}
 	workerID, err := client.postEnrollment(context.Background(), "enrollment-token", "worker-1", "x86_64", key.Public().(ed25519.PublicKey), metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -339,7 +339,7 @@ func TestClientHeartbeatReportsMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"leaseToken":"lease","version":"v0.1.0","runtime":"docker","capabilities":["offline-oci","multipart-upload","registry-pull"]}` {
+		if string(body) != `{"leaseToken":"lease","version":"v0.1.0","runtime":"docker","capabilities":["offline-oci","multipart-upload","registry-pull","runtime-analysis-v1"]}` {
 			t.Fatalf("heartbeat metadata body = %s", body)
 		}
 		writer.Header().Set("Content-Type", "application/json")
@@ -350,7 +350,7 @@ func TestClientHeartbeatReportsMetadata(t *testing.T) {
 		Origin:     mustURL(t, server.URL),
 		WorkerID:   "worker-1",
 		PrivateKey: key,
-		Metadata:   WorkerMetadata{Version: "v0.1.0", Runtime: "docker", Capabilities: []string{"offline-oci", "multipart-upload", "registry-pull"}},
+		Metadata:   WorkerMetadata{Version: "v0.1.0", Runtime: "docker", Capabilities: []string{"offline-oci", "multipart-upload", "registry-pull", "runtime-analysis-v1"}},
 		HTTP:       server.Client(),
 	}
 	response, err := client.heartbeat(context.Background(), "job-1", "lease")

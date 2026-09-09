@@ -26,6 +26,7 @@ const args = new Set(process.argv.slice(2));
 const configOnly = args.has('--config-only');
 const pipelineRequested = args.has('--pipeline');
 const syncSecrets = args.has('--sync-secrets');
+const signerRequested = args.has('--signer');
 const configRequired = [
   'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_D1_DATABASE_ID', 'D1_DATABASE_NAME', 'ARTIFACTS_BUCKET_NAME',
   'PUBLIC_ORIGIN',
@@ -236,6 +237,7 @@ if (configOnly) {
   if (syncSecrets) await deploySecrets(webConfigPath, webSecrets);
   await run(nativeNode, wranglerArgs(['deploy'], webConfigPath));
   await attachCustomDomain();
+  if (signerRequested) await run(nativeNode, wranglerArgs(['deploy'], signerConfigPath));
 
   if (pipelineRequested) {
     const pipelineTemplate = await configTemplate('services/pipeline/wrangler.jsonc');
@@ -249,7 +251,7 @@ if (configOnly) {
     if (syncSecrets) await deploySecrets(pipelineConfigPath, pipelineSecrets);
     await run(nativeNode, wranglerArgs(['deploy'], pipelineConfigPath));
   }
-  console.log(`Deployment complete (${pipelineRequested ? 'web and pipeline' : 'web'}). ${syncSecrets ? 'Selected runtime secrets were supplied individually.' : 'Existing runtime secrets were retained.'} Provisioning credentials were not forwarded.`);
+  console.log(`Deployment complete (web${pipelineRequested ? ', pipeline' : ''}${signerRequested ? ', signer' : ''}). ${syncSecrets ? 'Selected runtime secrets were supplied individually.' : 'Existing runtime secrets were retained.'} Provisioning credentials were not forwarded.`);
 } finally {
   await rm(productionDir, { recursive: true, force: true });
 }

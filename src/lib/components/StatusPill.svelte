@@ -8,6 +8,7 @@
     active: 'check',
     built: 'check',
     building: 'activity',
+    blocked: 'lock',
     cancelled: 'x',
     dev: 'clock',
     failed: 'x',

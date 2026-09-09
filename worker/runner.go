@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,18 +24,22 @@ type Runner struct {
 	Runtime      string
 	Image        string
 	ImageDigest  string
+	RuntimeImage string
 	Origin       string
 	StateDir     string
 	BuildTimeout time.Duration
 }
 
 type BuildResult struct {
-	ArtifactPath    string
-	InstalledSize   int64
-	PackageMetadata packageMetadata
-	Log             string
-	SmokePassed     bool
-	Cleanup         func()
+	ArtifactPath       string
+	InstalledSize      int64
+	PackageMetadata    packageMetadata
+	Log                string
+	SmokePassed        bool
+	Cleanup            func()
+	BuildEnvironment   *environmentEvidence
+	RuntimeEnvironment *environmentEvidence
+	RuntimeAnalysis    *runtimeAnalysis
 }
 
 func (r *Runner) createJobDirectory(jobID string) (string, error) {
@@ -119,13 +124,13 @@ func (r *Runner) prepareDependenciesWithPlan(ctx context.Context, jobName, image
 	}
 	if err != nil {
 		cleanup()
-		return preparedImage{log: log}, fmt.Errorf("install Arch dependencies: %w", err)
+		return preparedImage{log: log}, missingPackageError(log, dependencies, fmt.Errorf("install Arch dependencies: %w", err))
 	}
 	prepLog, err := r.startAndCollect(ctx, container)
 	log += prepLog
 	if err != nil {
 		cleanup()
-		return preparedImage{log: log}, fmt.Errorf("install Arch dependencies: %w", err)
+		return preparedImage{log: log}, missingPackageError(log, dependencies, fmt.Errorf("install Arch dependencies: %w", err))
 	}
 	if _, err := r.run(ctx, "commit", container, imageTag); err != nil {
 		cleanup()
@@ -397,6 +402,16 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		return BuildResult{}, err
 	}
 	jobName := "opr-" + job.ID
+	if r.RuntimeImage == "" || r.RuntimeImage == imageRef {
+		return BuildResult{}, errors.New("a separate digest-pinned minimal runtime image is required")
+	}
+	runtimeDigest := r.RuntimeImage[strings.LastIndex(r.RuntimeImage, "@")+1:]
+	if err := r.ensureImageReference(ctx, r.RuntimeImage, runtimeDigest, getCredentials, job.ID, job.LeaseToken); err != nil {
+		return BuildResult{}, fmt.Errorf("runtime image: %w", err)
+	}
+	if log, err := r.checkShell(ctx, job, jobName, imageRef); err != nil {
+		return BuildResult{Log: log}, fmt.Errorf("shell analysis failed: %w", err)
+	}
 	dependencies := append(append(append([]string{}, job.Dependencies...), job.RuntimeDependencies...), job.MakeDependencies...)
 	prepared, err := r.prepareDependenciesWithPlan(ctx, jobName, imageRef, uniqueStrings(dependencies), job.DependencyPlan, dependencyDir)
 	if err != nil {
@@ -405,13 +420,11 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 	if prepared.cleanup != nil {
 		defer prepared.cleanup()
 	}
-	if dependencyDir != "" {
-		if err := os.RemoveAll(dependencyDir); err != nil {
-			return BuildResult{Log: prepared.log}, fmt.Errorf("remove dependency plan files: %w", err)
-		}
-		dependencyDir = ""
-	}
 	log := prepared.log
+	buildEnvironment, err := r.inspectEnvironment(ctx, jobName, imageRef, prepared.ref)
+	if err != nil {
+		return BuildResult{Log: log}, err
+	}
 	for _, directory := range []string{workdir, output} {
 		if err := os.Chmod(directory, 0o777); err != nil {
 			return BuildResult{Log: log}, fmt.Errorf("prepare build directory: %w", err)
@@ -435,15 +448,59 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		return BuildResult{ArtifactPath: artifact, Log: log}, err
 	}
 	_ = os.Remove(filepath.Join(output, ".PKGINFO"))
-	smokeLog, smokeErr := r.smoke(ctx, artifact, jobName, prepared.ref, job.SmokeCommands)
+	analysis, err := r.analyzePackage(ctx, artifact, jobName, prepared.ref, job.RuntimeExceptions)
+	if analysis != nil {
+		evidence, _ := json.Marshal(analysis)
+		log += "\nRuntime analysis: " + string(evidence) + "\n"
+	}
+	if err != nil {
+		return BuildResult{Log: log, RuntimeAnalysis: analysis, BuildEnvironment: &buildEnvironment}, err
+	}
+	runtimePlan, err := runtimeDependencyPlan(job.DependencyPlan)
+	if err != nil {
+		return BuildResult{Log: log, RuntimeAnalysis: analysis}, err
+	}
+	runtimeDir := ""
+	if runtimePlan != nil {
+		runtimeDir = filepath.Join(jobDir, "runtime-dependencies")
+		if err := copyRuntimeDependencies(runtimePlan, dependencyDir, runtimeDir); err != nil {
+			return BuildResult{Log: log}, err
+		}
+	}
+	runtimePrepared, err := r.prepareDependenciesWithPlan(ctx, jobName+"-runtime", r.RuntimeImage, metadata.Depends, runtimePlan, runtimeDir)
+	log += runtimePrepared.log
+	if err != nil {
+		var resolution *dependencyResolutionError
+		if errors.As(err, &resolution) {
+			for i := range resolution.Blockers {
+				resolution.Blockers[i].Phase = "runtime"
+			}
+		}
+		return BuildResult{Log: log, RuntimeAnalysis: analysis}, err
+	}
+	if runtimePrepared.cleanup != nil {
+		defer runtimePrepared.cleanup()
+	}
+	runtimeEnvironment, err := r.inspectEnvironment(ctx, jobName+"-runtime", r.RuntimeImage, runtimePrepared.ref)
+	if err != nil {
+		return BuildResult{Log: log}, err
+	}
+	for _, directory := range []string{dependencyDir, runtimeDir} {
+		if directory != "" {
+			if err := os.RemoveAll(directory); err != nil {
+				return BuildResult{Log: log}, err
+			}
+		}
+	}
+	smokeLog, smokeErr := r.smoke(ctx, artifact, jobName, runtimePrepared.ref, job.SmokeCommands)
 	if smokeLog != "" {
 		log += smokeLog
 	}
 	if smokeErr != nil {
-		return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: false}, smokeErr
+		return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: false, RuntimeAnalysis: analysis, BuildEnvironment: &buildEnvironment, RuntimeEnvironment: &runtimeEnvironment}, smokeErr
 	}
 	keepDirectory = true
-	return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: true, Cleanup: func() {
+	return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: true, RuntimeAnalysis: analysis, BuildEnvironment: &buildEnvironment, RuntimeEnvironment: &runtimeEnvironment, Cleanup: func() {
 		r.cleanupJobDirectory(jobDir, imageRef)
 		_ = os.RemoveAll(jobDir)
 	}}, nil

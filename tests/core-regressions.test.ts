@@ -148,7 +148,7 @@ describe('core security regressions', () => {
       { spdxElementId: 'SPDXRef-Package-1', relationshipType: 'DEPENDS_ON', relatedSpdxElement: 'SPDXRef-Package-3' },
       { spdxElementId: 'SPDXRef-Package-4', relationshipType: 'BUILD_DEPENDENCY_OF', relatedSpdxElement: 'SPDXRef-Package-1' },
     ]);
-    expect(readOprEvidence(sbom)).toEqual({ makeDependencies: ['base-devel'] });
+    expect(readOprEvidence(sbom)).toMatchObject({ makeDependencies: ['base-devel'], recipePolicy: { version: 1, mode: 'custom-shell' }, dependencyEvidence: { runtimeClosureComplete: false } });
     expect(readOprEvidence({ oprEvidence: { sourceResolution: { sourceRedirects: ['https://example.org/legacy'] } } })).toEqual({ sourceResolution: { sourceRedirects: ['https://example.org/legacy'] } });
     expect(sourceRedirects({ oprEvidence: { sourceRedirects: ['https://example.org/legacy'] } })).toEqual(['https://example.org/legacy']);
     expect(sourceRedirects({ comment: 'OPR-EVIDENCE-1\n{"sourceResolution":{"redirectChain":["https://example.org/a","https://example.org/b"]}}' })).toEqual(['https://example.org/a', 'https://example.org/b']);
@@ -282,7 +282,7 @@ describe('core security regressions', () => {
       await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'x'.repeat(2_001)))
         .rejects.toMatchObject({ status: 400 });
       db.prepare("UPDATE approvals SET revoked_at=2 WHERE revision_id=? AND kind='security'").bind(item.id).run();
-      await approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'Security review checked source and build evidence.');
+      await approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'Security review checked source and build evidence.', true);
       expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(item.request_id).first<{ status: string }>()?.status).toBe('queued');
       expect(db.prepare('SELECT status FROM builds WHERE revision_id=?').bind(item.id).first<{ status: string }>()?.status).toBe('queued');
       const approvalRows = db.prepare("SELECT detail FROM audit_events WHERE action='revision.approved' ORDER BY id DESC LIMIT 1").all<{ detail: string }>().results;

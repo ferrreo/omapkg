@@ -1,3 +1,5 @@
+import { shellCheckCommand } from './shell-check';
+import { blockerStatements, parseDependencyBlockers } from '../../src/lib/server/dependency-blockers';
 import { audit, now, sha256 } from '../../src/lib/server/db';
 import { redactText, normalizeSourceUrl, shellQuote, gitInspectCommand, sourceReadCommand } from './security';
 import type { SourceEvidence, FactoryRequest, FactoryEnv, FactoryCandidate } from './types';
@@ -429,11 +431,13 @@ export function makeSubmitCandidateTool(
       manifestSha256: v.string(),
       lint: recipeLintSchema,
     }),
-    async run({ data }) {
+    harness: true,
+    async run({ data, harness, signal }) {
       await auditTool?.('submit_factory_candidate', 'started', { resultDigest: null });
       try {
-        const { vendorArtifact: _ignoredVendorArtifact, ...modelData } = data as FactoryCandidateInput;
+        const { vendorArtifact: _ignoredVendorArtifact, publicRecipeOptions: _ignoredPublicOptions, ...modelData } = data as FactoryCandidateInput;
         void _ignoredVendorArtifact;
+        void _ignoredPublicOptions;
         const evidence = getEvidence?.();
         if (!evidence) throw new Error('inspect_upstream_source must succeed before submitting a candidate');
         if (!trustedImageDigest) throw new Error('trusted factory builder image is not configured');
@@ -524,7 +528,7 @@ export function makeSubmitCandidateTool(
         request: { ...request, buildImages },
         };
         if (surface === 'recipe' && (request.sourceKind === 'git' || evidence.vendor)) {
-          candidate.publicRecipe = renderPublicRecipe(candidate, {
+          candidate.publicRecipeOptions = {
             sourceKind: request.sourceKind,
             sourceUrl: request.sourceKind === 'git' ? request.upstreamUrl : evidence.normalizedUrl,
             sourceName: evidence.sourceName,
@@ -533,10 +537,15 @@ export function makeSubmitCandidateTool(
             upstreamCommit: evidence.upstreamCommit,
             vendorKind: evidence.vendor?.kind,
             vendorSha256: evidence.vendor?.sourceSha256,
-          });
+          };
+          candidate.publicRecipe = renderPublicRecipe(candidate, candidate.publicRecipeOptions);
         }
-        const draft = await createFactoryRevision(candidate);
-        writeCandidate({ ...modelData, sourceRoot: evidence.sourceRoot, sources, sbom, vendorArtifact, surface, publicRecipe: candidate.publicRecipe, architectures: availableArchitectures, pkgrel: request.pkgrel ?? data.pkgrel ?? 1, imageDigest });
+        let draft = await createFactoryRevision(candidate);
+        const checked = await harness.sandbox.exec(shellCheckCommand(draft.revision.recipe, draft.manifest.smokeCommands, candidate.publicRecipe), { timeoutMs: 60_000, signal });
+        if (checked.exitCode !== 0) throw new Error(`Shell analysis failed: ${(checked.stdout + checked.stderr).slice(0, 4_096)}`);
+        sbom = { ...sbom, shellAnalysis: { passed: true, tool: checked.stdout.trim().slice(0, 512), scope: ['recipe', 'smoke', ...(candidate.publicRecipe ? ['public-recipe'] : [])] } };
+        draft = await createFactoryRevision({ ...candidate, sbom }, 0, draft.revision.id);
+        writeCandidate({ ...modelData, sourceRoot: evidence.sourceRoot, sources, sbom, vendorArtifact, surface, publicRecipe: candidate.publicRecipe, publicRecipeOptions: candidate.publicRecipeOptions, architectures: availableArchitectures, pkgrel: request.pkgrel ?? data.pkgrel ?? 1, imageDigest });
         await auditTool?.('submit_factory_candidate', 'completed', {
           resultDigest: draft.revision.recipe_sha256,
           recipeSha256: draft.revision.recipe_sha256,
@@ -614,3 +623,23 @@ export {
 export { vendorKindForEvidence } from './factory-vendor';
 
 export type { FlueHarness };
+export function makeReportMissingDependenciesTool(request: FactoryRequest, db: D1Database) {
+  return defineTool({
+    name: 'report_missing_dependencies',
+    description: 'Report missing dependency evidence and block this request. Never creates or admits another package or upstream URL. Stop generation after this tool succeeds.',
+    input: v.strictObject({
+      architecture: v.picklist(['x86_64', 'aarch64']),
+      dependencies: v.pipe(v.array(v.strictObject({ relation: v.string(), detail: v.string() })), v.minLength(1), v.maxLength(16)),
+    }),
+    output: v.object({ blocked: v.boolean() }),
+    async run({ data }) {
+      if (!request.generationId || !request.buildImages?.[data.architecture]) throw new Error('Current generation and supported architecture are required');
+      const blockers = parseDependencyBlockers(data.dependencies.map((item) => ({ ...item, phase: 'factory', resolution: 'dependency' })));
+      await db.batch(await blockerStatements(db, { requestId: request.id, scopeId: request.generationId, revisionId: null,
+        architecture: data.architecture, timestamp: now() }, blockers, 'factory'));
+      const current = await db.prepare('SELECT status,factory_run_id FROM requests WHERE id=?').bind(request.id).first<{ status: string; factory_run_id: string }>();
+      if (current?.status !== 'blocked' || current.factory_run_id !== request.generationId) throw new Error('Factory generation is no longer current');
+      return { output: { blocked: true } };
+    },
+  });
+}

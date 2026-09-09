@@ -2,6 +2,8 @@ import type { Worker } from '../model';
 import { now, sha256 } from './db';
 import { parsePackageMetadata, archRelationCovers } from './arch';
 import { type DependencyPlan, parseDependencyPlan, dependencyPlansEqual } from './dependency-plan';
+import { assertRuntimeEvidence, reviewedRuntimeExceptions } from './runtime-evidence';
+import { blockerStatements, parseDependencyBlockers } from './dependency-blockers';
 import {
   type WorkerMetadata,
   requireLeaseToken,
@@ -218,7 +220,7 @@ function parseInstalledSize(value: unknown): number {
 
 function parseCompleteInput(value: unknown): CompleteInput {
   const object = requireObject(value);
-  requireExactKeys(object, ['leaseToken', 'status', 'installedSize', 'error', 'artifact', 'provenance', 'provenanceSignature', 'smokePassed']);
+  requireExactKeys(object, ['leaseToken', 'status', 'installedSize', 'error', 'artifact', 'provenance', 'provenanceSignature', 'smokePassed', 'dependencyBlockers']);
   const leaseToken = requireLeaseToken(object.leaseToken);
   if (object.status !== 'succeeded' && object.status !== 'failed') throw new WorkerProtocolError(400, 'Invalid completion status');
   if (typeof object.smokePassed !== 'boolean') throw new WorkerProtocolError(400, 'Invalid smokePassed');
@@ -239,7 +241,7 @@ function parseProvenance(value: string): Record<string, unknown> {
   const parsed = parseJsonBytes(textEncoder.encode(value));
   const object = requireObject(parsed);
   const required = ['buildId', 'revisionId', 'workerId', 'recipeSha256', 'artifactSha256', 'architecture', 'imageDigest', 'sourceDateEpoch', 'sources', 'network', 'startedAt', 'finishedAt'];
-  requireExactKeys(object, [...required, 'pkgrel', 'installedSize', 'packageMetadata', 'dependencyPlan']);
+  requireExactKeys(object, [...required, 'pkgrel', 'installedSize', 'packageMetadata', 'dependencyPlan', 'buildEnvironment', 'runtimeEnvironment', 'runtimeAnalysis']);
   requireKeys(object, required);
   if (object.pkgrel !== undefined && (!Number.isSafeInteger(object.pkgrel) || (object.pkgrel as number) < 1 || (object.pkgrel as number) > 9_999)) {
     throw new WorkerProtocolError(400, 'Invalid provenance pkgrel');
@@ -324,6 +326,8 @@ async function verifyProvenance(
   if (!(await verifyEd25519(publicKey, textEncoder.encode(provenance), signature))) {
     throw new WorkerProtocolError(401, 'Invalid provenance signature');
   }
+  try { await assertRuntimeEvidence(object, imageDigest, reviewedRuntimeExceptions(build.revision_sbom_json)); }
+  catch (cause) { throw new WorkerProtocolError(409, cause instanceof Error ? cause.message : 'Runtime evidence is invalid'); }
 }
 
 function storedArtifact(build: WorkerLease): ArtifactReference | null {
@@ -363,6 +367,12 @@ export async function completeJob(
   inputValue: unknown
 ): Promise<{ status: 'succeeded' | 'failed'; idempotent: boolean }> {
   const input = parseCompleteInput(inputValue);
+  let blockers;
+  try { blockers = parseDependencyBlockers((inputValue as Record<string, unknown>).dependencyBlockers); }
+  catch (cause) { throw new WorkerProtocolError(400, cause instanceof Error ? cause.message : 'Invalid dependency blockers'); }
+  if (input.status !== 'failed' && blockers.length) throw new WorkerProtocolError(400, 'Successful completion cannot contain dependency blockers');
+  if (blockers.some((item) => item.phase === 'factory')) throw new WorkerProtocolError(400, 'Workers cannot report factory blockers');
+  const blockersJSON = blockers.length ? JSON.stringify(blockers) : null;
   if (input.status === 'failed' && (input.installedSize !== undefined || input.artifact || input.provenance || input.provenanceSignature || input.smokePassed)) {
     throw new WorkerProtocolError(400, 'Failed completion contains success evidence');
   }
@@ -370,7 +380,7 @@ export async function completeJob(
   if (!current || current.lease_token !== input.leaseToken) throw new WorkerProtocolError(409, 'Worker lease is fenced');
   const currentArtifact = storedArtifact(current);
   if (current.status === 'succeeded' || current.status === 'failed') {
-    if (terminalCompletionMatches(current, input, currentArtifact)) return { status: current.status, idempotent: true };
+    if (terminalCompletionMatches(current, input, currentArtifact) && (current.dependency_blockers_json ?? null) === blockersJSON) return { status: current.status, idempotent: true };
     throw new WorkerProtocolError(409, 'Build already completed');
   }
   const build = await requireLease(db, buildId, worker.id, input.leaseToken);
@@ -399,10 +409,10 @@ export async function completeJob(
           WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'leased' AND lease_expires_at > ?
             AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active')`)
           .bind(input.installedSize ?? null, input.provenance, input.provenanceSignature, timestamp, timestamp, build.id, worker.id, input.leaseToken, timestamp, worker.id)
-      : db.prepare(`UPDATE builds SET status = 'failed', error = ?, smoke_passed = 0, finished_at = ?, lease_expires_at = ?
+      : db.prepare(`UPDATE builds SET status = 'failed', error = ?, smoke_passed = 0, finished_at = ?, lease_expires_at = ?, dependency_blockers_json = ?
           WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'leased' AND lease_expires_at > ?
             AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active')`)
-          .bind(input.error ?? null, timestamp, timestamp, build.id, worker.id, input.leaseToken, timestamp, worker.id);
+          .bind(input.error ?? null, timestamp, timestamp, blockersJSON, build.id, worker.id, input.leaseToken, timestamp, worker.id);
     const statements: D1PreparedStatement[] = [
       updates,
       db.prepare(`INSERT INTO audit_events(actor, action, target, detail, created_at)
@@ -420,6 +430,10 @@ export async function completeJob(
         SELECT ?, 'request.failed', (SELECT request_id FROM revisions WHERE id=?), ?, ? WHERE changes()=1`)
         .bind(`worker:${worker.id}`, build.revision_id, JSON.stringify({ buildId: build.id, revisionId: build.revision_id, attempt: build.attempt, reason: 'build failed' }), timestamp),
     );
+    if (blockers.length) statements.push(...await blockerStatements(db, {
+      requestId: build.revision_request_id, scopeId: build.revision_id, revisionId: build.revision_id,
+      architecture: build.architecture, buildId: build.id, leaseToken: input.leaseToken, timestamp,
+    }, blockers, `worker:${worker.id}`));
     await db.batch(statements);
   } catch (cause) {
     return databaseFailure(cause);

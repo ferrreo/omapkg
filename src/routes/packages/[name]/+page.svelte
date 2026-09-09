@@ -90,7 +90,7 @@
     return `/repo/${release.channel === 'dev' ? 'dev/' : ''}recipes/${encodeURIComponent(release.name)}/${encodeURIComponent(release.version)}/${release.architecture}/PKGBUILD`;
   }
 
-  function metadataHref(release: DetailRelease, filename: 'sbom.json' | 'provenance.json') {
+  function metadataHref(release: DetailRelease, filename: 'sbom.json' | 'provenance.json' | 'attestation.json' | 'attestation.json.sig') {
     return `/repo/metadata/${encodeURIComponent(release.id)}/${filename}`;
   }
 
@@ -367,9 +367,18 @@
               <div class="detail-list">
                 <div class="detail-list__row"><span class="detail-list__key">Artifact</span>{#if artifactHref(latest)}<a class="detail-list__value" href={artifactHref(latest)}>Download <Icon name="download" size={14} /></a>{:else if latest.surface === 'recipe'}<a class="detail-list__value" href={recipeHref(latest)}>Open recipe <Icon name="code" size={14} /></a>{:else}<span class="detail-list__value">Pending</span>{/if}</div>
                 <div class="detail-list__row"><span class="detail-list__key">Signature</span>{#if artifactHref(latest)}<a class="detail-list__value" href={`${artifactHref(latest)}.sig`}>Open signature</a>{:else}<span class="detail-list__value">{latest.surface === 'recipe' ? 'Not applicable' : 'Pending'}</span>{/if}</div>
+                <div class="detail-list__row"><span class="detail-list__key">Recipe mode</span><span class="detail-list__value">{data.recipePolicy.mode === 'template' ? 'Versioned template' : 'Custom shell'}{data.recipePolicy.recorded ? '' : ' (historical)'}</span></div>
+                {#if data.runtimeEvidence}
+                  <p>Measured runtime evidence: {data.runtimeEvidence.elfCount} ELF files, {data.runtimeEvidence.findings} findings, {data.runtimeEvidence.exceptions} reviewed exceptions. Prepared inventories contain {data.runtimeEvidence.buildPackages} build packages and {data.runtimeEvidence.runtimePackages} runtime packages. See worker report for exact versions and library requirements.</p>
+                  <p>Clean runtime smoke tests cover reviewed commands. Plugins, dynamic loading, optional features, and unexercised paths remain unknown; runtime closure is not proven.</p>
+                {:else}
+                  <p>Measured runtime evidence unavailable for this historical release.</p>
+                {/if}
                 <div class="detail-list__row"><span class="detail-list__key">SBOM</span>{#if latest.sbom_key}<a class="detail-list__value" href={metadataHref(latest, 'sbom.json')}>Open SBOM</a>{:else}<span class="detail-list__value">Pending</span>{/if}</div>
-                <div class="detail-list__row"><span class="detail-list__key">Attestation</span>{#if latest.provenance_key}<a class="detail-list__value" href={metadataHref(latest, 'provenance.json')}>Open provenance</a>{:else}<span class="detail-list__value">Pending</span>{/if}</div>
+                <div class="detail-list__row"><span class="detail-list__key">Worker report</span>{#if latest.provenance_key}<a class="detail-list__value" href={metadataHref(latest, 'provenance.json')}>Open provenance</a>{:else}<span class="detail-list__value">Pending</span>{/if}</div>
+                <div class="detail-list__row"><span class="detail-list__key">Signed attestation</span>{#if latest.attestation_key}<a class="detail-list__value" href={metadataHref(latest, 'attestation.json')}>Open statement</a><a class="detail-list__value" href={metadataHref(latest, 'attestation.json.sig')}>Signature</a>{:else}<span class="detail-list__value">Historical release: public signature unavailable</span>{/if}</div>
               </div>
+              <p class="prose">Signatures authenticate evidence, not software safety. The SBOM records declarations and resolved inputs; runtime discovery is incomplete. <a href="/docs/security">Evidence limits</a>.</p>
             {:else}
               <p class="prose">Evidence links appear once a build is reviewed and published.</p>
             {/if}

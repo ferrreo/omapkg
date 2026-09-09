@@ -187,10 +187,14 @@ export const GET: RequestHandler = async ({ platform, params }) => {
     return readObject(env.ARTIFACTS, row.recipe_key, parts.join('/'));
   }
 
-  if (parts.length === 3 && parts[0] === 'metadata' && releaseId.test(parts[1]) && ['sbom.json', 'provenance.json'].includes(parts[2])) {
-    const row = await env.DB.prepare(`SELECT sbom_key,provenance_key FROM releases
-      WHERE id=? AND channel IN ('stable','withdrawn','dev')`).bind(parts[1]).first<{ sbom_key: string; provenance_key: string }>();
+  if (parts.length === 3 && parts[0] === 'metadata' && releaseId.test(parts[1]) && ['sbom.json', 'provenance.json', 'attestation.json', 'attestation.json.sig'].includes(parts[2])) {
+    const row = await env.DB.prepare(`SELECT sbom_key,provenance_key,attestation_key FROM releases
+      WHERE id=? AND channel IN ('stable','withdrawn','dev')`).bind(parts[1]).first<{ sbom_key: string; provenance_key: string; attestation_key: string | null }>();
     if (!row) error(404, 'Object not found.');
+    if (parts[2].startsWith('attestation.json')) {
+      if (!row.attestation_key) error(404, 'This historical release has no public signed attestation.');
+      return readObject(env.ARTIFACTS, row.attestation_key + (parts[2].endsWith('.sig') ? '.sig' : ''), parts.join('/'));
+    }
     return readObject(env.ARTIFACTS, parts[2] === 'sbom.json' ? row.sbom_key : row.provenance_key, parts.join('/'));
   }
 

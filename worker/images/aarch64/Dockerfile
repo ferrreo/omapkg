@@ -5,7 +5,7 @@ FROM scratch
 COPY . /
 
 RUN pacman -Syu --noconfirm --needed \
-      base-devel arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools \
+      base-devel arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools namcap shellcheck \
     && pacman -Scc --noconfirm
 
 ENV LANG=C.UTF-8

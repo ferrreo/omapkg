@@ -1,3 +1,4 @@
+import { runtimeEvidence } from './runtime-fixtures';
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { manifestDigest } from '../src/lib/server/policy';
@@ -7,10 +8,11 @@ import {
   type SigningControlEnv,
 } from '../src/lib/server/signing-control';
 import { sha256 } from '../src/lib/server/db';
+import { attestationKey, releaseAttestation } from '../src/lib/server/release-attestation';
 import { TestD1, asD1 } from './d1';
 
 const schema = [
-  '0001_initial.sql', '0003_distribution.sql', '0007_core_guards.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql',
+  '0001_initial.sql', '0003_distribution.sql', '0007_core_guards.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql', '0026_release_attestations.sql',
 ].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
 
 class MemoryR2 {
@@ -59,7 +61,7 @@ test('claims only current reviewed evidence and completes signing idempotently',
   const provenance = JSON.stringify({
     buildId: 'build-1', revisionId: revision.id, workerId: 'worker-1', recipeSha256: revision.recipe_sha256,
     artifactSha256, architecture: 'x86_64', imageDigest: `sha256:${'c'.repeat(64)}`,
-    sourceDateEpoch: revision.source_date_epoch, sources: source, network: 'disabled',
+    sourceDateEpoch: revision.source_date_epoch, sources: source, network: 'disabled', ...runtimeEvidence(`sha256:${'c'.repeat(64)}`),
     installedSize: 4096,
     packageMetadata: { name: 'hello', fullVersion: '1.0.0-1', architecture: 'x86_64', installedSize: 4096,
       depends: ['runtime-dep', 'lib:libOpenCL.so.1'], provides: [], conflicts: [], replaces: [] },
@@ -152,6 +154,46 @@ test('claims only current reviewed evidence and completes signing idempotently',
     expect(await completeSigningIntent(env, event)).toEqual({ idempotent: true });
     expect((await db.prepare('SELECT status FROM signing_intents WHERE id=?').bind('intent-1').first<{ status: string }>())?.status).toBe('signed');
     expect((await db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='signing.completed'").first<{ count: number }>())?.count).toBe(1);
+    for (const surface of ['binary', 'recipe'] as const) {
+      const buildId = `build-${surface}`;
+      const publishedRecipe = surface === 'recipe' ? `${recipe}# published source\n` : null;
+      const revised = { ...revision, id: `revision-${surface}`, created_at: timestamp + (surface === 'binary' ? 1 : 2), surface,
+        public_recipe: publishedRecipe, public_recipe_sha256: publishedRecipe ? await sha256(publishedRecipe) : null };
+      revised.manifest_sha256 = await manifestDigest(revised);
+      const columns = Object.keys(revised);
+      db.prepare(`INSERT INTO revisions(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`).bind(...Object.values(revised)).run();
+      for (const kind of ['area', 'security']) {
+        db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
+          .bind(`${kind}-${surface}`, revised.id, 'github:1', kind, revised.manifest_sha256, timestamp).run();
+      }
+      const report = JSON.stringify({ ...JSON.parse(provenance), buildId, revisionId: revised.id,
+        artifactSha256: surface === 'binary' ? artifactSha256 : null });
+      const reportSignature = base64(new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(report))));
+      const filename = surface === 'binary' ? 'hello-1.0.0-1-x86_64.pkg.tar.zst' : null;
+      db.prepare(`INSERT INTO builds(id,revision_id,status,architecture,worker_id,artifact_sha256,artifact_filename,provenance,provenance_signature,smoke_passed,created_at,installed_size)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(buildId, revised.id, 'succeeded', 'x86_64', 'worker-1', surface === 'binary' ? artifactSha256 : null,
+          filename, report, reportSignature, 1, timestamp, surface === 'binary' ? 4096 : null).run();
+      const statement = await releaseAttestation({
+        buildId, revisionId: revised.id, surface, artifactFilename: filename, artifactSha256: surface === 'binary' ? artifactSha256 : null,
+        recipe: publishedRecipe ?? recipe, recipeSha256: revised.recipe_sha256, manifestSha256: revised.manifest_sha256,
+        sbom: revised.sbom_json, provenance: report, provenanceSignature: reportSignature, workerPublicKey,
+      });
+      const key = attestationKey(buildId);
+      const statementSha256 = await sha256(statement);
+      artifacts.objects.set(key, { body: new TextEncoder().encode(statement), customMetadata: { sha256: statementSha256 } });
+      const intentId = `attestation-${surface}`;
+      db.prepare(`INSERT INTO signing_intents(id,build_id,revision_id,object_key,object_kind,artifact_sha256,artifact_filename,manifest_sha256,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`).bind(intentId, buildId, revised.id, key, 'attestation', statementSha256, 'attestation.json', revised.manifest_sha256, timestamp).run();
+      const claimed = await claimSigningIntent(env, intentId);
+      expect(claimed.kind).toBe('attestation');
+      expect(claimed.statement).toBe(statement);
+      expect(claimed.build.surface).toBe(surface);
+      const substituted = statement.replace(buildId, `x${buildId.slice(1)}`);
+      artifacts.objects.set(key, { body: new TextEncoder().encode(substituted), customMetadata: { sha256: await sha256(substituted) } });
+      db.prepare('UPDATE signing_intents SET artifact_sha256=? WHERE id=?').bind(await sha256(substituted), intentId).run();
+      await expect(claimSigningIntent(env, intentId)).rejects.toThrow('Attestation does not match reviewed build evidence');
+    }
+
   } finally {
     holder.close();
   }

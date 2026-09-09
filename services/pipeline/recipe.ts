@@ -1,3 +1,4 @@
+import { templateCommands } from './recipe-template';
 import type { FactoryCandidate, RecipeLint, VendorKind } from './types';
 import type { Source } from '../../src/lib/model';
 import { offlineVendorExtractCommand } from './artifacts';
@@ -85,6 +86,13 @@ function hasDangerousCommand(recipe: string): boolean {
 }
 
 export function renderRecipe(candidate: FactoryCandidate, options: RecipeRenderOptions = {}): string {
+  if (candidate.recipeMode === 'template') {
+    if (!candidate.template || candidate.buildCommands.length || candidate.packageCommands.length || candidate.vendorArtifact) {
+      throw new Error('Template recipes cannot contain custom commands or vendor installers');
+    }
+    const commands = templateCommands(candidate.template);
+    candidate = { ...candidate, buildCommands: commands.build, packageCommands: commands.package };
+  }
   const pkgname = assertPackageName(candidate.request.name);
   const pkgver = assertVersion(candidate.version);
   const pkgrel = candidate.pkgrel ?? 1;
@@ -185,7 +193,7 @@ export function renderRecipe(candidate: FactoryCandidate, options: RecipeRenderO
   return assertRecipeLength(recipe);
 }
 
-type PublicRecipeOptions = {
+export type PublicRecipeOptions = {
   sourceKind: 'git' | 'archive';
   sourceUrl: string;
   sourceName: string;

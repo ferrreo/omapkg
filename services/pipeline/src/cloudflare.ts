@@ -4,6 +4,7 @@ import { requeuePublications } from '../publication';
 import { expireCrashReports, processCrashQuarantines } from '../../../src/lib/server/crashes';
 import type { FactoryEnv, PipelineEnv } from '../types';
 import type { Env } from '../../../src/lib/server/env';
+import { resolveDependencyBlockers } from '../../../src/lib/server/dependency-blockers';
 export { ContainerProxy } from '@cloudflare/sandbox';
 
 export class Sandbox extends CloudflareSandbox {
@@ -20,6 +21,7 @@ export default {
     await expireCrashReports(env as unknown as Env);
     await processCrashQuarantines(env as unknown as Env);
     await requeuePublications(env as unknown as Env);
+    await resolveDependencyBlockers(env);
     await runScheduledChecks(env as unknown as FactoryEnv);
   },
 };

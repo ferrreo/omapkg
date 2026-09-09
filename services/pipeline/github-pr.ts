@@ -1,5 +1,6 @@
 import type { FactoryEnv, FactoryRevisionDraft } from './types';
 import { githubFetch } from '../../src/lib/server/github';
+import { revisionRecipePolicy } from './recipe-policy';
 
 interface GithubRepository {
   default_branch: string;
@@ -129,6 +130,8 @@ export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRe
         `- manifest SHA-256: ${draft.revision.manifest_sha256}`,
         `- source kind: ${draft.manifest.sourceKind}`,
         `- surface: ${draft.manifest.surface}`,
+        `- recipe mode: ${revisionRecipePolicy(draft.revision.sbom_json).mode}`,
+        ...(revisionRecipePolicy(draft.revision.sbom_json).mode === 'custom-shell' ? ['- Custom shell: review preparation, build, packaging, public recipe, and smoke commands explicitly.'] : []),
         ...(draft.revision.public_recipe_sha256 ? [`- public recipe SHA-256: ${draft.revision.public_recipe_sha256}`] : []),
       ].join('\n'),
     }),

@@ -62,6 +62,9 @@ build() {
     echo 'offline build unexpectedly reached network' >&2
     return 1
   fi
+  ! touch /etc/opr-escape-test
+  test ! -e /var/run/docker.sock
+  test ! -e /run/podman/podman.sock
   ./configure --prefix=/usr
   make
 }
@@ -90,6 +93,7 @@ package() {
 		SmokeCommands: []string{
 			`test "$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n')" = lo`,
 			`! grep -q '^00000000' /proc/net/route`,
+			`! touch /etc/opr-escape-test`,
 			`test -f /usr/share/man/man1/hello.1.gz || test -f /usr/share/man/man1/hello.1`,
 			`/usr/bin/hello --version | /usr/bin/grep -F '2.12'`,
 		},
@@ -99,12 +103,49 @@ package() {
 	if runtime == "" {
 		runtime = "podman"
 	}
-	runner := Runner{Runtime: runtime, StateDir: t.TempDir(), BuildTimeout: 10 * time.Minute}
+	runner := Runner{Runtime: runtime, RuntimeImage: os.Getenv("OPR_WORKER_E2E_RUNTIME_IMAGE"), StateDir: t.TempDir(), BuildTimeout: 10 * time.Minute}
+	if runner.RuntimeImage == "" {
+		t.Fatal("OPR_WORKER_E2E_RUNTIME_IMAGE is required")
+	}
+	// Syntax checks must reject each execution surface without sourcing shell.
+	for _, surface := range []string{"recipe", "smoke", "public"} {
+		invalid := job
+		switch surface {
+		case "recipe":
+			invalid.Recipe = "if then"
+		case "smoke":
+			invalid.SmokeCommands = []string{"if then"}
+		case "public":
+			invalid.PublicRecipe = "if then"
+		}
+		if _, err := runner.checkShell(context.Background(), invalid, "invalid-"+surface, imageRef); err == nil {
+			t.Fatalf("accepted invalid %s shell", surface)
+		}
+	}
+	noexec := job
+	noexec.Recipe = "exit 97\n" + job.Recipe
+	if output, err := runner.checkShell(context.Background(), noexec, "noexec", imageRef); err != nil {
+		t.Fatalf("syntax check executed recipe: %v %s", err, output)
+	}
+	missing, err := runner.Execute(context.Background(), job, fetched)
+	if err == nil || missing.RuntimeAnalysis == nil || !strings.Contains(err.Error(), "dependency-detected-not-included glibc") {
+		t.Fatalf("undeclared runtime dependency was not detected: %v\n%s", err, missing.Log)
+	}
+	job.Recipe = strings.Replace(recipe, "license=('GPL-3.0-or-later')", "license=('GPL-3.0-or-later')\ndepends=('glibc')", 1)
+	job.RecipeSHA256 = hashBytes([]byte(job.Recipe))
 	result, err := runner.Execute(context.Background(), job, fetched)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, result.Log)
 	}
 	defer result.Cleanup()
+	if result.BuildEnvironment == nil || result.RuntimeEnvironment == nil || result.RuntimeAnalysis == nil {
+		t.Fatal("build and runtime evidence missing")
+	}
+	for _, entry := range result.RuntimeEnvironment.Packages {
+		if strings.HasPrefix(entry, "make ") || strings.HasPrefix(entry, "tree ") {
+			t.Fatalf("build-only dependency leaked into runtime: %s", entry)
+		}
+	}
 	if destination := os.Getenv("OPR_WORKER_E2E_OUTPUT"); destination != "" {
 		retainE2EArtifact(t, result.ArtifactPath, destination)
 	}

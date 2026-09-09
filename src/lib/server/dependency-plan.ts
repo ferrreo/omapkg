@@ -39,6 +39,7 @@ export type DependencyPlan = {
   publicKeyUrl: string;
   publicKeyFingerprint: string;
   packages: DependencyPlanPackage[];
+  runtimeReleaseIds?: string[];
 };
 
 type PublishedRow = {
@@ -95,6 +96,7 @@ export function parseDependencyPlan(value: unknown): DependencyPlan | null {
   if (typeof value !== 'object' || Array.isArray(value)) return invalid();
   const object = value as Record<string, unknown>;
   const keys = ['channel', 'publicKeyUrl', 'publicKeyFingerprint', 'packages'];
+  if (Object.hasOwn(object, 'runtimeReleaseIds')) keys.push('runtimeReleaseIds');
   if (Object.keys(object).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(object, key))) return invalid();
   if ((object.channel !== 'stable' && object.channel !== 'dev') || typeof object.publicKeyUrl !== 'string' ||
       typeof object.publicKeyFingerprint !== 'string' || !FINGERPRINT.test(object.publicKeyFingerprint) ||
@@ -104,11 +106,15 @@ export function parseDependencyPlan(value: unknown): DependencyPlan | null {
   const parsed = packages as DependencyPlanPackage[];
   if (new Set(parsed.map((item) => item.releaseId)).size !== parsed.length ||
       new Set(parsed.map((item) => `${item.name}:${item.architecture}`)).size !== parsed.length) return invalid();
+  if (object.runtimeReleaseIds !== undefined && (!Array.isArray(object.runtimeReleaseIds) ||
+      new Set(object.runtimeReleaseIds).size !== object.runtimeReleaseIds.length ||
+      object.runtimeReleaseIds.some((id) => !parsed.some((item) => item.releaseId === id)))) return invalid();
   return {
     channel: object.channel,
     publicKeyUrl: object.publicKeyUrl,
     publicKeyFingerprint: object.publicKeyFingerprint,
     packages: parsed,
+    ...(object.runtimeReleaseIds === undefined ? {} : { runtimeReleaseIds: object.runtimeReleaseIds as string[] }),
   };
 }
 
@@ -122,6 +128,7 @@ function planPayload(plan: DependencyPlan): string {
       filename: item.filename, url: item.url, sha256: item.sha256, size: item.size,
       signatureUrl: item.signatureUrl, signatureSha256: item.signatureSha256,
     })),
+    ...(plan.runtimeReleaseIds === undefined ? {} : { runtimeReleaseIds: plan.runtimeReleaseIds }),
   });
 }
 
@@ -278,7 +285,9 @@ export async function planDependencies(
     }
   };
 
-  for (const dependency of requested) resolve(dependency, 'reviewed build');
+  for (const dependency of input.dependencies) resolve(dependency, 'reviewed runtime');
+  const runtimeReleaseIds = [...selected.keys()];
+  for (const dependency of input.makeDependencies) resolve(dependency, 'reviewed build');
   if (!selected.size) return { plan: null, digest: null, releaseIds: [] };
   const fingerprint = (env.PACKAGE_SIGNING_FINGERPRINT ?? env.SIGNING_FINGERPRINT ?? '').toLowerCase();
   if (!FINGERPRINT.test(fingerprint)) throw new Error('package signing fingerprint is not configured');
@@ -296,6 +305,7 @@ export async function planDependencies(
     publicKeyUrl: `${publicOrigin}/repo/key.asc`,
     publicKeyFingerprint: fingerprint,
     packages: references,
+    runtimeReleaseIds,
   };
   const parsed = parseDependencyPlan(plan);
   if (!parsed) throw new Error('generated dependency plan is invalid');

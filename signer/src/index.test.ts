@@ -1,3 +1,4 @@
+import { runtimeEvidence } from '../../tests/runtime-fixtures';
 import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -77,7 +78,7 @@ test('signs package bytes and produces a GnuPG-verifiable detached signature', a
     buildId: 'build-1', revisionId: 'revision-1', workerId: 'worker-1',
     recipeSha256: 'a'.repeat(64), artifactSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
   const intent = {
@@ -170,7 +171,7 @@ test('signs and verifies a streamed artifact larger than 128 MiB without reading
     buildId: 'build-large', revisionId: 'revision-large', workerId: 'worker-large',
     recipeSha256: 'a'.repeat(64), artifactSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
   const intent = {
@@ -259,7 +260,7 @@ test('rejects a reviewed intent when downloaded bytes do not match its digest', 
     buildId: 'build-2', revisionId: 'revision-2', workerId: 'worker-2',
     recipeSha256: 'a'.repeat(64), artifactSha256: expectedSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
   const intent = {
@@ -301,7 +302,7 @@ test('managed KMS mode forwards the artifact stream and returns a verified signa
   const artifactSha256 = await sha256(artifact);
   const provenance = JSON.stringify({
     buildId: 'build-3', revisionId: 'revision-3', workerId: 'worker-3', recipeSha256: 'a'.repeat(64), artifactSha256,
-    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled',
+    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)),
     startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
@@ -368,7 +369,7 @@ test('cancels a streamed artifact when managed KMS rejects before consuming it',
     buildId: 'build-managed-failure', revisionId: 'revision-managed-failure', workerId: 'worker-managed-failure',
     recipeSha256: 'a'.repeat(64), artifactSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
   const intent = {
@@ -475,7 +476,7 @@ test('reuses an existing valid signature after a transient audit failure', async
   const artifactSha256 = await sha256(artifact);
   const provenance = JSON.stringify({
     buildId: 'build-4', revisionId: 'revision-4', workerId: 'worker-4', recipeSha256: 'a'.repeat(64), artifactSha256,
-    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled',
+    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)),
     startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
   const provenanceSignature = encode(new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance))));

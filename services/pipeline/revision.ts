@@ -16,6 +16,9 @@ import {
 import { lintRecipe, renderRecipe } from './recipe';
 import { constrainVendorArtifactArchitectures } from './artifacts';
 import { parseArchDependency } from '../../src/lib/server/arch';
+import { TEMPLATE_DEFINITIONS, templateCommands } from './recipe-template';
+import { validateRecipePolicy } from './recipe-policy';
+import { runtimeExceptions } from '../../src/lib/server/runtime-evidence';
 
 function assertSourceName(value: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,150}$/.test(value) || value === '.' || value === '..') {
@@ -44,6 +47,17 @@ function normalizeDependencies(values: string[], label: string): string[] {
 }
 
 export function normalizeCandidate(candidate: FactoryCandidate): FactoryCandidate {
+  const recipeMode = candidate.recipeMode ?? 'custom-shell';
+  if (recipeMode !== 'template' && recipeMode !== 'custom-shell') throw new Error('Unknown recipe mode');
+  if (recipeMode === 'template') {
+    if (!candidate.template || candidate.buildCommands.length || candidate.packageCommands.length || candidate.smokeCommands.length || candidate.vendorArtifact) {
+      throw new Error('Template mode requires empty command arrays and no vendor installer');
+    }
+    templateCommands(candidate.template);
+    if (candidate.publicRecipe && !candidate.publicRecipeOptions) throw new Error('Template public recipe requires deterministic rendering inputs');
+  } else if (candidate.template || !candidate.buildCommands.length || !candidate.packageCommands.length || !candidate.smokeCommands.length) {
+    throw new Error('Custom shell mode requires build, package, and smoke commands and no template');
+  }
   assertPackageName(candidate.request.name);
   assertVersion(candidate.version);
   assertImageDigest(candidate.imageDigest);
@@ -70,6 +84,9 @@ export function normalizeCandidate(candidate: FactoryCandidate): FactoryCandidat
 
   const dependencies = normalizeDependencies(candidate.dependencies, 'dependency');
   const makeDependencies = normalizeDependencies(candidate.makeDependencies ?? [], 'build dependency');
+  if (candidate.template?.id === 'go-v1' && !makeDependencies.some((dependency) => parseArchDependency(dependency)?.name === 'go')) {
+    throw new Error('go-v1 requires go in makeDependencies');
+  }
   const smokeCommands = candidate.smokeCommands.map(assertSmokeCommand);
   const buildCommands = candidate.buildCommands.map((command) => assertCommand(command, 'build command'));
   const packageCommands = candidate.packageCommands.map((command) => assertCommand(command, 'package command'));
@@ -93,6 +110,8 @@ export function normalizeCandidate(candidate: FactoryCandidate): FactoryCandidat
 
   return {
     ...candidate,
+    recipeMode,
+    runtimeExceptions: runtimeExceptions(candidate.runtimeExceptions),
     request: { ...candidate.request, upstreamUrl: normalizeSourceUrl(candidate.request.upstreamUrl).toString() },
     version: candidate.version,
     sources,
@@ -140,7 +159,7 @@ function buildManifest(candidate: FactoryCandidate, publicRecipeSha256: string |
     sources: candidate.sources,
     dependencies: candidate.dependencies,
     makeDependencies: candidate.makeDependencies ?? [],
-    smokeCommands: candidate.smokeCommands,
+    smokeCommands: candidate.template ? templateCommands(candidate.template).smoke : candidate.smokeCommands,
     architectures: candidate.architectures,
     buildImages: candidate.buildImages ?? {},
     pkgrel: candidate.pkgrel ?? 1,
@@ -163,7 +182,13 @@ export async function createFactoryRevision(input: FactoryCandidate, repairAttem
   const manifest = buildManifest(candidate, publicRecipeSha256);
   const stableRevisionId = revisionId ?? crypto.randomUUID();
   const createdAt = now();
-  const sbom = standardSbom(candidate, stableRevisionId, createdAt);
+  const recipePolicy = candidate.template ? {
+    version: 1, mode: 'template', rendererVersion: 1,
+    template: candidate.template, templateSha256: await sha256(JSON.stringify(TEMPLATE_DEFINITIONS[candidate.template.id])),
+    packageName: candidate.request.name, sourceKind: candidate.request.sourceKind, sourceRoot: candidate.sourceRoot,
+    publicOptions: candidate.publicRecipeOptions,
+  } : { version: 1, mode: 'custom-shell' };
+  const sbom = standardSbom({ ...candidate, sbom: { ...candidate.sbom, recipePolicy } }, stableRevisionId, createdAt);
   const revision: Revision = {
     id: stableRevisionId,
     request_id: candidate.request.id,
@@ -176,7 +201,7 @@ export async function createFactoryRevision(input: FactoryCandidate, repairAttem
     sources_json: JSON.stringify(candidate.sources),
     dependencies_json: JSON.stringify(candidate.dependencies),
     make_dependencies_json: JSON.stringify(candidate.makeDependencies ?? []),
-    smoke_commands_json: JSON.stringify(candidate.smokeCommands),
+    smoke_commands_json: JSON.stringify(manifest.smokeCommands),
     architectures_json: JSON.stringify(candidate.architectures),
     build_images_json: JSON.stringify(candidate.buildImages ?? {}),
     pkgrel: candidate.pkgrel ?? 1,
@@ -194,6 +219,7 @@ export async function createFactoryRevision(input: FactoryCandidate, repairAttem
     created_at: createdAt,
   };
   revision.manifest_sha256 = await manifestDigest(revision);
+  await validateRecipePolicy(revision);
   return { revision, manifest, lint };
 }
 
@@ -295,13 +321,22 @@ function standardSbom(candidate: FactoryCandidate, revisionId: string, createdAt
           ? `OPR Go module checksum (go.sum): ${component.checksum}` : undefined;
         const externalRefs = typeof component.integrity === 'string' ? npmReference(component.name, component.version) : undefined;
         const componentId = addPackage({ name: component.name, version: component.version, downloadLocation: component.source, comment, checksum, externalRefs });
-        relationships.push({ spdxElementId: mainId, relationshipType: 'DEPENDS_ON', relatedSpdxElement: componentId });
+        relationships.push({ spdxElementId: componentId, relationshipType: 'BUILD_DEPENDENCY_OF', relatedSpdxElement: mainId });
       }
     }
   }
   const candidateLicense = typeof candidate.license === 'string' ? candidate.license.trim() : '';
   const evidence = {
     ...(supplied ?? {}),
+    runtimeExceptions: candidate.runtimeExceptions ?? [],
+    dependencyEvidence: {
+      declaredRuntime: candidate.dependencies,
+      declaredBuild: candidate.makeDependencies ?? [],
+      vendorInventory: 'Resolved build inputs; inclusion in the artifact is not established.',
+      measuredRuntime: 'See the signed worker report for artifact analysis and runtime observations.',
+      unknowns: ['unexercised dynamic loading', 'plugins', 'subprocesses selected at runtime', 'data paths'],
+      runtimeClosureComplete: false,
+    },
     ...(candidateLicense && spdxLicense(candidateLicense) === 'NOASSERTION' ? { license: candidateLicense } : {}),
     ...(candidate.makeDependencies?.length ? { makeDependencies: candidate.makeDependencies } : {}),
   };

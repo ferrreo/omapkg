@@ -30,7 +30,7 @@ export const factoryCandidateSchema = v.object({
   sourceRoot: v.optional(v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/))),
   dependencies: v.array(v.string()),
   makeDependencies: v.optional(v.array(v.string())),
-  smokeCommands: v.pipe(v.array(v.string()), v.minLength(1)),
+  smokeCommands: v.array(v.string()),
   architectures: v.pipe(v.array(v.picklist(['x86_64', 'aarch64'])), v.minLength(1)),
   sourceDateEpoch: v.pipe(v.number(), v.integer(), v.minValue(0)),
   pkgrel: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(9_999))),
@@ -38,9 +38,19 @@ export const factoryCandidateSchema = v.object({
   license: v.pipe(v.string(), v.minLength(1), v.maxLength(128)),
   surface: v.picklist(['binary', 'recipe']),
   publicRecipe: v.optional(v.nullable(v.pipe(v.string(), v.maxLength(2 * 1024 * 1024)))),
+  publicRecipeOptions: v.optional(v.strictObject({
+    sourceKind: v.picklist(['git', 'archive']), sourceUrl: v.string(), sourceName: v.string(), sourceSha256: v.string(),
+    sourceRoot: v.optional(v.string()), upstreamCommit: v.optional(v.nullable(v.string())),
+    vendorKind: v.optional(v.picklist(['go', 'rust', 'npm'])), vendorSha256: v.optional(v.string()),
+  })),
   description: v.pipe(v.string(), v.minLength(1), v.maxLength(160)),
-  buildCommands: v.pipe(v.array(v.string()), v.minLength(1)),
-  packageCommands: v.pipe(v.array(v.string()), v.minLength(1)),
+  recipeMode: v.picklist(['template', 'custom-shell']),
+  template: v.optional(v.strictObject({ id: v.picklist(['make-v1', 'go-v1']), binary: v.string(), target: v.optional(v.string()) })),
+  runtimeExceptions: v.optional(v.pipe(v.array(v.strictObject({
+    findingSha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)), reason: v.pipe(v.string(), v.minLength(1), v.maxLength(2000)),
+  })), v.maxLength(16))),
+  buildCommands: v.array(v.string()),
+  packageCommands: v.array(v.string()),
   explanation: v.pipe(v.string(), v.minLength(1), v.maxLength(8_192)),
   sbom: v.optional(v.record(v.string(), v.unknown())),
   upstreamCommit: v.optional(v.nullable(v.string())),
@@ -48,7 +58,7 @@ export const factoryCandidateSchema = v.object({
 });
 
 /** Model-facing candidate shape. Vendor metadata comes only from inspection evidence. */
-export const factoryCandidateInputSchema = v.omit(factoryCandidateSchema, ['vendorArtifact']);
+export const factoryCandidateInputSchema = v.omit(factoryCandidateSchema, ['vendorArtifact', 'publicRecipeOptions']);
 
 export type FactoryCandidateInput = v.InferOutput<typeof factoryCandidateSchema>;
 

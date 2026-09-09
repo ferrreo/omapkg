@@ -17,7 +17,7 @@ Before starting it, a maintainer must:
 2. Create one short-lived, single-use ARM enrollment token in omapkg.
 3. Add the token as the repository Actions secret `OPR_ENROLLMENT_TOKEN`.
 4. Start **ARM worker acceptance** from the Actions tab with the HTTPS origin,
-   full private ARM image reference, and matching `sha256:` digest as inputs.
+   full private ARM image reference, matching `sha256:` digest, and a separately pinned minimal ARM runtime image as inputs.
 
 The workflow compiles the daemon natively, runs its unit tests, enrolls through
 stdin, claims one approved build, and checks that the exact private builder
@@ -29,3 +29,9 @@ token, registry token, signing key, or provider credential. Delete
 The worker command exits successfully only after a job has been claimed and the
 private image is present on the fresh runner. A missing approved job fails the
 workflow instead of being reported as an ARM acceptance.
+
+The **ARM runtime evidence validation** workflow builds both images from the
+signature-verified official rootfs, pushes them with a temporary
+`REGISTRY_ROLLOUT_AUTH` Docker auth JSON secret, and runs native Go/OCI regression
+checks. Supply registry namespace and a new rollout tag. Register the resulting
+digests only after the validation step passes; then delete the temporary secret.

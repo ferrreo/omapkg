@@ -1,7 +1,9 @@
+import { revisionRecipePolicy } from '../../../services/pipeline/recipe-policy';
 import { sha256, id, now, audit } from './db';
 import type { Worker, Architecture, Build, Actor } from '../model';
 import { PolicyError, requireMaintainer } from './policy';
 import { type DependencyPlan, planDependencies, parseDependencyPlan } from './dependency-plan';
+import { reviewedRuntimeExceptions } from './runtime-evidence';
 import {
   type EnrollmentResult,
   requireObject,
@@ -115,7 +117,7 @@ export async function revokeWorker(db: D1Database, actor: string, workerId: stri
       db.prepare(`INSERT INTO audit_events(actor, action, target, detail, created_at)
         SELECT ?, 'worker.revoked', ?, ?, ? WHERE changes() = 1`)
         .bind(auditActor, target, JSON.stringify({ workerId: target }), timestamp),
-      db.prepare("UPDATE builds SET status = 'queued', worker_id = NULL, lease_token = NULL, lease_expires_at = NULL, error = 'worker revoked', artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = NULL, provenance = NULL, provenance_signature = NULL, smoke_passed = 0 WHERE worker_id = ? AND status = 'leased'")
+      db.prepare("UPDATE builds SET status = 'queued', worker_id = NULL, lease_token = NULL, lease_expires_at = NULL, error = 'worker revoked', artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = NULL, provenance = NULL, provenance_signature = NULL, smoke_passed = 0, dependency_blockers_json = NULL WHERE worker_id = ? AND status = 'leased'")
         .bind(target),
       db.prepare(`INSERT INTO audit_events(actor, action, target, detail, created_at)
         SELECT ?, 'worker.leases_requeued', ?, ?, ? WHERE changes() > 0`)
@@ -326,7 +328,7 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
         r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
         r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
         r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface, r.license AS revision_license, r.sbom_json AS revision_sbom_json
+        r.surface AS revision_surface, r.license AS revision_license, r.sbom_json AS revision_sbom_json, r.public_recipe AS revision_public_recipe
       FROM builds b
       JOIN revisions r ON r.id = b.revision_id
       JOIN requests q ON q.id = r.request_id
@@ -354,6 +356,8 @@ export async function claimJob(
   await refreshWorkerMetadata(db, worker, metadata, timestamp);
   const candidate = await reviewedCandidate(db, worker.architecture, timestamp);
   if (!candidate) return null;
+  if (revisionRecipePolicy(candidate.revision_sbom_json).recorded &&
+      !(metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]')).includes('runtime-analysis-v1')) return null;
   const revision = parseRevisionForJob(candidate);
   await verifyRecipeHash(candidate.revision_recipe, candidate.revision_recipe_sha256);
   const { imageRef, imageDigest } = workerImage(candidate);
@@ -387,7 +391,7 @@ export async function claimJob(
       db.prepare(`UPDATE builds AS b SET status = 'leased', worker_id = ?, lease_token = ?, lease_expires_at = ?,
         attempt = attempt + 1, started_at = ?, finished_at = NULL, error = NULL,
         artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = ?,
-        provenance = NULL, provenance_signature = NULL, smoke_passed = 0
+        provenance = NULL, provenance_signature = NULL, smoke_passed = 0, dependency_blockers_json = NULL
         WHERE id = ? AND architecture = ?
           AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))
           AND revision_id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = (SELECT request_id FROM revisions current_revision WHERE current_revision.id = b.revision_id) ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
@@ -428,7 +432,7 @@ export async function claimJob(
         r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
         r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
         r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface
+        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
       FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
       WHERE b.id = ? AND b.worker_id = ? AND b.lease_token = ? AND b.status = 'leased'
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
@@ -454,6 +458,8 @@ export async function claimJob(
     pkgrel: claimed.revision_pkgrel ?? 1,
     architecture: claimed.architecture,
     recipe: claimed.revision_recipe,
+    ...(claimed.revision_public_recipe ? { publicRecipe: claimed.revision_public_recipe } : {}),
+    runtimeExceptions: reviewedRuntimeExceptions(claimed.revision_sbom_json),
     recipeSha256: claimed.revision_recipe_sha256,
     sourceDateEpoch: claimed.revision_source_date_epoch,
     imageRef,

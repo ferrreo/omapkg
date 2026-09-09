@@ -3,6 +3,8 @@ import type { Env } from './env';
 import { githubFetch } from './github';
 import { audit, id, now, query } from './db';
 import { parseRequest, PolicyError, requireMaintainer, requireSecurity, validateRevision } from './policy';
+import { revisionRecipePolicy } from '../../../services/pipeline/recipe-policy';
+import { reviewedRuntimeExceptions } from './runtime-evidence';
 
 export async function submitRequest(env: Env, actor: Actor | null, input: unknown) {
   if (!actor) throw new PolicyError(401, 'Sign in with GitHub to request a package.');
@@ -48,13 +50,14 @@ export async function startFactory(env: Env, actor: Actor | null, requestId: str
   if (reason !== undefined && (typeof reason !== 'string' || !reason.trim() || reason.length > 2_000)) {
     throw new PolicyError(400, 'Provide a regeneration reason, up to 2,000 characters.');
   }
-  if (!['pending', 'failed', 'review'].includes(request.status)) throw new PolicyError(409, 'This request cannot start factory generation in its current state.');
+  if (!['pending', 'failed', 'review', 'blocked'].includes(request.status)) throw new PolicyError(409, 'This request cannot start factory generation in its current state.');
   if (!env.PIPELINE) throw new PolicyError(503, 'Factory service is not configured.');
   const generationId = id();
   const result = await env.DB.batch([
     env.DB.prepare('UPDATE requests SET status=\'generating\',factory_run_id=?,updated_at=? WHERE id=? AND status=?').bind(generationId, now(), requestId, request.status),
     env.DB.prepare('INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,?,?,?,? WHERE changes()=1')
-      .bind(reviewer.id, request.status === 'pending' ? 'request.approved' : 'factory.regenerated', requestId, JSON.stringify({ previousStatus: request.status, generationId, ...(reason === undefined ? {} : { reason: reason.trim() }) }), now())
+      .bind(reviewer.id, request.status === 'pending' ? 'request.approved' : 'factory.regenerated', requestId, JSON.stringify({ previousStatus: request.status, generationId, ...(reason === undefined ? {} : { reason: reason.trim() }) }), now()),
+    ...(request.status === 'blocked' ? [env.DB.prepare("UPDATE dependency_blockers SET status='superseded',resolved_at=? WHERE request_id=? AND status='open' AND EXISTS (SELECT 1 FROM requests WHERE id=? AND status='generating' AND factory_run_id=?)").bind(now(), requestId, requestId, generationId)] : [])
   ]);
   if (!result[0].meta.changes) throw new PolicyError(409, 'Request changed. Refresh and retry.');
   try {
@@ -76,7 +79,7 @@ export async function rejectRequest(env: Env, actor: Actor | null, requestId: st
   const request = await getRequest(env, requestId) as PackageRequest & { factory_run_id?: string | null };
   const reviewer = requireMaintainer(actor, request.area);
   if (!reason.trim() || reason.length > 2000) throw new PolicyError(400, 'Provide a reason, up to 2,000 characters.');
-  if (!['pending', 'review', 'failed'].includes(request.status)) throw new PolicyError(409, 'Only pending, failed or review requests can be rejected.');
+  if (!['pending', 'review', 'failed', 'blocked'].includes(request.status)) throw new PolicyError(409, 'Only pending, failed or review requests can be rejected.');
   const generationId = request.factory_run_id ?? null;
   const result = await env.DB.batch([
     env.DB.prepare("UPDATE requests SET status='rejected', rejection_reason=?,updated_at=? WHERE id=? AND status=? AND factory_run_id IS ?").bind(reason.trim(), now(), requestId, request.status, generationId),
@@ -85,7 +88,7 @@ export async function rejectRequest(env: Env, actor: Actor | null, requestId: st
   ]);
   if (!result[0]?.meta.changes) throw new PolicyError(409, 'Request changed. Refresh and retry.');
 }
-export async function approveRevision(env: Env, actor: Actor | null, requestId: string, revisionId: string, kind: string, reason?: string) {
+export async function approveRevision(env: Env, actor: Actor | null, requestId: string, revisionId: string, kind: string, reason?: string, customShellAcknowledged = false, runtimeExceptionsAcknowledged = false) {
   if (!['area', 'security'].includes(kind)) throw new PolicyError(400, 'Choose area or security approval.');
   if (reason !== undefined && (typeof reason !== 'string' || !reason.trim() || reason.length > 2_000)) throw new PolicyError(400, 'Provide a review reason, up to 2,000 characters.');
   const reviewReason = reason?.trim();
@@ -101,6 +104,13 @@ export async function approveRevision(env: Env, actor: Actor | null, requestId: 
   if (request.status === 'queued' && await env.DB.prepare(`SELECT 1 FROM builds WHERE revision_id=? AND status IN ('queued','leased','succeeded') LIMIT 1`).bind(revisionId).first()) {
     throw new PolicyError(409, 'This request is already queued for a worker.');
   }
+  const recipePolicy = revisionRecipePolicy(revision.sbom_json);
+  if (recipePolicy.mode === 'custom-shell' && customShellAcknowledged !== true) {
+    throw new PolicyError(400, 'Acknowledge review of custom shell, including preparation, packaging, public recipe, and smoke commands.');
+  }
+  if (reviewedRuntimeExceptions(revision.sbom_json).length && runtimeExceptionsAcknowledged !== true) {
+    throw new PolicyError(400, 'Acknowledge each exact runtime analysis exception and its reason.');
+  }
   const result = await env.DB.batch([
     env.DB.prepare(`INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at)
       SELECT ?,?,?,?,?,? FROM requests q
@@ -108,10 +118,10 @@ export async function approveRevision(env: Env, actor: Actor | null, requestId: 
         SELECT 1 FROM builds b WHERE b.revision_id=? AND b.status IN ('queued','leased','succeeded')))) AND q.factory_run_id IS ?
         AND ?=(SELECT latest.id FROM revisions latest WHERE latest.request_id=q.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)
       ON CONFLICT(revision_id,kind) DO UPDATE SET actor=excluded.actor,manifest_sha256=excluded.manifest_sha256,
-        created_at=excluded.created_at,revoked_at=NULL,revoked_by=NULL WHERE approvals.revoked_at IS NOT NULL`)
+        created_at=excluded.created_at,revoked_at=NULL,revoked_by=NULL`)
       .bind(id(), revisionId, reviewer.id, kind, revision.manifest_sha256, timestamp, requestId, revisionId, generationId, revisionId),
     env.DB.prepare('INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,?,?,?,? WHERE changes()=1')
-      .bind(reviewer.id, 'revision.approved', requestId, JSON.stringify({ revisionId, kind, manifestSha256: revision.manifest_sha256, reason: reviewReason }), timestamp)
+      .bind(reviewer.id, 'revision.approved', requestId, JSON.stringify({ revisionId, kind, manifestSha256: revision.manifest_sha256, reason: reviewReason, customShellAcknowledged, runtimeExceptionsAcknowledged }), timestamp)
   ]);
   const state = await env.DB.prepare(`SELECT status,factory_run_id,
       (SELECT latest.id FROM revisions latest WHERE latest.request_id=requests.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) AS latest_revision_id
@@ -168,12 +178,12 @@ export async function approveRevision(env: Env, actor: Actor | null, requestId: 
             AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=? AND a.kind='area' AND a.manifest_sha256=? AND a.revoked_at IS NULL)
             AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=? AND a.kind='security' AND a.manifest_sha256=? AND a.revoked_at IS NULL)
           ON CONFLICT(revision_id,architecture) DO UPDATE SET
-            status=CASE WHEN status='cancelled' THEN 'queued' ELSE status END,
-            worker_id=CASE WHEN status='cancelled' THEN NULL ELSE worker_id END,
-            lease_token=CASE WHEN status='cancelled' THEN NULL ELSE lease_token END,
-            lease_expires_at=CASE WHEN status='cancelled' THEN NULL ELSE lease_expires_at END,
-            error=CASE WHEN status='cancelled' THEN NULL ELSE error END,
-            finished_at=CASE WHEN status='cancelled' THEN NULL ELSE finished_at END`)
+            status=CASE WHEN status IN ('cancelled','failed') THEN 'queued' ELSE status END,
+            worker_id=CASE WHEN status IN ('cancelled','failed') THEN NULL ELSE worker_id END,
+            lease_token=CASE WHEN status IN ('cancelled','failed') THEN NULL ELSE lease_token END,
+            lease_expires_at=CASE WHEN status IN ('cancelled','failed') THEN NULL ELSE lease_expires_at END,
+            error=CASE WHEN status IN ('cancelled','failed') THEN NULL ELSE error END,
+            finished_at=CASE WHEN status IN ('cancelled','failed') THEN NULL ELSE finished_at END`)
           .bind(id(), revisionId, architecture, timestamp, requestId, generationId, revisionId, revisionId, revision.manifest_sha256, revisionId, revision.manifest_sha256)),
         env.DB.prepare(`UPDATE requests SET updated_at=? WHERE id=? AND status='queued' AND factory_run_id IS ?
           AND ?=(SELECT latest.id FROM revisions latest WHERE latest.request_id=requests.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)

@@ -74,8 +74,7 @@ bun run build
 bun scripts/deploy.ts
 ```
 
-Deploy the signer and pipeline Workers separately after their configurations
-and service bindings are ready. Reapply bindings idempotently after each
+Deploy all three services, retaining existing secrets, with `bun scripts/deploy.ts --pipeline --signer` after configuring `PIPELINE_IMAGE` to the updated immutable sandbox image. Reapply bindings idempotently after each
 deployment. Keep the private pipeline route and signer route inaccessible from
 the public hostname.
 
@@ -150,3 +149,18 @@ The public repository URL for this project is
 [github.com/ferrreo/omapkg](https://github.com/ferrreo/omapkg). Deployment
 ownership, host addresses, account identifiers, resource IDs, and credentials
 belong in the operator's private environment records.
+
+## Runtime evidence rollout
+
+Apply migrations 0026–0028 before upgrading services. Build and register builder
+images containing `namcap` and `shellcheck`, and rebuild the pipeline sandbox
+with `shellcheck`. Upgrade native daemons and supply `--runtime-image` during
+enrollment (or set `runtimeImage` in their private config) to a separately pinned
+minimal Arch image for their architecture. Restart the daemon after its current
+lease drains. New revisions require `runtime-analysis-v1`; old daemons cannot
+claim them. A builder image cannot double as the clean runtime image.
+
+Rebuild and review existing unpublished jobs against the new image and policy.
+Old successful builds without measured evidence cannot receive new attestations.
+Published historical releases remain readable with an explicit missing-signature
+label. See [release evidence](build-type-v1.md) for verification and key history.

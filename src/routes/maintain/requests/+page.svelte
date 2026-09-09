@@ -44,7 +44,7 @@
 
     <form class="filter-bar" method="GET">
       <div class="field"><label for="query">Search</label><input id="query" name="q" type="search" bind:value={query} placeholder="Name, ID, or source URL" /></div>
-      <div class="field"><label for="request-status">Status</label><select id="request-status" name="status" bind:value={status}><option value="">All statuses</option><option value="pending">Pending</option><option value="generating">Generating</option><option value="review">Review</option><option value="building">Building</option><option value="built">Built</option><option value="failed">Failed</option><option value="rejected">Rejected</option></select></div>
+      <div class="field"><label for="request-status">Status</label><select id="request-status" name="status" bind:value={status}><option value="">All statuses</option><option value="pending">Pending</option><option value="generating">Generating</option><option value="review">Review</option><option value="building">Building</option><option value="built">Built</option><option value="failed">Failed</option><option value="blocked">Blocked</option><option value="rejected">Rejected</option></select></div>
       <div class="field"><label for="request-area">Area</label><select id="request-area" name="area" bind:value={area}><option value="">All areas</option><option value="desktop">Desktop</option><option value="development">Development</option><option value="gaming">Gaming</option><option value="multimedia">Multimedia</option><option value="productivity">Productivity</option><option value="system">System</option></select></div>
       <button class="button button--primary" type="submit"><Icon name="search" size={15} />Filter</button>
     </form>

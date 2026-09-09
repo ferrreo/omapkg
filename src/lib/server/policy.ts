@@ -3,6 +3,7 @@ import { areas, type Actor, type Architecture, type Revision, type Source } from
 import { sha256 } from './db';
 import { isArchPkgver, parseArchDependency } from './arch';
 import { normalizeRequestDescription } from './descriptions';
+import { validateRecipePolicy } from '../../../services/pipeline/recipe-policy';
 
 export class PolicyError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -216,4 +217,6 @@ export async function validateRevision(revision: Revision) {
   manifestObject(revision.sbom_json, 'SBOM');
   const lint = manifestObject(revision.lint_json, 'Factory lint') as { passed?: boolean };
   if (lint.passed !== true) throw new PolicyError(409, 'Factory lint must pass before approval.');
+  try { await validateRecipePolicy(revision); }
+  catch (cause) { throw new PolicyError(409, cause instanceof Error ? cause.message : 'Recipe policy is invalid.'); }
 }

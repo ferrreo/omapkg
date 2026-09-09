@@ -1,3 +1,5 @@
+import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
+import { assertRuntimeEvidence, reviewedRuntimeExceptions } from './runtime-evidence';
 import { signingURL } from '../signing-url';
 import type { Build, Architecture, Revision } from '../model';
 import { type PackageMetadata, isArchPkgver, parsePackageMetadata, archRelationCovers } from './arch';
@@ -195,6 +197,8 @@ export async function assertAttestation(build: JoinedBuild, env: Env) {
     ['sourceDateEpoch', build.source_date_epoch], ['network', 'disabled'],
   ];
   for (const [field, value] of expected) if (provenance[field] !== value) fail(409, `Build provenance field ${field} does not match reviewed inputs.`);
+  try { await assertRuntimeEvidence(provenance, imageDigest, reviewedRuntimeExceptions(build.sbom_json)); }
+  catch (cause) { fail(409, cause instanceof Error ? cause.message : 'Runtime evidence is invalid.'); }
   if (provenance.pkgrel !== undefined && provenance.pkgrel !== (build.pkgrel ?? 1)) fail(409, 'Build provenance field pkgrel does not match reviewed inputs.');
   if (provenance.artifactSha256 !== build.artifact_sha256 && build.surface === 'binary') {
     fail(409, 'Build provenance artifact digest does not match uploaded bytes.');
@@ -224,6 +228,7 @@ export async function assertAttestation(build: JoinedBuild, env: Env) {
 }
 
 export async function assertReviewed(build: JoinedBuild, env: Env) {
+  await assertExplicitReview(env.DB, build.revision_id, build.manifest_sha256, build.sbom_json);
   try {
     await validateRevision({
       id: build.revision_id, request_id: build.request_id, version: build.revision_version, recipe: build.recipe,
@@ -259,7 +264,7 @@ export async function signingRequest(env: Env, input: {
   revisionId: string;
   manifestSha256: string;
   objectKey: string;
-  objectKind: 'package' | 'database';
+  objectKind: 'package' | 'database' | 'attestation';
   artifactSha256: string;
   artifactSize: number;
   artifactFilename: string;
@@ -316,7 +321,8 @@ export async function signingRequest(env: Env, input: {
   const signatureSha256 = typeof result.signatureSha256 === 'string' ? result.signatureSha256
     : typeof result.signature_sha256 === 'string' ? result.signature_sha256
     : typeof signatureObject?.sha256 === 'string' ? signatureObject.sha256 : null;
-  if (!signatureKey || !SAFE_KEY.test(signatureKey) || !signatureSha256 || !SHA256.test(signatureSha256)) {
+  if (!signatureKey || !SAFE_KEY.test(signatureKey) || !signatureSha256 || !SHA256.test(signatureSha256) ||
+      (input.objectKind === 'attestation' && signatureKey !== `${input.objectKey}.sig`)) {
     await env.DB.prepare("UPDATE signing_intents SET status='failed' WHERE id=? AND status='pending'").bind(intentId).run();
     fail(503, 'Package signing service returned no immutable signature object.');
   }

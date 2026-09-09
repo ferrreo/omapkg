@@ -1,0 +1,71 @@
+name: ARM runtime evidence validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry_namespace:
+        description: Registry namespace for validated builder and runtime images
+        required: true
+        type: string
+      image_tag:
+        description: Immutable rollout tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm-runtime-evidence-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      REGISTRY_NAMESPACE: ${{ inputs.registry_namespace }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: worker/go.mod
+      - name: Build signature-verified ARM images
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          [[ "$REGISTRY_NAMESPACE" =~ ^registry\.cloudflare\.com/[a-f0-9]{32}$ ]]
+          [[ "$IMAGE_TAG" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
+          export OPR_ARM_WORKDIR="$RUNNER_TEMP/arm-images"
+          export OPR_ARM_IMAGE="$REGISTRY_NAMESPACE/omarpkg-arch-builder:$IMAGE_TAG"
+          scripts/build-arm-image.sh
+          docker build -t "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG" \
+            -f worker/images/aarch64/runtime.Dockerfile "$OPR_ARM_WORKDIR/context"
+      - name: Push images with temporary rollout credential
+        shell: bash
+        env:
+          REGISTRY_ROLLOUT_AUTH: ${{ secrets.REGISTRY_ROLLOUT_AUTH }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/registry-auth"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_ROLLOUT_AUTH" > "$DOCKER_CONFIG/config.json"
+          chmod 600 "$DOCKER_CONFIG/config.json"
+          docker push "$REGISTRY_NAMESPACE/omarpkg-arch-builder:$IMAGE_TAG"
+          docker push "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG"
+          builder=$(docker image inspect --format '{{index .RepoDigests 0}}' "$REGISTRY_NAMESPACE/omarpkg-arch-builder:$IMAGE_TAG")
+          runtime=$(docker image inspect --format '{{index .RepoDigests 0}}' "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG")
+          printf 'OPR_WORKER_E2E_IMAGE=%s\nOPR_WORKER_E2E_RUNTIME_IMAGE=%s\n' "$builder" "$runtime" >> "$GITHUB_ENV"
+          printf '%s\n%s\n' "$builder" "$runtime"
+      - name: Native dependency and isolation regression
+        shell: bash
+        env:
+          OPR_WORKER_E2E_RUNTIME: docker
+          OPR_WORKER_E2E_ARCH: aarch64
+        run: |
+          set -euo pipefail
+          cd worker
+          go test -v ./...

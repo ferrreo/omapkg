@@ -11,6 +11,10 @@ on:
         description: Fully qualified private ARM builder image reference
         required: true
         type: string
+      runtime_image:
+        description: Separately pinned minimal ARM runtime image
+        required: true
+        type: string
       arm_image_digest:
         description: Immutable sha256 digest for arm_image
         required: true
@@ -30,6 +34,7 @@ jobs:
     env:
       OPR_ORIGIN: ${{ inputs.origin }}
       OPR_ARM_IMAGE: ${{ inputs.arm_image }}
+      OPR_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
       OPR_ARM_IMAGE_DIGEST: ${{ inputs.arm_image_digest }}
     steps:
       - name: Check out source
@@ -92,6 +97,7 @@ jobs:
               --architecture aarch64 \
               --runtime docker \
               --state-dir "$state_dir" \
+              --runtime-image "$OPR_RUNTIME_IMAGE" \
               --image "$OPR_ARM_IMAGE" \
               --image-digest "$OPR_ARM_IMAGE_DIGEST" \
               --token-stdin

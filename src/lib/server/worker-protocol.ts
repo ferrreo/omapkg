@@ -38,7 +38,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 
@@ -86,6 +86,8 @@ export interface WorkerJob {
   pkgrel?: number;
   architecture: Architecture;
   recipe: string;
+  publicRecipe?: string;
+  runtimeExceptions?: import('./runtime-evidence').RuntimeException[];
   recipeSha256: string;
   sourceDateEpoch: number;
   imageRef: string;
@@ -118,9 +120,12 @@ export interface ArtifactReference {
 }
 
 export interface WorkerLease extends Build {
+  revision_request_id: string;
   revision_name: string;
   revision_version: string;
   revision_recipe: string;
+  revision_public_recipe: string | null;
+  revision_sbom_json: string;
   revision_recipe_sha256: string;
   revision_manifest_sha256: string;
   revision_sources_json: string;
@@ -494,14 +499,14 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
         b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json,
-        b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at,
-        q.name AS revision_name, r.version AS revision_version, r.recipe AS revision_recipe,
+        b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at, b.dependency_blockers_json,
+        q.name AS revision_name, r.request_id AS revision_request_id, r.version AS revision_version, r.recipe AS revision_recipe,
         r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,
         r.sources_json AS revision_sources_json, r.dependencies_json AS revision_dependencies_json, r.make_dependencies_json AS revision_make_dependencies_json,
         r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
         r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
         r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface
+        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
       FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
       WHERE b.id = ? AND b.worker_id = ?
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)

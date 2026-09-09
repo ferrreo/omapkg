@@ -1,3 +1,4 @@
+import { runtimeEvidence } from './runtime-fixtures';
 import { expect, test } from 'bun:test';
 import { gunzipSync } from 'node:zlib';
 import { promoteBatch, quarantineRelease, rollbackRelease } from '../src/lib/server/releases';
@@ -46,7 +47,7 @@ async function makeRecipe(db: TestD1, r2: MemoryR2, releaseId: string) {
   const provenance = JSON.stringify({
     buildId: `build-${releaseId}`, revisionId: `revision-${releaseId}`, workerId: releaseId,
     architecture: 'x86_64', recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'd'.repeat(64),
-    sourceDateEpoch: 1, network: 'disabled', artifactSha256: null, sources,
+    sourceDateEpoch: 1, network: 'disabled', ...runtimeEvidence('sha256:' + 'd'.repeat(64)), artifactSha256: null, sources,
   });
   db.prepare("INSERT INTO workers VALUES(?,?,'active')").bind(releaseId, base64(await crypto.subtle.exportKey('raw', keys.publicKey))).run();
   db.prepare(`UPDATE builds SET worker_id=?,provenance=?,provenance_signature=?,artifact_key=NULL,

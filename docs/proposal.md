@@ -6,19 +6,17 @@ write code; the section on the flow is rewritten around that inversion.
 
 
 1. The promise
-We are not going to promise that every package works perfectly. We are going to promise that no package attacks the user.
+Every published binary must pass source verification, review, isolated build,
+and release gates. We publish evidence binding the artifact to its recorded
+inputs and builder. These controls reduce supply-chain risk; they do not prove
+upstream software harmless or runtime dependency discovery complete.
 
+Security is a release requirement, not a claim that malicious behavior is
+mechanically decidable. We distinguish enforced isolation, authenticated build
+claims, measured dependency evidence, and unknown runtime behavior. A signature
+identifies an accountable producer or release authority; it does not certify
+that the software is safe. Maintainers and upstream remain trust dependencies.
 
-
-That distinction is the core of this proposal. Provenance, license, checksums and build hygiene are machine-verifiable, deterministic and cheap. "Works well" is not verifiable at scale — not by the AUR, not by Debian, not by Fedora.
-
-
-
-If a package is broken but harmless, users report it and we fix it. If a package attacks someone, we failed. Only the second case is unacceptable.
-
-
-
-This makes the problem tractable and gives us an honest promise we can defend in public.
 
 2. Scope
 omapkg sits on top of Arch, not in place of it. core and extra stay as the base
@@ -38,11 +36,11 @@ toolchain bootstrap and cascading rebuilds across thousands of packages.
 
 Two distribution surfaces:
 
-Surface A — signed binaries. Software with a redistributable license. We build it, sign it, host it. This is most of the catalog and where the guarantee is strongest.
+Surface A — signed binaries. Software with a redistributable license. We build it, sign it, host it. This surface runs through the hosted build and release controls.
 
 
 
-Surface B — recipes. Software we cannot legally redistribute: Chrome, the NVIDIA driver, Zoom, Spotify. We never host the bits; the recipe fetches straight from the vendor with a pinned checksum. This is exactly what the AUR does, and it is legally clean.
+Surface B — recipes. Software we cannot legally redistribute: Chrome, the NVIDIA driver, Zoom, Spotify. We never host the bits; the recipe fetches straight from the vendor with a pinned checksum. Redistribution decisions require license evidence for the specific software. Users execute these recipes locally; hosted worker isolation does not apply to their machine.
 
 
 
@@ -63,15 +61,13 @@ PKGBUILD, lints it, and tests it.
 This dissolves the worst problem in v1. Validating a submitted PKGBUILD means
 executing someone else's shell code, and no amount of sandboxing makes
 adversarial input safe to review automatically. With requests instead of
-implementations, there is no third-party PKGBUILD to validate. This does not
-remove supply-chain risk, but it removes the package-hijacking path that the AUR
-has suffered.
+implementations, there is no third-party PKGBUILD to validate. This relocates the recipe-authoring attack surface. Prompt injection, compromised upstreams, and malicious generated code remain possible; generation alone does not eliminate package hijacking.
 
 
 
 Five points deserve detail:
 
-The factory's output is reviewed, not trusted. Moving generation in-house relocates the attack surface, it does not delete it. Our agent still reads adversarial content: the upstream repo, its README, its build scripts. An agent prompted by hostile input is not trusted infrastructure. So a maintainer approves the generated diff before it builds. For a version bump that diff is two lines and review is trivial; the real cost falls on initial package creation, which is exactly where we want human eyes.
+The factory's output is reviewed, not trusted. Moving generation in-house relocates the attack surface, it does not delete it. Our agent still reads adversarial content: the upstream repo, its README, its build scripts. An agent prompted by hostile input is not trusted infrastructure. So a maintainer approves the generated diff before it builds. A small version diff can select substantially changed upstream code. Review includes changed inputs and dependency evidence, not merely the size of the recipe diff.
 
 
 
@@ -99,21 +95,20 @@ Dependencies are the expensive part, and we should say so. An offline build mean
 The middle path: vendored sources are allowed, but our factory produces the
 vendor bundle, not upstream. It resolves the lockfile during online
 verification, checksums every component, records them in the SBOM, and hands a
-sealed bundle to the offline build. This provides auditability without
-packaging every crate in the ecosystem. Where a dependency is already in Arch
+sealed bundle to the offline build. This inventories resolved build inputs without packaging every crate in the ecosystem. It does not prove that each listed component reached the artifact or that runtime dependencies are complete. Where a dependency is already in Arch
 or omapkg, use that instead.
 
 
 
-Reproducibility by construction from day one is cheaper than retrofitting it.
+Recording reproducible inputs from day one is cheaper than retrofitting them.
 Adopt the inputs immediately: SOURCE_DATE_EPOCH, pinned build containers,
 recorded build environments, and no timestamps or paths leaking into artifacts.
 The first release does not promise bit-for-bit verification; Arch itself is not
-fully there yet. Build reproducibly from the start and verify it later.
+fully there yet. Record exact prepared package versions and environment identity as well as the base image. Offline execution prevents network input during that phase; it does not by itself produce a complete input inventory or prove reproducibility.
 
 
 
-The signing key never lives on a worker. The worker produces the artifact plus a
+The release signing key never lives on a build worker. Worker identity keys sign build provenance. The worker produces the artifact plus a
 provenance attestation. A separate service, with its key in a KMS, signs only
 artifacts from an attested build. If a worker is compromised, the key does not
 go with it. A verification script should detect tracked files modified outside

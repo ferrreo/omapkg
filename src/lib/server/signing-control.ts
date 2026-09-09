@@ -1,9 +1,12 @@
+import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
 import type { Architecture, Revision } from '../model';
 import type { Env } from './env';
 import { audit, now, sha256 } from './db';
 import { PolicyError, revisionImage, validateRevision } from './policy';
 import { archRelationCovers, parsePackageMetadata } from './arch';
 import { dependencyPlansEqual, parseDependencyPlan, type DependencyPlan } from './dependency-plan';
+import { attestationKey, releaseAttestation } from './release-attestation';
+import { assertRuntimeEvidence, reviewedRuntimeExceptions, type RuntimeException } from './runtime-evidence';
 
 export type SigningControlEnv = Pick<Env, 'DB' | 'ARTIFACTS'> & {
   CONTROL_TOKEN?: string;
@@ -40,7 +43,7 @@ export class SigningControlError extends Error {
 export interface SigningIntentResponse {
   id: string;
   status: 'ready' | 'signed';
-  kind: 'package' | 'database';
+  kind: 'package' | 'database' | 'attestation';
   expiresAt: number;
   keyFingerprint: string;
   artifact: { key: string; sha256: string; size: number; filename: string };
@@ -48,20 +51,21 @@ export interface SigningIntentResponse {
     id: string;
     revisionId: string;
     status: 'succeeded';
-    surface: 'binary';
+    surface: 'binary' | 'recipe';
     architecture: Architecture;
     workerId: string;
     smokePassed: true;
   };
-  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean };
+  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[] };
   attestation: { provenance: string; provenanceSignature: string; workerPublicKey: string };
+  statement?: string;
   signature?: { key: string; sha256: string; filename: string };
 }
 
 export interface SigningEventInput {
   action: 'signing.completed';
   intentId: string;
-  kind: 'package' | 'database';
+  kind: 'package' | 'database' | 'attestation';
   buildId: string;
   revisionId: string;
   artifactKey: string;
@@ -79,7 +83,7 @@ interface IntentRow extends Revision {
   intent_id: string;
   intent_status: 'pending' | 'signed' | 'failed' | 'expired';
   object_key: string;
-  object_kind: 'package' | 'database';
+  object_kind: 'package' | 'database' | 'attestation';
   intent_artifact_sha256: string;
   intent_artifact_filename: string;
   intent_manifest_sha256: string;
@@ -246,6 +250,10 @@ async function validateEvidence(
     if (row.build_artifact_sha256 !== row.intent_artifact_sha256 || row.build_artifact_filename !== row.intent_artifact_filename || row.build_artifact_size !== artifactSize) {
       fail(409, 'Package signing object does not match build evidence.');
     }
+  } else if (row.object_kind === 'attestation') {
+    if (row.object_key !== attestationKey(row.build_id) || row.intent_artifact_filename !== 'attestation.json') {
+      fail(409, 'Attestation signing object is outside the build metadata namespace.');
+    }
   } else {
     if (!DATABASE_SUFFIXES.some((suffix) => row.intent_artifact_filename.endsWith(suffix)) ||
         !new RegExp(`^repo/(?:stable|dev)/${row.build_architecture}/`).test(row.object_key)) {
@@ -257,12 +265,15 @@ async function validateEvidence(
     fail(409, 'Build attestation is not ready.');
   }
   if (row.build_architecture !== 'x86_64' && row.build_architecture !== 'aarch64') fail(409, 'Build architecture is invalid.');
-  if (row.surface !== 'binary' || !['queued', 'building', 'built'].includes(row.request_status)) fail(409, 'Only a successful binary build can be signed.');
+  if ((row.surface !== 'binary' && row.object_kind !== 'attestation') || !['queued', 'building', 'built'].includes(row.request_status)) fail(409, 'Only a successful reviewed build can be signed.');
   if (row.latest_revision_id !== row.revision_id || row.intent_manifest_sha256 !== row.manifest_sha256) fail(409, 'Signing revision is no longer current.');
   if (requireCurrentReview && (row.worker_status !== 'active' || row.area_approved !== 1 || row.security_approved !== 1)) {
     fail(409, 'Current build review approvals are incomplete.');
   }
-  try { await validateRevision(revision(row)); }
+  try {
+    await validateRevision(revision(row));
+    if (requireCurrentReview && row.object_kind !== 'database') await assertExplicitReview(env.DB, row.revision_id, row.manifest_sha256, row.sbom_json);
+  }
   catch (cause) { fail(cause instanceof PolicyError ? cause.status : 409, cause instanceof Error ? cause.message : 'Reviewed revision is invalid.'); }
 
   const workerPublicKey = row.worker_public_key;
@@ -295,15 +306,17 @@ async function validateEvidence(
     if (!actualDependencyPlan) fail(409, 'Build provenance dependency plan is invalid.');
   }
   if (!dependencyPlansEqual(expectedDependencyPlan, actualDependencyPlan)) fail(409, 'Build provenance dependency plan does not match lease.');
-  const metadata = parsePackageMetadata(provenance.packageMetadata);
-  if (!metadata || metadata.name !== row.request_name || metadata.fullVersion !== `${row.version}-${row.pkgrel ?? 1}` ||
-      metadata.architecture !== row.build_architecture || metadata.installedSize !== row.build_installed_size ||
-      metadata.installedSize !== provenance.installedSize) {
-    fail(409, 'Package metadata does not match reviewed build.');
-  }
-  const reviewedDependencies = jsonArray(row.dependencies_json, 'Dependency manifest');
-  if (reviewedDependencies.some((reviewed) => typeof reviewed !== 'string' || !metadata.depends.some((native) => archRelationCovers(native, reviewed)))) {
-    fail(409, 'Package metadata does not contain reviewed dependencies.');
+  if (row.surface === 'binary') {
+    const metadata = parsePackageMetadata(provenance.packageMetadata);
+    if (!metadata || metadata.name !== row.request_name || metadata.fullVersion !== `${row.version}-${row.pkgrel ?? 1}` ||
+        metadata.architecture !== row.build_architecture || metadata.installedSize !== row.build_installed_size ||
+        metadata.installedSize !== provenance.installedSize) {
+      fail(409, 'Package metadata does not match reviewed build.');
+    }
+    const reviewedDependencies = jsonArray(row.dependencies_json, 'Dependency manifest');
+    if (reviewedDependencies.some((reviewed) => typeof reviewed !== 'string' || !metadata.depends.some((native) => archRelationCovers(native, reviewed)))) {
+      fail(409, 'Package metadata does not contain reviewed dependencies.');
+    }
   }
   let expectedImageDigest: string | undefined;
   try { expectedImageDigest = revisionImage(revision(row), row.build_architecture).split('@').at(-1); }
@@ -316,9 +329,29 @@ async function validateEvidence(
       !Number.isFinite(Date.parse(String(provenance.startedAt))) || !Number.isFinite(Date.parse(String(provenance.finishedAt)))) {
     fail(409, 'Build provenance does not match reviewed inputs.');
   }
-  if (typeof provenance.artifactSha256 !== 'string' || !SHA256.test(provenance.artifactSha256)) fail(409, 'Build provenance artifact digest is invalid.');
+  if (row.surface === 'binary' && (typeof provenance.artifactSha256 !== 'string' || !SHA256.test(provenance.artifactSha256) || provenance.artifactSha256 !== row.build_artifact_sha256)) fail(409, 'Build provenance artifact digest is invalid.');
   if (row.object_kind === 'package' && provenance.artifactSha256 !== row.intent_artifact_sha256) fail(409, 'Build provenance artifact digest does not match package bytes.');
   if (row.object_kind === 'database' && provenance.artifactSha256 !== row.build_artifact_sha256) fail(409, 'Database signing context is not tied to an attested package build.');
+  if (requireCurrentReview && row.object_kind !== 'database') {
+    try { await assertRuntimeEvidence(provenance, expectedImageDigest!, reviewedRuntimeExceptions(row.sbom_json)); }
+    catch (cause) { fail(409, cause instanceof Error ? cause.message : 'Runtime evidence is invalid.'); }
+  }
+  if (row.object_kind === 'attestation') {
+    const expected = await statement(row);
+    if (await sha256(expected) !== row.intent_artifact_sha256 || new TextEncoder().encode(expected).byteLength !== artifactSize) {
+      fail(409, 'Attestation does not match reviewed build evidence.');
+    }
+  }
+}
+
+function statement(row: IntentRow): Promise<string> {
+  return releaseAttestation({
+    buildId: row.build_id, revisionId: row.revision_id, surface: row.surface,
+    artifactFilename: row.build_artifact_filename, artifactSha256: row.build_artifact_sha256,
+    recipe: row.surface === 'recipe' ? row.public_recipe ?? row.recipe : row.recipe,
+    recipeSha256: row.recipe_sha256, manifestSha256: row.manifest_sha256, sbom: row.sbom_json,
+    provenance: row.build_provenance!, provenanceSignature: row.build_provenance_signature!, workerPublicKey: row.worker_public_key!,
+  });
 }
 
 async function artifactSize(env: SigningControlEnv, row: IntentRow): Promise<number> {
@@ -330,15 +363,16 @@ async function artifactSize(env: SigningControlEnv, row: IntentRow): Promise<num
   return object.size;
 }
 
-function response(row: IntentRow, fingerprint: string, size: number): SigningIntentResponse {
+async function response(row: IntentRow, fingerprint: string, size: number): Promise<SigningIntentResponse> {
   const result: SigningIntentResponse = {
     id: row.intent_id, status: row.intent_status === 'signed' ? 'signed' : 'ready', kind: row.object_kind,
     expiresAt: expiry(row), keyFingerprint: fingerprint,
     artifact: { key: row.object_key, sha256: row.intent_artifact_sha256, size, filename: row.intent_artifact_filename },
-    build: { id: row.build_id, revisionId: row.revision_id, status: 'succeeded', surface: 'binary', architecture: row.build_architecture, workerId: row.build_worker_id!, smokePassed: true },
-    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1 },
+    build: { id: row.build_id, revisionId: row.revision_id, status: 'succeeded', surface: row.surface, architecture: row.build_architecture, workerId: row.build_worker_id!, smokePassed: true },
+    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json) },
     attestation: { provenance: row.build_provenance!, provenanceSignature: row.build_provenance_signature!, workerPublicKey: row.worker_public_key! },
   };
+  if (row.object_kind === 'attestation') result.statement = await statement(row);
   if (row.intent_status === 'signed') {
     if (!row.signature_key || !row.signature_sha256 || !SHA256.test(row.signature_sha256) || row.signature_key !== `${row.object_key}.sig`) {
       fail(409, 'Signed intent has incomplete signature evidence.');
@@ -416,7 +450,7 @@ function parseEvent(value: unknown): SigningEventInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'Signing event must be an object.');
   const input = value as Record<string, unknown>;
   const action = input.action === 'signing.completed' ? input.action : null;
-  const kind = input.kind === 'package' || input.kind === 'database' ? input.kind : null;
+  const kind = input.kind === 'package' || input.kind === 'database' || input.kind === 'attestation' ? input.kind : null;
   const mode = input.mode === 'cloudflare-worker-secret' || input.mode === 'managed-kms' ? input.mode : null;
   const result = {
     action, kind, mode,
