@@ -106,3 +106,20 @@ test('resolution requires matching version, architecture and approvals and retur
     expect(db.prepare("SELECT count(*) AS n FROM approvals WHERE revision_id IN (SELECT id FROM revisions WHERE request_id='parent')").first<Record<string, unknown>>()).toEqual({ n: 0 });
   } finally { db.close(); }
 });
+
+test('dependency graph rejects a 65th reachable request', async () => {
+  const db = new TestD1(allSchema);
+  const env = { DB: asD1(db) } as Env;
+  try {
+    request(db, 'root');
+    const blocker = await block(db, 'root', 'last');
+    for (let index = 0; index < 64; index++) {
+      request(db, `leaf-${index}`);
+      if (index < 63) db.prepare(`INSERT INTO dependency_blockers(id,request_id,scope_id,architecture,relation,phase,resolution,detail,dependency_request_id,status,created_at)
+        VALUES(?,'root','generation-root','x86_64',?,'factory','dependency','missing',?,'open',1)`)
+        .bind(`edge-${index}`, `leaf-${index}`, `leaf-${index}`).run();
+    }
+    await expect(linkDependencyRequest(env, maintainer, 'root', blocker.id, 'leaf-63')).rejects.toThrow('64 requests');
+    expect((await getDependencyBlockers(asD1(db), 'root')).find((item) => item.id === blocker.id)?.dependency_request_id).toBeNull();
+  } finally { db.close(); }
+});

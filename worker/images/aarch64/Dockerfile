@@ -4,9 +4,11 @@ FROM scratch
 # script verifies its detached signature before extracting it here.
 COPY . /
 
-RUN pacman -Syu --noconfirm --needed \
+RUN cp /etc/pacman.conf /tmp/opr-pacman.conf \
+    && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls' /tmp/opr-pacman.conf \
+    && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
       base-devel arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools namcap shellcheck \
-    && pacman -Scc --noconfirm
+    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm && rm /tmp/opr-pacman.conf
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
