@@ -31,6 +31,7 @@ type Runner struct {
 }
 
 type BuildResult struct {
+	InputEvidence      *frozenInputEvidence
 	Outputs            []buildOutput
 	RuntimeTests       []outputRuntimeTest
 	ArtifactPath       string
@@ -361,13 +362,14 @@ func (r *Runner) Execute(ctx context.Context, job Job, fetched []fetchedSource) 
 }
 
 func (r *Runner) ExecuteWithClient(ctx context.Context, job Job, fetched []fetchedSource, client *Client) (BuildResult, error) {
-	if client == nil {
-		return r.execute(ctx, job, fetched, nil)
-	}
-	return r.execute(ctx, job, fetched, client.registryCredentials)
+	return r.execute(ctx, job, fetched, client)
 }
 
-func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, getCredentials registryCredentialGetter) (BuildResult, error) {
+func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, client *Client) (BuildResult, error) {
+	var getCredentials registryCredentialGetter
+	if client != nil {
+		getCredentials = client.registryCredentials
+	}
 	legacy := Config{Origin: r.Origin, Architecture: job.Architecture, Image: r.Image, ImageDigest: r.ImageDigest}
 	if err := validateJob(job, legacy); err != nil {
 		// Execute is called after full validation; this guards direct callers from
@@ -395,6 +397,35 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 	workdir := filepath.Join(jobDir, "work")
 	output := filepath.Join(jobDir, "output")
 	dependencyDir := ""
+	var frozen *materializedInputs
+	var inputEvidence *frozenInputEvidence
+	if job.InputLock != nil {
+		if client == nil {
+			return BuildResult{}, errors.New("frozen build requires authenticated input access")
+		}
+		inputEvidence, err = r.nativeInputEvidence(ctx, job)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		frozen, err = materializeFrozenInputs(ctx, job, filepath.Join(jobDir, "inputs"), func(ctx context.Context, ref inputObject, destination string) error {
+			return client.fetchInputObject(ctx, job, ref, destination)
+		})
+		if err != nil {
+			return BuildResult{}, err
+		}
+		inputEvidence.Manifest = frozen.Manifest
+		archive := filepath.Join(frozen.Directory, frozen.Manifest.HelperArchive.SHA256)
+		if err := verifyHelperArchive(archive, frozen.Manifest.HelperImage); err != nil {
+			return BuildResult{}, err
+		}
+		if log, err := r.run(ctx, "load", "-i", archive); err != nil {
+			return BuildResult{Log: log}, fmt.Errorf("load retained preparation helper: %w", err)
+		}
+		ociArch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[job.Architecture]
+		if arch, err := r.run(ctx, "image", "inspect", "--format", "{{.Architecture}}", frozen.Manifest.HelperImage); err != nil || strings.TrimSpace(arch) != ociArch {
+			return BuildResult{}, errors.New("retained helper does not match native target architecture")
+		}
+	}
 	if job.DependencyPlan != nil {
 		dependencyDir = filepath.Join(jobDir, "dependencies")
 		if err := materializeDependencyPlan(ctx, job.DependencyPlan, job, r.Origin, dependencyDir); err != nil {
@@ -427,18 +458,27 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		return BuildResult{}, err
 	}
 	jobName := "opr-" + job.ID
-	if r.RuntimeImage == "" || r.RuntimeImage == imageRef {
+	if frozen == nil && (r.RuntimeImage == "" || r.RuntimeImage == imageRef) {
 		return BuildResult{}, errors.New("a separate digest-pinned minimal runtime image is required")
 	}
-	runtimeDigest := r.RuntimeImage[strings.LastIndex(r.RuntimeImage, "@")+1:]
-	if err := r.ensureImageReference(ctx, r.RuntimeImage, runtimeDigest, getCredentials, job.ID, job.LeaseToken); err != nil {
-		return BuildResult{}, fmt.Errorf("runtime image: %w", err)
+	if frozen == nil {
+		runtimeDigest := r.RuntimeImage[strings.LastIndex(r.RuntimeImage, "@")+1:]
+		if err := r.ensureImageReference(ctx, r.RuntimeImage, runtimeDigest, getCredentials, job.ID, job.LeaseToken); err != nil {
+			return BuildResult{}, fmt.Errorf("runtime image: %w", err)
+		}
 	}
-	if log, err := r.checkShell(ctx, job, jobName, imageRef); err != nil {
-		return BuildResult{Log: log}, fmt.Errorf("shell analysis failed: %w", err)
+	if frozen == nil {
+		if log, err := r.checkShell(ctx, job, jobName, imageRef); err != nil {
+			return BuildResult{Log: log}, fmt.Errorf("shell analysis failed: %w", err)
+		}
 	}
 	dependencies := append(append(append([]string{}, job.Dependencies...), job.RuntimeDependencies...), job.MakeDependencies...)
-	prepared, err := r.prepareDependenciesWithPlan(ctx, jobName, imageRef, uniqueStrings(dependencies), job.DependencyPlan, dependencyDir)
+	var prepared preparedImage
+	if frozen != nil {
+		prepared, err = r.prepareFrozenEnvironment(ctx, jobName, frozen, "build")
+	} else {
+		prepared, err = r.prepareDependenciesWithPlan(ctx, jobName, imageRef, uniqueStrings(dependencies), job.DependencyPlan, dependencyDir)
+	}
 	if err != nil {
 		return BuildResult{Log: prepared.log}, err
 	}
@@ -449,6 +489,17 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 	buildEnvironment, err := r.inspectEnvironment(ctx, jobName, imageRef, prepared.ref)
 	if err != nil {
 		return BuildResult{Log: log}, err
+	}
+	if frozen != nil {
+		if err := frozen.verifyEnvironment("build", buildEnvironment); err != nil {
+			return BuildResult{Log: log}, err
+		}
+		if err := r.checkFrozenDependencies(ctx, jobName, prepared.ref, uniqueStrings(dependencies)); err != nil {
+			return BuildResult{Log: log}, err
+		}
+		if shellLog, err := r.checkShell(ctx, job, jobName, prepared.ref); err != nil {
+			return BuildResult{Log: log + shellLog}, fmt.Errorf("frozen shell analysis failed: %w", err)
+		}
 	}
 	for _, directory := range []string{workdir, output} {
 		if err := os.Chmod(directory, 0o777); err != nil {
@@ -465,7 +516,8 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		return BuildResult{Log: log}, err
 	}
 	if job.OutputContract != nil {
-		result, err := r.finishOutputs(ctx, job, jobDir, output, jobName, prepared.ref, dependencyDir, buildEnvironment)
+		result, err := r.finishOutputs(ctx, job, jobDir, output, jobName, prepared.ref, dependencyDir, buildEnvironment, frozen)
+		result.InputEvidence = inputEvidence
 		result.Log = log + result.Log
 		if err != nil {
 			return result, err

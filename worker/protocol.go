@@ -133,6 +133,7 @@ type DependencyPackage struct {
 }
 
 type Job struct {
+	InputLock           *inputObject       `json:"inputLock,omitempty"`
 	OutputContract      *outputContract    `json:"outputContract,omitempty"`
 	Attempt             int64              `json:"attempt,omitempty"`
 	ID                  string             `json:"id"`
@@ -388,6 +389,9 @@ func validArchDependency(value string) bool {
 func validateJob(job Job, cfg Config) error {
 	if err := validateOutputContract(job); err != nil {
 		return err
+	}
+	if job.InputLock != nil && (!validInputObject(*job.InputLock, 128<<10) || job.OutputContract == nil || job.DependencyPlan != nil) {
+		return errors.New("frozen inputs require a bounded lock and native outputs without a legacy dependency plan")
 	}
 	if !idPattern.MatchString(job.ID) || job.LeaseToken == "" || job.RevisionID == "" {
 		return errors.New("job has invalid identity or lease")

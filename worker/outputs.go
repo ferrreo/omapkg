@@ -168,6 +168,12 @@ func provenanceForOutputs(job Job, workerID string, result BuildResult, started,
 	if job.DependencyPlan != nil {
 		report["dependencyPlan"] = job.DependencyPlan
 	}
+	if job.InputLock != nil {
+		if result.InputEvidence == nil || result.InputEvidence.Lock != *job.InputLock {
+			return "", errors.New("frozen input evidence is missing")
+		}
+		report["frozenInputs"] = result.InputEvidence
+	}
 	data, err := encodeJSON(report)
 	if len(data) > 512*1024 {
 		return "", errors.New("multi-output evidence exceeds 512 KiB")
@@ -199,7 +205,7 @@ func withoutOutputDependencies(dependencies []string, outputs []buildOutput) []s
 	return uniqueStrings(result)
 }
 
-func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, jobName, buildImage, dependencyDir string, buildEnvironment environmentEvidence) (BuildResult, error) {
+func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, jobName, buildImage, dependencyDir string, buildEnvironment environmentEvidence, frozen *materializedInputs) (BuildResult, error) {
 	result := BuildResult{BuildEnvironment: &buildEnvironment}
 	outputs, err := r.collectOutputs(ctx, outputDir, jobName, buildImage, job.PackageName, job.OutputContract)
 	if err != nil {
@@ -230,7 +236,7 @@ func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, 
 				selected = append(selected, output)
 			}
 		}
-		test, log, err := r.testOutputGroup(ctx, job, selected, group, fmt.Sprintf("%s-group-%d", jobName, index), buildImage, runtimeDir, plan)
+		test, log, err := r.testOutputGroup(ctx, job, selected, group, fmt.Sprintf("%s-group-%d", jobName, index), buildImage, runtimeDir, plan, frozen, fmt.Sprintf("runtime-%d", index))
 		result.Log += log
 		if err != nil {
 			return result, err
@@ -241,7 +247,7 @@ func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, 
 	return result, nil
 }
 
-func (r *Runner) testOutputGroup(ctx context.Context, job Job, outputs []buildOutput, group []string, name, buildImage, runtimeDir string, plan *DependencyPlan) (outputRuntimeTest, string, error) {
+func (r *Runner) testOutputGroup(ctx context.Context, job Job, outputs []buildOutput, group []string, name, buildImage, runtimeDir string, plan *DependencyPlan, frozen *materializedInputs, environmentName string) (outputRuntimeTest, string, error) {
 	test := outputRuntimeTest{Outputs: group}
 	artifacts, dependencies := []string{}, []string{}
 	for _, output := range outputs {
@@ -267,7 +273,14 @@ func (r *Runner) testOutputGroup(ctx context.Context, job Job, outputs []buildOu
 		}
 		test.Analyses = append(test.Analyses, outputAnalysis{Name: output.PackageMetadata.Name, RuntimeAnalysis: analysis})
 	}
-	prepared, err := r.prepareDependenciesWithPlan(ctx, name+"-runtime", r.RuntimeImage, withoutOutputDependencies(dependencies, outputs), plan, runtimeDir)
+	var prepared preparedImage
+	baseImage := r.RuntimeImage
+	if frozen != nil {
+		prepared, err = r.prepareFrozenEnvironment(ctx, name, frozen, environmentName)
+		baseImage = frozen.Manifest.HelperImage
+	} else {
+		prepared, err = r.prepareDependenciesWithPlan(ctx, name+"-runtime", r.RuntimeImage, withoutOutputDependencies(dependencies, outputs), plan, runtimeDir)
+	}
 	log += prepared.log
 	if err != nil {
 		return test, log, err
@@ -275,9 +288,14 @@ func (r *Runner) testOutputGroup(ctx context.Context, job Job, outputs []buildOu
 	if prepared.cleanup != nil {
 		defer prepared.cleanup()
 	}
-	test.Environment, err = r.inspectEnvironment(ctx, name+"-runtime", r.RuntimeImage, prepared.ref)
+	test.Environment, err = r.inspectEnvironment(ctx, name+"-runtime", baseImage, prepared.ref)
 	if err != nil {
 		return test, log, err
+	}
+	if frozen != nil {
+		if err := frozen.verifyEnvironment(environmentName, test.Environment); err != nil {
+			return test, log, err
+		}
 	}
 	installed, err := r.installOutputs(ctx, artifacts, name+"-runtime", prepared.ref)
 	log += installed.log

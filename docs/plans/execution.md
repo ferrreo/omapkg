@@ -229,3 +229,33 @@ signatures and reject re-signed incomplete subjects, changed attempts, missing
 resolved inputs, forged owned-input classification and native code in portable
 outputs. These tests do not establish production release approval, owned input
 qualification or full-catalog rebuild coverage.
+
+## Frozen input preparation
+
+The worker has a separate frozen-input path with paged package locks, retained
+OCI tooling, per-package signature/key checks and independent roots created from
+an empty filesystem. Preparation, compilation and runtime tests disable
+networking. Evidence records complete inventories and native host details.
+
+Fresh x86 validation captured 215 build packages and 108 runtime packages from
+Arch upstream, retaining package/signature/key bytes and a 467,622,912-byte
+helper archive. A native program and an `any` documentation package built,
+installed and passed smoke checks in the separate runtime root, without
+build-only `gcc` or `make`. Repeated runs on this same host produced identical
+output hashes; this is not independent-worker reproduction. The native test
+also rejected another retained package's signing key. Go tests, `go vet`, ARM
+cross-compilation and the capture parser check pass.
+
+Validation corrected two details: capture reads exact archive sizes from retained
+databases because pacman reports remaining download size for cached packages;
+capture/worker verify the actual retained OCI manifest because export can change
+its digest. Initial root creation checks dependencies/file conflicts, then a
+fresh installation inside its own OCI container runs package scripts/hooks with
+working `/proc` and `/dev`.
+
+[The input contract](../frozen-build-inputs.md) records limits and acceptance.
+This capability is not yet advertised: registration/review UI, lease freezing,
+central/offline verification and native ARM acceptance remain in progress.
+Existing v2 ingestion rejects this new evidence until authority checks land.
+These captures and native runs are local bootstrap validation, not production
+approval or owned-only release qualification. Full-plan completion is unproven.

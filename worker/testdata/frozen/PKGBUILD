@@ -1,0 +1,26 @@
+pkgbase=opr-frozen-fixture
+pkgname=('opr-frozen-native' 'opr-frozen-docs')
+pkgver=1.0
+pkgrel=1
+arch=('x86_64' 'aarch64')
+license=('MIT')
+source=('main.c')
+sha256sums=('29221600926bea189a250211378bab6e4025f8cbaa5e1f559f25b15f4bbb48e6')
+
+build() {
+  test "$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n')" = lo
+  test "$LC_ALL" = C
+  test "$(date +%Z)" = UTC
+  test "$SOURCE_DATE_EPOCH" = 1700000000
+  cc $CFLAGS $LDFLAGS main.c -o frozen-hello
+}
+
+package_opr-frozen-native() {
+  depends=('glibc')
+  install -Dm755 frozen-hello "$pkgdir/usr/bin/frozen-hello"
+}
+
+package_opr-frozen-docs() {
+  arch=('any')
+  install -Dm644 main.c "$pkgdir/usr/share/doc/opr-frozen-fixture/main.c"
+}
