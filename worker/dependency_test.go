@@ -96,7 +96,7 @@ func TestDependencyPrepScriptVerifiesPlanAndKeepsNoNodeps(t *testing.T) {
 		"pacman-key --gpgdir",
 		"pacman --config \"$pacman_conf\" -U --noconfirm --",
 		"pacman --config \"$pacman_conf\" -T",
-		"pacman --config \"$pacman_conf\" -Syu --noconfirm --needed -- \"${missing_args[@]}\"",
+		"pacman --config \"$pacman_conf\" -S --noconfirm --needed -- \"${missing_args[@]}\"",
 		"pacman --config \"$pacman_conf\" -Scc --noconfirm",
 		"trap cleanup EXIT",
 	} {
@@ -114,6 +114,13 @@ func TestDependencyPrepScriptInstallsOnlyPacmanMissingRelations(t *testing.T) {
 	script, err := dependencyPrepScript([]string{"opr-lib=1.2-1", "tree"}, plan, "podman")
 	if err != nil {
 		t.Fatal(err)
+	}
+	install := strings.Index(script, " -U --noconfirm")
+	if strings.Contains(script[install:], " -Syu") {
+		t.Fatal("full upgrade could replace frozen packages")
+	}
+	if strings.Index(script, "field Version") < strings.Index(script, " --needed -- ") {
+		t.Fatal("frozen versions must be checked after all dependency resolution")
 	}
 	for _, line := range strings.Split(script, "\n") {
 		if strings.Contains(line, " -S ") && strings.Contains(line, "opr-lib=1.2-1") {

@@ -96,6 +96,10 @@ test('resolution requires matching version, architecture and approvals and retur
     await resolveDependencyBlockers(env);
     expect((await getDependencyBlockers(asD1(db), 'parent'))[0].status).toBe('open');
     db.exec("INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES('a','revision','area','area','manifest',1),('s','revision','security','security','manifest',1)");
+    db.exec("UPDATE releases SET architecture='x86_64'");
+    await resolveDependencyBlockers(env);
+    expect((await getDependencyBlockers(asD1(db), 'parent'))[0].status).toBe('open');
+    db.exec("UPDATE releases SET architecture='aarch64'");
     metadata.fullVersion = '2-1'; updateMetadata();
     await resolveDependencyBlockers(env);
     expect((await getDependencyBlockers(asD1(db), 'parent'))[0].status).toBe('open');

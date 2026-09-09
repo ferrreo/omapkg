@@ -347,14 +347,7 @@ func dependencyPrepScript(dependencies []string, plan *DependencyPlan, runtime s
 		script.WriteString("pacman --config \"$pacman_conf\" -Syu --noconfirm\n")
 		script.WriteString("set -- /opr/dependencies/*.pkg.tar.zst\n")
 		script.WriteString("pacman --config \"$pacman_conf\" -U --noconfirm -- \"$@\"\n")
-		script.WriteString("while IFS=$(printf '\\t') read -r expected_name expected_version expected_arch expected_filename; do\n")
-		script.WriteString("  test -f \"/opr/dependencies/$expected_filename\"\n")
-		script.WriteString("  package_info=$(pacman --config \"$pacman_conf\" -Qi -- \"$expected_name\")\n")
-		script.WriteString("  field() { printf '%s\\n' \"$package_info\" | awk -F: -v key=\"$1\" '$1 ~ \"^[[:space:]]*\" key \"[[:space:]]*$\" { sub(/^[^:]*:[[:space:]]*/, \"\", $0); print; exit }'; }\n")
-		script.WriteString("  test \"$(field Name)\" = \"$expected_name\"\n")
-		script.WriteString("  test \"$(field Version)\" = \"$expected_version\"\n")
-		script.WriteString("  test \"$(field Architecture)\" = \"$expected_arch\"\n")
-		script.WriteString("done < /opr/dependencies/plan.tsv\n")
+
 	} else {
 		script.WriteString("sed -i '/^\\[options\\]$/a DownloadUser = root\\n" + downloadSandbox + "' \"$pacman_conf\"\n")
 	}
@@ -367,9 +360,22 @@ func dependencyPrepScript(dependencies []string, plan *DependencyPlan, runtime s
 		script.WriteString("  mapfile -t missing_args < \"$missing_dependencies\"\n")
 		script.WriteString("  test \"${#missing_args[@]}\" -gt 0\n")
 		script.WriteString("  pacman --config \"$pacman_conf\"")
-		script.WriteString(" -Syu --noconfirm --needed -- \"${missing_args[@]}\"\nfi\n")
+		operation := " -Syu"
+		// The base was upgraded before installing frozen packages.
+		if plan != nil {
+			operation = " -S"
+		}
+		script.WriteString(operation + " --noconfirm --needed -- \"${missing_args[@]}\"\nfi\n")
 	}
 	if plan != nil {
+		script.WriteString("while IFS=$(printf '\\t') read -r expected_name expected_version expected_arch expected_filename; do\n")
+		script.WriteString("  test -f \"/opr/dependencies/$expected_filename\"\n")
+		script.WriteString("  package_info=$(pacman --config \"$pacman_conf\" -Qi -- \"$expected_name\")\n")
+		script.WriteString("  field() { printf '%s\\n' \"$package_info\" | awk -F: -v key=\"$1\" '$1 ~ \"^[[:space:]]*\" key \"[[:space:]]*$\" { sub(/^[^:]*:[[:space:]]*/, \"\", $0); print; exit }'; }\n")
+		script.WriteString("  test \"$(field Name)\" = \"$expected_name\"\n")
+		script.WriteString("  test \"$(field Version)\" = \"$expected_version\"\n")
+		script.WriteString("  test \"$(field Architecture)\" = \"$expected_arch\"\n")
+		script.WriteString("done < /opr/dependencies/plan.tsv\n")
 		script.WriteString("pacman --config \"$pacman_conf\" -Scc --noconfirm\n")
 	}
 	return script.String(), nil
