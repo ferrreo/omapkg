@@ -1,3 +1,7 @@
+import { assertOutputEvidence } from '../../src/lib/server/output-evidence';
+import { canonicalJson } from '../../src/lib/canonical-json';
+import { verifyStatementEvidence } from './verify-release';
+import type { OutputContract } from '../../src/lib/output-contract';
 import { signingURL } from '../../src/lib/signing-url';
 import * as openpgp from 'openpgp';
 import { createHash } from 'node:crypto';
@@ -7,7 +11,7 @@ const MAX_INTENT_BYTES = 8 * 1024;
 const DEFAULT_MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const FILENAME = /^[A-Za-z0-9][A-Za-z0-9._+@%=-]{0,254}$/;
+const FILENAME = /^[A-Za-z0-9][A-Za-z0-9._+@%:=~-]{0,254}$/;
 const DATABASE_SUFFIXES = [
   '.db', '.files',
   '.db.tar.zst', '.db.tar.xz', '.db.tar.gz', '.db.tar.bz2',
@@ -52,12 +56,14 @@ interface SignIntent {
     architecture: string;
     workerId?: string;
     smokePassed: boolean;
+    attempt?: number;
   };
   review: {
     manifestSha256: string;
     areaApproved: boolean;
     securityApproved: boolean;
     runtimeExceptions?: RuntimeException[];
+    outputContract?: OutputContract;
   };
   attestation: {
     provenance: string;
@@ -69,6 +75,7 @@ interface SignIntent {
 }
 
 interface Provenance {
+  schemaVersion?: number;
   buildId: string;
   revisionId: string;
   workerId: string;
@@ -253,7 +260,8 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
       !Number.isFinite(Date.parse(provenance.startedAt)) || !Number.isFinite(Date.parse(provenance.finishedAt))) {
     throw new Error('build provenance does not match reviewed inputs');
   }
-  if ((build.surface === 'binary' && !SHA256.test(provenance.artifactSha256)) || (intent.kind === 'package' && provenance.artifactSha256 !== artifact.sha256)) {
+  if (provenance.schemaVersion === 2 && (intent.kind === 'database' || !intent.review.outputContract || !Number.isSafeInteger(build.attempt))) throw new Error('native signing requires reviewed output contract and attempt');
+  if (provenance.schemaVersion !== 2 && ((build.surface === 'binary' && !SHA256.test(provenance.artifactSha256)) || (intent.kind === 'package' && provenance.artifactSha256 !== artifact.sha256))) {
     throw new Error('build provenance artifact digest does not match reviewed inputs');
   }
   if (build.workerId && build.workerId !== provenance.workerId) throw new Error('build worker does not match provenance');
@@ -268,13 +276,25 @@ async function verifyAttestation(intent: SignIntent): Promise<void> {
   if (!valid) throw new Error('worker provenance signature is invalid');
   if (intent.kind !== 'database') {
     const provenance = JSON.parse(intent.attestation.provenance);
-    await assertRuntimeEvidence(provenance, provenance.imageDigest, intent.review.runtimeExceptions ?? []);
+    if (provenance.schemaVersion === 2) {
+      const report = await assertOutputEvidence(provenance, intent.review.runtimeExceptions ?? []);
+      if (report.attempt !== intent.build.attempt || canonicalJson(report.outputContract) !== canonicalJson(intent.review.outputContract) ||
+          (intent.kind === 'package' && !report.outputs.some((output) => output.filename === intent.artifact.filename && output.artifactSha256 === intent.artifact.sha256))) {
+        throw new Error('Native signing subject or output contract differs from reviewed attempt');
+      }
+    } else await assertRuntimeEvidence(provenance, provenance.imageDigest, intent.review.runtimeExceptions ?? []);
   }
   if (intent.kind === 'attestation') {
     if (!intent.statement || createHash('sha256').update(intent.statement).digest('hex') !== intent.artifact.sha256) {
       throw new Error('release statement does not match signing intent');
     }
     const statement = JSON.parse(intent.statement);
+    if (JSON.parse(intent.attestation.provenance).schemaVersion === 2) {
+      const parameters = statement.predicate?.buildDefinition?.externalParameters;
+      if (parameters?.manifestSha256 !== intent.review.manifestSha256 || canonicalJson(parameters?.outputContract) !== canonicalJson(intent.review.outputContract)) throw new Error('Native statement differs from reviewed manifest');
+      await verifyStatementEvidence({ statement: new TextEncoder().encode(intent.statement), subjectName: statement.subject?.[0]?.name, subjectSha256: statement.subject?.[0]?.digest?.sha256 });
+    }
+
     const evidence = statement.predicate?.runDetails?.byproducts?.find((item: { name: string }) => item.name === 'worker-provenance.json');
     if (statement._type !== 'https://in-toto.io/Statement/v1' || statement.predicateType !== 'https://slsa.dev/provenance/v1' ||
         !evidence || new TextDecoder().decode(decodeBase64(evidence.content, 'worker provenance')) !== intent.attestation.provenance ||
@@ -301,7 +321,7 @@ async function fetchIntent(request: Request, env: Env, intentId: string): Promis
   });
   if (!response.ok) throw new Error(`control plane returned ${response.status}`);
   const body = await response.arrayBuffer();
-  if (body.byteLength > 1 << 20) throw new Error('control response is too large');
+  if (body.byteLength > 3 * 1024 * 1024) throw new Error('control response is too large');
   try { return JSON.parse(new TextDecoder().decode(body)) as SignIntent; }
   catch { throw new Error('control response is not valid JSON'); }
 }

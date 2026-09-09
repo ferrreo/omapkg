@@ -1,3 +1,5 @@
+import { signNativeOutput } from '../src/lib/server/native-signing';
+import { claimSigningIntent, completeSigningIntent } from '../src/lib/server/signing-control';
 import { runtimeEvidence } from './runtime-fixtures';
 import { expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -34,8 +36,8 @@ const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((na
 class MemoryR2 {
   readonly objects = new Map<string, { body: Uint8Array; customMetadata: Record<string, string> }>();
 
-  async put(key: string, body: Uint8Array, options?: { customMetadata?: Record<string, string> }): Promise<void> {
-    this.objects.set(key, { body: new Uint8Array(body), customMetadata: options?.customMetadata ?? {} });
+  async put(key: string, body: Uint8Array | string, options?: { customMetadata?: Record<string, string> }): Promise<void> {
+    this.objects.set(key, { body: typeof body === 'string' ? new TextEncoder().encode(body) : new Uint8Array(body), customMetadata: options?.customMetadata ?? {} });
   }
 
   async head(key: string): Promise<{ size: number; customMetadata: Record<string, string> } | null> {
@@ -550,9 +552,9 @@ test('v2 cohort output completion binds every upload, version, architecture and 
     const security = { id: 'github:2', role: 'security' as const, areas: ['system'] };
     holder.exec("INSERT INTO team_memberships VALUES('1','system'),('2','security')");
     const revision = (await db.prepare('SELECT * FROM revisions WHERE id=?').bind(seeded.revisionId).first<Revision>())!;
-    const policy = { schemaVersion: 1, pkgbase: seeded.name, outputs: [seeded.name, `${seeded.name}-docs`], collection: 'core', lane: 'system', role: 'base-system', origin: 'arch',
+    const policy = { schemaVersion: 1, pkgbase: seeded.name, outputs: [seeded.name, `${seeded.name}-docs@portable`], collection: 'core', lane: 'system', role: 'base-system', origin: 'arch',
       upstreamUrl: seeded.source[0].url, sourceKind: 'archive', description: 'Native split fixture', license: 'MIT', ownerArea: 'system', architectures: ['x86_64'],
-      artifactArchitecture: 'native', portableOutputs: [`${seeded.name}-docs`], architectureExceptions: [{ architecture: 'aarch64', reason: 'Explicit test-only target exception.' }], sourceReference: null, rebuildOn: [] };
+      artifactArchitecture: 'native', portableOutputs: [`${seeded.name}-docs@portable`], architectureExceptions: [{ architecture: 'aarch64', reason: 'Explicit test-only target exception.' }], sourceReference: null, rebuildOn: [] };
     const catalog = await proposeCatalogPackage(db, actor, policy, null, 'Test split ownership.');
     await approveCatalogPackage(db, actor, seeded.name, 1, catalog.manifestSha256, 'area', 'Test owner.');
     await approveCatalogPackage(db, security, seeded.name, 1, catalog.manifestSha256, 'security', 'Test security.');
@@ -607,5 +609,35 @@ test('v2 cohort output completion binds every upload, version, architecture and 
     expect((await db.prepare('SELECT provenance_signature FROM build_attempt_results WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ provenance_signature: string }>())?.provenance_signature).toBe(complete.provenanceSignature);
     expect((await db.prepare('SELECT output_contract_json FROM build_attempts WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ output_contract_json: string }>())?.output_contract_json).toBe(JSON.stringify(job.outputContract));
     expect(() => holder.exec('DELETE FROM build_attempt_results')).toThrow('immutable');
+    const service = { ...testEnv(holder), ARTIFACTS: bucket as unknown as R2Bucket, PACKAGE_SIGNING_FINGERPRINT: 'a'.repeat(40) };
+    const intents: string[] = [];
+    service.SIGNER = { async fetch(request: Request) {
+      const { intentId } = await request.json() as { intentId: string };
+      const intent = await claimSigningIntent(service, intentId); intents.push(intentId);
+      // Control-plane regression uses inert signature bytes. Isolated signer tests verify OpenPGP separately.
+      const signature = new TextEncoder().encode('control-plane test signature');
+      const signatureSha256 = await sha256(signature); const signatureKey = `${intent.artifact.key}.sig`;
+      await bucket.put(signatureKey, signature, { customMetadata: { sha256: signatureSha256 } });
+      await completeSigningIntent(service, { action: 'signing.completed', intentId, kind: intent.kind, buildId: job.id, revisionId: job.revisionId,
+        artifactKey: intent.artifact.key, artifactSha256: intent.artifact.sha256, signatureKey, signatureSha256, signatureFilename: `${intent.artifact.filename}.sig`,
+        publicKeyKey: 'keys/opr-package-signing.asc', fingerprint: service.PACKAGE_SIGNING_FINGERPRINT, keyId: 'test', mode: 'cloudflare-worker-secret' });
+      return Response.json({ signatureKey, signatureSha256 });
+    } } as unknown as Fetcher;
+    for (const filename of [artifact.filename, other.filename, 'attestation.json']) {
+      const result = await signNativeOutput(service, actor, job.id, job.attempt!, filename);
+      expect(bucket.objects.has(result.signatureKey)).toBe(true);
+    }
+    const intentId = intents[0];
+    expect((await claimSigningIntent(service, intentId)).status).toBe('signed');
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM releases').first<{ count: number }>()).toEqual({ count: 0 });
+    await expect(signNativeOutput(service, actor, job.id, 99, artifact.filename)).rejects.toThrow('attempt changed');
+    await expect(signNativeOutput(service, actor, job.id, job.attempt!, 'outside-1-1-any.pkg.tar.zst')).rejects.toThrow('registered package');
+    holder.exec("DELETE FROM team_memberships WHERE github_id='2'");
+    await expect(claimSigningIntent(service, intentId)).rejects.toThrow();
+    holder.exec("INSERT INTO team_memberships VALUES('2','security')");
+    expect(() => holder.prepare('UPDATE signing_intents SET object_key=? WHERE id=?').bind(other.key, intentId).run()).toThrow('immutable');
+    holder.exec("DELETE FROM team_memberships WHERE github_id='2'");
+    expect(() => holder.prepare("UPDATE signing_intents SET status='signed' WHERE id=?").bind(intentId).run()).toThrow('review or attempt changed');
+
   } finally { holder.close(); }
 });

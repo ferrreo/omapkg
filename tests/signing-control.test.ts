@@ -13,7 +13,7 @@ import { TestD1, asD1 } from './d1';
 
 const schema = [
   '0001_initial.sql', '0003_distribution.sql', '0007_core_guards.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql', '0026_release_attestations.sql',
-].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
+].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n') + '\nALTER TABLE signing_intents ADD COLUMN build_attempt INTEGER; ALTER TABLE builds ADD COLUMN output_contract_json TEXT;';
 
 class MemoryR2 {
   readonly objects = new Map<string, { body: Uint8Array; customMetadata: Record<string, string> }>();

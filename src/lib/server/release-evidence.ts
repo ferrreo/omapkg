@@ -261,6 +261,7 @@ export async function assertCurrentApprovals(env: Env, revisionId: string, manif
 
 export async function signingRequest(env: Env, input: {
   buildId: string;
+  buildAttempt?: number;
   revisionId: string;
   manifestSha256: string;
   objectKey: string;
@@ -281,11 +282,11 @@ export async function signingRequest(env: Env, input: {
   const createdAt = now();
   const expiresAt = createdAt + 3_600;
   await env.DB.prepare(`INSERT INTO signing_intents
-    (id,build_id,revision_id,object_key,object_kind,artifact_sha256,artifact_filename,manifest_sha256,created_at,expires_at,artifact_size,key_fingerprint)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    (id,build_id,revision_id,object_key,object_kind,artifact_sha256,artifact_filename,manifest_sha256,created_at,expires_at,artifact_size,key_fingerprint,build_attempt)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
     intentId, input.buildId, input.revisionId, safeKey(input.objectKey), input.objectKind,
     input.artifactSha256, input.artifactFilename, input.manifestSha256, createdAt, expiresAt, input.artifactSize,
-    (configured.PACKAGE_SIGNING_FINGERPRINT ?? configured.SIGNING_FINGERPRINT ?? null)?.toLowerCase() ?? null,
+    (configured.PACKAGE_SIGNING_FINGERPRINT ?? configured.SIGNING_FINGERPRINT ?? null)?.toLowerCase() ?? null, input.buildAttempt ?? null,
   ).run();
   const headers = new Headers({ 'Content-Type': 'application/json' });
   if (env.SIGNER_TOKEN) headers.set('Authorization', `Bearer ${env.SIGNER_TOKEN}`);
@@ -322,7 +323,7 @@ export async function signingRequest(env: Env, input: {
     : typeof result.signature_sha256 === 'string' ? result.signature_sha256
     : typeof signatureObject?.sha256 === 'string' ? signatureObject.sha256 : null;
   if (!signatureKey || !SAFE_KEY.test(signatureKey) || !signatureSha256 || !SHA256.test(signatureSha256) ||
-      (input.objectKind === 'attestation' && signatureKey !== `${input.objectKey}.sig`)) {
+      ((input.objectKind === 'attestation' || input.buildAttempt !== undefined) && signatureKey !== `${input.objectKey}.sig`)) {
     await env.DB.prepare("UPDATE signing_intents SET status='failed' WHERE id=? AND status='pending'").bind(intentId).run();
     fail(503, 'Package signing service returned no immutable signature object.');
   }

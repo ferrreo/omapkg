@@ -1,3 +1,5 @@
+import { currentNativeBuild } from './native-signing';
+import type { OutputContract } from '../output-contract';
 import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
 import type { Architecture, Revision } from '../model';
 import type { Env } from './env';
@@ -19,14 +21,14 @@ export type SigningControlEnv = Pick<Env, 'DB' | 'ARTIFACTS'> & {
 export const SIGNING_INTENT_TTL_SECONDS = 60 * 60;
 export const SIGNING_CLAIM_TTL_SECONDS = 15 * 60;
 export const MAX_SIGNING_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024;
-const MAX_PROVENANCE_BYTES = 256 * 1024;
+const MAX_PROVENANCE_BYTES = 512 * 1024;
 const MAX_SIGNATURE_BYTES = 1 * 1024 * 1024;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const FINGERPRINT = /^[a-f0-9]{40}$/;
 const SAFE_KEY = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[\x21-\x7e]{1,1024}$/;
-const FILENAME = /^[A-Za-z0-9][A-Za-z0-9._+:-]{0,220}$/;
+const FILENAME = /^[A-Za-z0-9][A-Za-z0-9._+@%~:-]{0,254}$/;
 const DATABASE_SUFFIXES = [
   '.db', '.files',
   '.db.tar.zst', '.db.tar.xz', '.db.tar.gz', '.db.tar.bz2',
@@ -55,8 +57,9 @@ export interface SigningIntentResponse {
     architecture: Architecture;
     workerId: string;
     smokePassed: true;
+    attempt?: number;
   };
-  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[] };
+  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract };
   attestation: { provenance: string; provenanceSignature: string; workerPublicKey: string };
   statement?: string;
   signature?: { key: string; sha256: string; filename: string };
@@ -95,6 +98,9 @@ interface IntentRow extends Revision {
   signature_key: string | null;
   signature_sha256: string | null;
   intent_created_at: number;
+  intent_build_attempt: number | null;
+  build_attempt: number;
+  build_output_contract_json: string | null;
   revision_id: string;
   build_id: string;
   build_revision_id: string;
@@ -126,7 +132,8 @@ const INTENT_QUERY = `
     i.manifest_sha256 AS intent_manifest_sha256, i.artifact_size AS intent_artifact_size,
     i.expires_at AS intent_expires_at, i.claimed_at, i.claim_expires_at,
     i.key_fingerprint AS intent_key_fingerprint, i.signature_key, i.signature_sha256,
-    i.created_at AS intent_created_at,
+    i.created_at AS intent_created_at, i.build_attempt AS intent_build_attempt,
+    b.attempt AS build_attempt,b.output_contract_json AS build_output_contract_json,
     b.id AS build_id, b.revision_id AS build_revision_id, b.status AS build_status,
     b.worker_id AS build_worker_id, b.architecture AS build_architecture,
     b.artifact_key AS build_artifact_key, b.artifact_sha256 AS build_artifact_sha256,
@@ -242,8 +249,11 @@ async function validateEvidence(
   }
   if (!SAFE_KEY.test(row.object_key) || row.object_key.split('/').some((part) => part === '..')) fail(409, 'Signing artifact key is invalid.');
   if (!FILENAME.test(row.intent_artifact_filename) || row.intent_artifact_filename.includes('/')) fail(409, 'Signing artifact filename is invalid.');
-  if (row.object_key.split('/').at(-1) !== row.intent_artifact_filename) fail(409, 'Signing artifact filename does not match its key.');
-  if (row.object_kind === 'package') {
+  if (!(row.build_output_contract_json && row.object_kind === 'package') && row.object_key.split('/').at(-1) !== row.intent_artifact_filename) fail(409, 'Signing artifact filename does not match its key.');
+  if (row.build_output_contract_json) {
+    if (row.object_kind === 'database' || row.intent_build_attempt !== row.build_attempt) fail(409, 'Native signing requires the exact completed attempt and cannot sign legacy databases.');
+    if (row.object_kind === 'attestation' && (row.object_key !== attestationKey(row.build_id, row.build_attempt) || row.intent_artifact_filename !== 'attestation.json')) fail(409, 'Native attestation key differs from build attempt.');
+  } else if (row.object_kind === 'package') {
     if (!row.intent_artifact_filename.endsWith('.pkg.tar.zst') || !row.object_key.startsWith(`packages/${row.build_architecture}/`)) {
       fail(409, 'Package signing object is outside the package namespace.');
     }
@@ -275,6 +285,22 @@ async function validateEvidence(
     if (requireCurrentReview && row.object_kind !== 'database') await assertExplicitReview(env.DB, row.revision_id, row.manifest_sha256, row.sbom_json);
   }
   catch (cause) { fail(cause instanceof PolicyError ? cause.status : 409, cause instanceof Error ? cause.message : 'Reviewed revision is invalid.'); }
+
+  if (row.build_output_contract_json) {
+    try {
+      const context = await currentNativeBuild(env, row.build_id);
+      if (row.object_kind === 'package') {
+        const artifact = context.artifacts.find((item) => item.filename === row.intent_artifact_filename);
+        if (!artifact || artifact.key !== row.object_key || artifact.sha256 !== row.intent_artifact_sha256 || artifact.size !== artifactSize) {
+          fail(409, 'Native signing object does not match registered attempt output.');
+        }
+      } else {
+        const expected = await statement(row);
+        if (await sha256(expected) !== row.intent_artifact_sha256 || new TextEncoder().encode(expected).byteLength !== artifactSize) fail(409, 'Attestation does not match reviewed build evidence.');
+      }
+      return;
+    } catch (cause) { fail(409, cause instanceof Error ? cause.message : 'Native signing evidence is invalid.'); }
+  }
 
   const workerPublicKey = row.worker_public_key;
   const provenanceSignature = row.build_provenance_signature;
@@ -368,8 +394,8 @@ async function response(row: IntentRow, fingerprint: string, size: number): Prom
     id: row.intent_id, status: row.intent_status === 'signed' ? 'signed' : 'ready', kind: row.object_kind,
     expiresAt: expiry(row), keyFingerprint: fingerprint,
     artifact: { key: row.object_key, sha256: row.intent_artifact_sha256, size, filename: row.intent_artifact_filename },
-    build: { id: row.build_id, revisionId: row.revision_id, status: 'succeeded', surface: row.surface, architecture: row.build_architecture, workerId: row.build_worker_id!, smokePassed: true },
-    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json) },
+    build: { id: row.build_id, revisionId: row.revision_id, status: 'succeeded', surface: row.surface, architecture: row.build_architecture, workerId: row.build_worker_id!, smokePassed: true, ...(row.build_output_contract_json ? { attempt: row.build_attempt } : {}) },
+    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json), ...(row.build_output_contract_json ? { outputContract: JSON.parse(row.build_output_contract_json) } : {}) },
     attestation: { provenance: row.build_provenance!, provenanceSignature: row.build_provenance_signature!, workerPublicKey: row.worker_public_key! },
   };
   if (row.object_kind === 'attestation') result.statement = await statement(row);

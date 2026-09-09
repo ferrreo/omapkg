@@ -12,7 +12,7 @@ human release approval, or production cutover.
 | 0. Preserve security baseline | Existing main implementation retained | 54 focused application tests, 9 signer tests and worker Go suite passed before implementation; rerun after relevant changes. |
 | 1. Catalog and UI contracts | Immutable catalog policies, independent reviews, output identity registry, system/OPR classification and first maintainer views implemented | Ownership/concurrency tests pass. Broader consumer/release/admin journeys remain in progress. |
 | 2. Import and OPR replacement admission | Arch/Omarchy/existing-OPR capture workflow, resumable uploads, reconciliation UI and shared dependency proposals implemented | Local browser reconciliation passed with real inventories; full recipe import/admission and production workflow acceptance still pending. |
-| 3. Native workers, owned inputs and ABI cohorts | Immutable cohort scope, phase/event history, generated changelogs, native matrix and maintainer workbench implemented; owned locks, multi-output workers, ABI closure and native cohort checks remain in progress | Phase/admission/native omission, idempotency, stale narrative and publication-fence checks pass. Full native cohort acceptance remains pending. |
+| 3. Native workers, owned inputs and ABI cohorts | Immutable cohort scope, phase/event history, generated changelogs, native matrix and maintainer workbench implemented; multi-output native workers and private signing implemented; owned locks, ABI closure and native cohort checks remain in progress | Phase/admission/native omission, idempotency, stale narrative and publication-fence checks pass. Full native cohort acceptance remains pending. |
 | 4. Versioned system and independent OPR releases | Pending | Pending |
 | 5. Consumer/client integration and recovery | Pending | Pending |
 | 6. Full catalog rebuild and shadow operation | Pending | Pending |
@@ -187,3 +187,45 @@ Owned dependency/base/runtime locks are still pending. These successful native
 regressions use the preserved shadow builder/runtime inputs; they are not proof
 of owned-only inputs, full-catalog qualification or readiness to publish a system
 release. Phase verification continues to block on that missing evidence.
+
+Fresh native ARM regression passed on commit
+`2654e74eacc6dcde401b7eaaa18950b178c2ba8a`:
+[run 34408439651](https://github.com/ferrreo/omapkg/actions/runs/34408439651).
+It pulled the previously retained builder/runtime digests, skipped image building
+and publication, and ran both the new split-output/group test and the existing
+native isolation/runtime test. The dedicated temporary pull-only Actions secret
+was deleted after completion. This closes the native protocol regression check;
+it does not qualify those shadow images as owned inputs.
+
+
+## Private native signing and independent verification
+
+Native v2 output signatures now bind a registered artifact and immutable build
+attempt. The central signer and offline verifier validate the complete output
+set, native installation groups, portable-output inspection, embedded worker
+signature and resolved shadow inputs. One in-toto statement covers every split
+output. Epochs, fractional package releases and valid output names containing
+`@` remain intact through signing and download.
+
+Current cohort/catalog/recipe scope, independent active reviewers and worker
+identity are rechecked before signing. Database guards prevent changed review
+or attempt state from becoming a recorded native signature. Historical v1
+statements retain their original verifier and publication path. V2 artifacts and
+statements stay private; no repository membership is created by signing. The
+v2 build type explicitly identifies its current inputs as `shadow`, and the
+offline verifier rejects an unsupported claim that those inputs are owned.
+
+The build page exposes private output signatures and the complete signed build
+statement. Browser checks used labelled local fixture packages, passed at
+320/375/414/768/1440/1920 pixels and downloaded each private evidence object.
+Anonymous access returned 401. The local preview requires the bundled Node
+runtime for Miniflare stream transfer; Bun's Node shim failed artifact downloads.
+This was a preview runtime issue, resolved without changing streaming downloads.
+
+Validation passed: 227 application tests plus the new isolated native signing
+regression (228 together), 10 signer tests, Svelte/pipeline/signer type checks,
+and web/pipeline/signer production bundles. Signer tests verify real OpenPGP
+signatures and reject re-signed incomplete subjects, changed attempts, missing
+resolved inputs, forged owned-input classification and native code in portable
+outputs. These tests do not establish production release approval, owned input
+qualification or full-catalog rebuild coverage.

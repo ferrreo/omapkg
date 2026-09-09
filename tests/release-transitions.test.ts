@@ -12,7 +12,7 @@ const signed = () => Response.json({ signature: { key: 'signatures/database.sig'
 
 function serviceFixture() {
   const db = new TestD1(`${schema}
-    CREATE TABLE signing_intents(id TEXT PRIMARY KEY,build_id TEXT,revision_id TEXT,object_key TEXT,object_kind TEXT,artifact_sha256 TEXT,artifact_filename TEXT,manifest_sha256 TEXT,status TEXT DEFAULT 'pending',signature_key TEXT,signature_sha256 TEXT,created_at INTEGER,consumed_at INTEGER,expires_at INTEGER,artifact_size INTEGER,key_fingerprint TEXT);
+    CREATE TABLE signing_intents(build_attempt INTEGER,id TEXT PRIMARY KEY,build_id TEXT,revision_id TEXT,object_key TEXT,object_kind TEXT,artifact_sha256 TEXT,artifact_filename TEXT,manifest_sha256 TEXT,status TEXT DEFAULT 'pending',signature_key TEXT,signature_sha256 TEXT,created_at INTEGER,consumed_at INTEGER,expires_at INTEGER,artifact_size INTEGER,key_fingerprint TEXT);
     CREATE TABLE repository_snapshots(id TEXT PRIMARY KEY,architecture TEXT,channel TEXT,db_key TEXT,db_signature_key TEXT,batch_id TEXT,created_at INTEGER,active INTEGER);
     CREATE TABLE promotion_batches(id TEXT PRIMARY KEY,actor TEXT,release_ids_json TEXT,reason TEXT,created_at INTEGER);
     CREATE TABLE distribution_assertions(expected INTEGER,actual INTEGER,CHECK(expected=actual));

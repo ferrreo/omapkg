@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { enhance } from '$app/forms';
   import { onMount } from 'svelte';
   import { invalidateAll } from '$app/navigation';
   import CopyButton from '$lib/components/CopyButton.svelte';
@@ -8,9 +9,10 @@
   import StatusPill from '$lib/components/StatusPill.svelte';
   import { startVisibleRefresh } from '$lib/visible-refresh';
   import type { Build, Revision } from '$lib/model';
-  import type { PageData } from './$types';
+  import type { PageData, ActionData } from './$types';
 
   export let data: PageData;
+  export let form: ActionData;
 
   type DependencyPackage = { releaseId: string; name: string; version: string; architecture: string; filename: string; url: string; sha256: string; size: number; signatureUrl: string; signatureSha256: string };
   type DependencyPlan = { channel: 'stable' | 'dev'; publicKeyUrl: string; publicKeyFingerprint: string; packages: DependencyPackage[] };
@@ -71,10 +73,14 @@
     {#if build}
       <header class="maintainer-page__head"><div><span class="eyebrow">Build {build.id}</span><h1 id="build-title">{build.architecture} build</h1><p>{revision ? `Revision ${revision.id}` : 'Revision details are unavailable.'}</p></div><div class="release-actions"><StatusPill status={build.status} />{#if revision}<a class="button" href={`/maintain/requests/${encodeURIComponent(revision.request_id)}`}>Open request<Icon name="arrow" size={14} /></a>{/if}</div></header>
 
+      {#if form?.error}<p class="form-notice form-notice--danger" role="alert">{form.error}</p>{:else if form?.success}<p class="notice-bar" role="status">Action recorded. Signed output remains private until its release is approved.</p>{/if}
       <div class="detail-grid">
         <div class="detail-stack">
           {#if data.outputContract}
-            <section class="workbench-panel" aria-labelledby="outputs-title"><div class="workbench-panel__head"><h2 id="outputs-title">Package outputs</h2><a href={`/maintain/cohorts/${encodeURIComponent(data.outputContract.cohort.id)}`}>Cohort revision {data.outputContract.cohort.revision}</a></div><p>Every expected output must pass native validation before this build can complete.</p><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Package</th><th>Version</th><th>Content</th><th>Artifact</th></tr></thead><tbody>{#each data.outputs as output}<tr><td>{output.name}</td><td>{output.fullVersion}</td><td>{output.architecture}</td><td>{#if output.artifact}<a href={`/maintain/builds/${encodeURIComponent(build.id)}/artifact?filename=${encodeURIComponent(output.filename)}`} download={output.filename}>{output.filename}</a><div class="hash">{output.artifact.sha256}</div><span class="timestamp">{formatBytes(output.artifact.size)} · uploaded</span>{:else}<span class="timestamp">Awaiting output</span>{/if}</td></tr>{/each}</tbody></table></div></section>
+            <section class="workbench-panel" aria-labelledby="outputs-title"><div class="workbench-panel__head"><h2 id="outputs-title">Package outputs</h2><a href={`/maintain/cohorts/${encodeURIComponent(data.outputContract.cohort.id)}`}>Cohort revision {data.outputContract.cohort.revision}</a></div><p>Every expected output must pass native validation before this build can complete.</p><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Package</th><th>Version</th><th>Content</th><th>Artifact</th><th>Signature</th></tr></thead><tbody>{#each data.outputs as output}<tr><td>{output.name}</td><td>{output.fullVersion}</td><td>{output.architecture}</td><td>{#if output.artifact}<a href={`/maintain/builds/${encodeURIComponent(build.id)}/artifact?filename=${encodeURIComponent(output.filename)}`} download={output.filename}>{output.filename}</a><div class="hash">{output.artifact.sha256}</div><span class="timestamp">{formatBytes(output.artifact.size)} · uploaded</span>{:else}<span class="timestamp">Awaiting output</span>{/if}</td><td>{#if output.signature}<a href={`/maintain/builds/${encodeURIComponent(build.id)}/artifact?filename=${encodeURIComponent(output.filename)}&signature=1`}>Download signature</a><div class="timestamp">Signed · private</div>{:else if data.canSign}<form method="POST" action="?/sign" use:enhance><input type="hidden" name="attempt" value={build.attempt} /><input type="hidden" name="filename" value={output.filename} /><button class="button" type="submit" aria-label={`Sign private output ${output.name}`}>Sign private output</button></form>{:else}<span class="timestamp">Awaiting signing</span>{/if}</td></tr>{/each}</tbody></table></div>
+              <p>Native build statement covers every output and installation group. Current inputs are from shadow operation; signing does not qualify an owned release.</p>
+              {#if data.statementSigned}<a class="button" href={`/maintain/builds/${encodeURIComponent(build.id)}/artifact?filename=attestation.json`}>Download statement</a> <a class="button" href={`/maintain/builds/${encodeURIComponent(build.id)}/artifact?filename=attestation.json&signature=1`}>Statement signature</a>{:else if data.canSign}<form method="POST" action="?/sign" use:enhance><input type="hidden" name="attempt" value={build.attempt} /><input type="hidden" name="filename" value="attestation.json" /><button class="button" type="submit">Sign native build statement</button></form>{/if}
+            </section>
           {/if}
           <section class="workbench-panel" aria-labelledby="logs-title"><div class="workbench-panel__head"><h2 id="logs-title">Live worker log</h2><span class="timestamp">{build.status === 'queued' || build.status === 'leased' ? 'refreshing every 5s' : `${logs.length} chunks`}</span></div>{#if logs.length}<pre class="code-block code-block--logs">{logText}</pre>{:else}<EmptyState title="No log chunks yet." description="A worker appends bounded, ordered output while the lease is active." icon="terminal" />{/if}</section>
 
