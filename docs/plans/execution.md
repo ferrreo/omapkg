@@ -428,3 +428,39 @@ source-aware signing, per-target source/caches for the complete catalog and the
 remaining release/client/ABI/system/cutover phases are still in progress. None of
 these captures constitutes production admission, source signature approval or
 full-plan completion.
+
+### Preserved revision review path
+
+Original captures can now become immutable review revisions without recipe
+rendering. Every admitted target needs a current source bundle backed by signed
+native inspection. The draft binds original files and Git modes, exact full
+version, target dependencies, retained sources, smoke commands and commit source
+time. Git review sidecars use a separate collision-checked directory. The complete
+canonical package subtree is checked for missing/extra files, mode changes and
+raw-byte SHA-256 mismatches, including auxiliary hooks, symlinks and binary patches.
+
+Import reserves the exact draft, records upload failures, resumes its existing Git
+branch and allows cancellation. Model generation cannot overwrite imported
+requests or forge preservation evidence. Source/catalog/worker authority changes
+block persistence and approval; persistence now atomically checks the generation
+before inserting a revision. Old workers cannot claim preserved revisions.
+
+Local acceptance used actual captured asdcontrol bytes and its earlier signed
+native x86 inspection. Browser tests exercised missing ARM sources, saved draft
+retention when GitHub credentials are absent, identical retry, cancellation,
+anonymous denial and 320–1920 px layouts without JavaScript errors. Local-only
+catalog reviews and an explicit test architecture exception enabled this UI
+exercise; all resulting upload reservations were cancelled. Nothing was admitted,
+merged, approved for build or published in production. Protocol tests independently
+covered two target inspections, full-version preservation, original auxiliary
+bytes/modes, failed-upload recovery, exact revision persistence and source revocation.
+
+Native worker materialization, source-bound leases and signing/verifier integration
+remain required before a preserved build can complete. Full-catalog source capture,
+native target qualification and production migration also remain open.
+
+Validation for this slice: 237 application tests / 1,600 assertions, clean Svelte
+and pipeline type checks, production web build, and the source/import authority
+views at D1 expression depth 40. Mobile review history is collapsed so failed or
+cancelled attempts do not obscure current prerequisites. The local asdcontrol
+catalog was restored to both primary targets after browser validation.

@@ -4,6 +4,11 @@ import { revisionRecipePolicy } from './recipe-policy';
 import { revisionPackagePath } from '../../src/lib/server/catalog-recipe';
 import { createHash } from 'node:crypto';
 import { packagePath, recipeFilePath, type Collection } from '../../src/lib/distribution';
+import { preservedRecipe } from '../../src/lib/preserved-recipe';
+import { getRecipeCapture, recipeCaptureBytes } from '../../src/lib/server/recipe-captures';
+import { verifyRecipeCapture } from '../../src/lib/recipe-capture';
+import { reviewedPackageVersion } from '../../src/lib/server/build-outputs';
+import type { Revision } from '../../src/lib/model';
 
 interface GithubRepository {
   default_branch: string;
@@ -46,7 +51,7 @@ export async function commitRecipeTree(env: FactoryEnv, branch: string, parent: 
   const api = `https://api.github.com/repos/${repo}/git`;
   if (!/^[a-f0-9]{40}$/.test(parent) || !files.length || files.length > 4096 ||
       new Set(files.map((file) => file.path)).size !== files.length ||
-      files.reduce((size, file) => size + file.bytes.length, 0) > 32 * 1024 * 1024) throw new Error('Invalid or oversized recipe tree');
+      files.reduce((size, file) => size + file.bytes.length, 0) > 36 * 1024 * 1024) throw new Error('Invalid or oversized recipe tree');
   if (!roots.length || new Set(roots).size !== roots.length || roots.some((root) => roots.some((other) => root !== other && root.startsWith(other + '/')))) throw new Error('Recipe directories overlap');
   for (const root of roots) {
     const parts = root.split('/');
@@ -95,16 +100,38 @@ export async function commitRecipeTree(env: FactoryEnv, branch: string, parent: 
   return commit.sha;
 }
 
-export function factoryRecipeFiles(draft: FactoryRevisionDraft): RecipeTreeFile[] {
+type RecipeFileDraft = { manifest: Record<string, unknown> & { packageName: string };
+  revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json' | 'public_recipe' | 'recipe' | 'lint_json'> };
+
+export function factoryRecipeFiles(draft: RecipeFileDraft, originals?: RecipeTreeFile[]): RecipeTreeFile[] {
   const path = revisionPackagePath(draft.manifest.packageName, draft.revision.sbom_json);
+  const preserved = preservedRecipe(draft.revision);
+  if (Boolean(preserved) !== Boolean(originals)) throw new Error('Preserved revisions require the complete original recipe tree');
+  const metadata = preserved ? preserved.metadataDirectory + '/' : '';
   const contents: Record<string, string> = {
-    PKGBUILD: draft.revision.public_recipe ?? draft.revision.recipe,
-    'opr-manifest.json': JSON.stringify(draft.manifest, null, 2) + '\n',
-    'opr-lint.json': draft.revision.lint_json + '\n',
-    'opr-sbom.json': draft.revision.sbom_json + '\n',
+    ...(!preserved ? { PKGBUILD: draft.revision.public_recipe ?? draft.revision.recipe } : {}),
+    [metadata + 'opr-manifest.json']: JSON.stringify(draft.manifest, null, 2) + '\n',
+    [metadata + 'opr-lint.json']: draft.revision.lint_json + '\n',
+    [metadata + 'opr-sbom.json']: draft.revision.sbom_json + '\n',
   };
   if (draft.revision.public_recipe && draft.revision.public_recipe !== draft.revision.recipe) contents['opr-build.PKGBUILD'] = draft.revision.recipe;
-  return Object.entries(contents).map(([name, content]) => ({ path: `${path}/${name}`, bytes: new TextEncoder().encode(content) }));
+  return [...(originals ?? []), ...Object.entries(contents).map(([name, content]) => ({ path: `${path}/${name}`, bytes: new TextEncoder().encode(content) }))];
+}
+
+export async function revisionRecipeFiles(env: FactoryEnv, draft: RecipeFileDraft): Promise<RecipeTreeFile[]> {
+  const preserved = preservedRecipe(draft.revision);
+  if (!preserved) return factoryRecipeFiles(draft);
+  if (draft.revision.public_recipe != null) throw new Error('A preserved recipe cannot replace original public bytes');
+  const capture = await getRecipeCapture(env, preserved.capture.sha256);
+  if (capture.reference.size !== preserved.capture.size || capture.manifest.pkgbase !== draft.manifest.packageName) throw new Error('Recipe capture differs from reviewed scope');
+  const inspected = await verifyRecipeCapture(capture.manifest, (ref) => recipeCaptureBytes(env, ref));
+  if (new TextDecoder('utf-8', { fatal: true }).decode(inspected.get('PKGBUILD')) !== draft.revision.recipe) throw new Error('Preserved PKGBUILD differs from reviewed bytes');
+  const path = revisionPackagePath(draft.manifest.packageName, draft.revision.sbom_json), originals = [];
+  for (const file of capture.manifest.files) {
+    if (file.path === preserved.metadataDirectory || file.path.startsWith(preserved.metadataDirectory + '/')) throw new Error('Review metadata collides with original recipe files');
+    originals.push({ path: `${path}/${file.path}`, bytes: await recipeCaptureBytes(env, file.object), mode: file.mode });
+  }
+  return factoryRecipeFiles(draft, originals);
 }
 
 export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRevisionDraft): Promise<{ url: string; commitSha: string; branch: string }> {
@@ -127,8 +154,10 @@ export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRe
     headSha = baseRef.object.sha;
   }
 
-  headSha = await commitRecipeTree(env, branch, headSha, factoryRecipeFiles(draft),
-    `Update ${draft.manifest.packageName} ${draft.manifest.version}-${draft.manifest.pkgrel}`,
+  const files = await revisionRecipeFiles(env, draft), preserved = preservedRecipe(draft.revision);
+  const version = reviewedPackageVersion(draft.revision);
+  headSha = await commitRecipeTree(env, branch, headSha, files,
+    `Update ${draft.manifest.packageName} ${version}`,
     [revisionPackagePath(draft.manifest.packageName, draft.revision.sbom_json)]);
 
   const openPulls = await github<GithubPullRequest[]>(env, `${api}/repos/${repo}/pulls?state=open&head=${encodeURIComponent(repo.split('/')[0] + ':' + branch)}`);
@@ -141,11 +170,11 @@ export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRe
   const pull = await github<GithubPullRequest>(env, `${api}/repos/${repo}/pulls`, {
     method: 'POST',
     body: JSON.stringify({
-      title: `factory: ${draft.manifest.packageName} ${draft.manifest.version}-${draft.manifest.pkgrel}`,
+      title: `${preserved ? 'import' : 'factory'}: ${draft.manifest.packageName} ${version}`,
       head: branch,
       base,
       body: [
-        'Generated by OPR factory. Maintainer review is required before build.',
+        preserved ? 'Preserves the complete captured recipe directory, including file bytes, Git modes, hooks and patches. Independent recipe and security review is required before build.' : 'Generated by OPR factory. Maintainer review is required before build.',
         '',
         `- request: ${draft.manifest.requestId}`,
         `- recipe SHA-256: ${draft.revision.recipe_sha256}`,
@@ -153,6 +182,8 @@ export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRe
         `- source kind: ${draft.manifest.sourceKind}`,
         `- surface: ${draft.manifest.surface}`,
         `- recipe mode: ${revisionRecipePolicy(draft.revision.sbom_json).mode}`,
+        ...(preserved ? [`- original capture SHA-256: ${preserved.capture.sha256}`, `- review metadata: ${preserved.metadataDirectory}/`,
+          ...Object.entries(preserved.sources).map(([target, ref]) => `- ${target} source bundle SHA-256: ${ref.sha256}`)] : []),
         ...(revisionRecipePolicy(draft.revision.sbom_json).mode === 'custom-shell' ? ['- Custom shell: review preparation, build, packaging, public recipe, and smoke commands explicitly.'] : []),
         ...(draft.revision.public_recipe_sha256 ? [`- public recipe SHA-256: ${draft.revision.public_recipe_sha256}`] : []),
       ].join('\n'),

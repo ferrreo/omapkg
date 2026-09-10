@@ -2,7 +2,7 @@ import type { Approval, Architecture, BuildImageMap, Revision } from '../../src/
 import { audit, now, sha256 } from '../../src/lib/server/db';
 import { manifestDigest, parseDeclaredLicense } from '../../src/lib/server/policy';
 import { encodeOprEvidence } from '../../src/lib/server/sbom';
-import type { FactoryCandidate, FactoryEnv, FactoryRevisionDraft } from './types';
+import type { FactoryCandidate, FactoryEnv, FactoryRevisionDraft, RecipeLint } from './types';
 import {
   assertCommand,
   assertImageDigest,
@@ -20,6 +20,7 @@ import { TEMPLATE_DEFINITIONS, templateCommands } from './recipe-template';
 import { validateRecipePolicy } from './recipe-policy';
 import { runtimeExceptions } from '../../src/lib/server/runtime-evidence';
 import { revisionPackagePath } from '../../src/lib/server/catalog-recipe';
+import { reviewedPackageVersion } from '../../src/lib/server/build-outputs';
 
 function assertSourceName(value: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,150}$/.test(value) || value === '.' || value === '..') {
@@ -178,7 +179,12 @@ export async function createFactoryRevision(input: FactoryCandidate, repairAttem
   const recipe = renderRecipe(candidate);
   const lint = lintRecipe(recipe, repairAttempts);
   if (!lint.passed) throw new Error(`generated recipe failed lint: ${lint.checks.filter((check) => !check.passed).map((check) => check.name).join(', ')}`);
+  // A model cannot supply the authority reserved for verified original recipe imports.
+  return assembleRecipeRevision({ ...candidate, sbom: { ...candidate.sbom, preservedRecipe: undefined } }, recipe, lint, revisionId);
+}
 
+/** Assemble an already validated recipe without changing its bytes. */
+export async function assembleRecipeRevision(candidate: FactoryCandidate, recipe: string, lint: RecipeLint, revisionId?: string): Promise<FactoryRevisionDraft> {
   const publicRecipeSha256 = candidate.publicRecipe == null ? null : await sha256(candidate.publicRecipe);
   const manifest = buildManifest(candidate, publicRecipeSha256);
   const stableRevisionId = revisionId ?? crypto.randomUUID();
@@ -226,6 +232,7 @@ export async function createFactoryRevision(input: FactoryCandidate, repairAttem
 }
 
 function standardSbom(candidate: FactoryCandidate, revisionId: string, createdAt: number): Record<string, unknown> {
+  const fullVersion = reviewedPackageVersion({ version: candidate.version, pkgrel: candidate.pkgrel, sbom_json: JSON.stringify({ oprEvidence: candidate.sbom ?? {} }) });
   const packages: Array<Record<string, unknown>> = [];
   const relationships: Array<Record<string, string>> = [];
   type PackageChecksum = { algorithm: 'SHA1' | 'SHA256' | 'SHA512'; checksumValue: string };
@@ -289,7 +296,7 @@ function standardSbom(candidate: FactoryCandidate, revisionId: string, createdAt
 
   const mainId = addPackage({
     name: candidate.request.name,
-    version: `${candidate.version}-${candidate.pkgrel ?? 1}`,
+    version: fullVersion,
     downloadLocation: 'NOASSERTION',
     license: candidate.license,
   });
@@ -349,7 +356,7 @@ function standardSbom(candidate: FactoryCandidate, revisionId: string, createdAt
     spdxVersion: 'SPDX-2.3',
     dataLicense: 'CC0-1.0',
     SPDXID: 'SPDXRef-DOCUMENT',
-    name: `${candidate.request.name}-${candidate.version}-${candidate.pkgrel ?? 1}`,
+    name: `${candidate.request.name}-${fullVersion}`,
     documentNamespace: `https://omapkg.example/spdx/${encodeURIComponent(candidate.request.id)}/${encodeURIComponent(revisionId)}`,
     creationInfo: { created: new Date(createdAt * 1_000).toISOString(), creators: ['Tool: omapkg-factory-0.1.0'] },
     documentDescribes: [mainId],
@@ -388,6 +395,9 @@ export async function persistFactoryRevision(
   }
 
   await env.DB.batch([
+    env.DB.prepare("UPDATE requests SET status='review',updated_at=? WHERE id=? AND status='generating' AND factory_run_id=?")
+      .bind(revision.created_at, revision.request_id, generationId),
+    env.DB.prepare('INSERT INTO distribution_assertions(expected,actual) VALUES(1,changes())'),
     env.DB.prepare(`INSERT INTO revisions (
       id, request_id, version, recipe, recipe_sha256, public_recipe, public_recipe_sha256, manifest_sha256, sources_json,
       dependencies_json, make_dependencies_json, smoke_commands_json, architectures_json, build_images_json, pkgrel, source_date_epoch,
@@ -402,8 +412,6 @@ export async function persistFactoryRevision(
         revision.sbom_json, revision.lint_json, revision.upstream_commit, revision.pr_url,
         revision.commit_sha, revision.created_at,
       ),
-    env.DB.prepare("UPDATE requests SET status = 'review', updated_at = ? WHERE id = ? AND status IN ('pending', 'generating', 'review')")
-      .bind(revision.created_at, revision.request_id),
     audit(env.DB, actor, 'factory_revision_created', revision.id, {
       requestId: revision.request_id,
       manifestSha256: revision.manifest_sha256,

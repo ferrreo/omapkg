@@ -308,7 +308,7 @@ function selectBuilderImages(images: BuildImageMap, requested: readonly Architec
 }
 
 async function requestForFactory(env: FactoryEnv, requestId: string, generationId: string): Promise<FactoryRequest> {
-  const row = await env.DB.prepare(`SELECT id,name,description,upstream_url,source_kind,area,declared_license,upstream_ref,factory_run_id
+  const row = await env.DB.prepare(`SELECT *
     FROM requests WHERE id=?`).bind(requestId).first<{
     id: string;
     name: string;
@@ -319,8 +319,10 @@ async function requestForFactory(env: FactoryEnv, requestId: string, generationI
     declared_license: string;
     upstream_ref: string | null;
     factory_run_id: string | null;
+    preserved_import_id?: string | null;
   }>();
   if (!row) throw new Error('package request not found');
+  if (row.preserved_import_id) throw new Error('Original recipe imports cannot enter factory generation');
   if (row.factory_run_id !== generationId) throw new Error('factory run is no longer current');
   const regenerationEvents = await env.DB.prepare(`SELECT detail FROM audit_events
     WHERE action='factory.regenerated' AND target=? ORDER BY id DESC LIMIT 20`).bind(requestId).all<{ detail: string | null }>();

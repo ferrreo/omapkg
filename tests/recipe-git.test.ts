@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { commitRecipeTree } from '../services/pipeline/github-pr';
 import { revisionPackagePath, recipeGitUrl } from '../src/lib/server/catalog-recipe';
 import { encodeOprEvidence } from '../src/lib/server/sbom';
+import { checkRecipeTree } from '../services/pipeline/integrity';
 
 test('recipe paths bind immutable catalog evidence and keep historical paths', () => {
   const sbom = (collection: unknown, pkgbase = 'demo') => JSON.stringify({ comment: encodeOprEvidence({ catalogPath: { pkgbase, collection } }) });
@@ -12,6 +13,47 @@ test('recipe paths bind immutable catalog evidence and keep historical paths', (
   expect(() => revisionPackagePath('demo', sbom('../core'))).toThrow();
   expect(() => revisionPackagePath('demo', sbom('core', 'another'))).toThrow();
   expect(() => revisionPackagePath('../demo', '{}')).toThrow();
+});
+
+test('complete recipe integrity checks auxiliary bytes, executable modes, extra files and truncated trees', async () => {
+  const root = 'packages/omarchy/demo', commit = 'a'.repeat(40), hashes = ['b', 'c', 'd', 'e'].map((value) => value.repeat(40));
+  const files = [{ path: `${root}/PKGBUILD`, bytes: new TextEncoder().encode('pkgname=demo\n'), mode: '100644' as const },
+    { path: `${root}/hooks/install`, bytes: new Uint8Array([0, 128, 255]), mode: '100755' as const },
+    { path: `${root}/link`, bytes: new TextEncoder().encode('hooks/install'), mode: '120000' as const },
+    { path: `${root}/empty`, bytes: new Uint8Array(), mode: '100644' as const }];
+  const blobHash = (bytes: Uint8Array) => createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  let changedMode = false, changedBytes = false, extra = false, truncated = false;
+  const paths: string[] = [], previous = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input)), path = url.pathname.split('/git/')[1]; paths.push(path + url.search);
+    if (path === `commits/${commit}`) return Response.json({ tree: { sha: hashes[0] } });
+    const level = hashes.indexOf(path.split('/')[1]);
+    if (path.startsWith('trees/') && level < 3) return Response.json({ sha: hashes[level], tree: [{ path: root.split('/')[level], mode: '040000', type: 'tree', sha: hashes[level + 1] }] });
+    if (path === `trees/${hashes[3]}`) return Response.json({ sha: hashes[3], truncated, tree: [
+      { path: 'hooks', type: 'tree', mode: '040000', sha: 'f'.repeat(40) },
+      ...files.map((file) => ({ path: file.path.slice(root.length + 1), type: 'blob', mode: changedMode && file.path.endsWith('/install') ? '100644' : file.mode, sha: blobHash(file.bytes), size: file.bytes.length })),
+      ...(extra ? [{ path: 'unexpected.install', type: 'blob', mode: '100755', sha: '0'.repeat(40), size: 10 }] : []),
+    ] });
+    if (path.startsWith('blobs/')) {
+      expect(new Headers(init?.headers).get('Accept')).toBe('application/vnd.github.raw+json');
+      const file = files.find((file) => blobHash(file.bytes) === path.slice(6))!;
+      return new Response(changedBytes && file.path.endsWith('/install') ? new Uint8Array([0, 128, 254]) : file.bytes);
+    }
+    throw new Error(`Unexpected integrity request: ${path}`);
+  }) as typeof fetch;
+  const env = { DB: {} as D1Database, ARTIFACTS: {} as R2Bucket, GITHUB_REPOSITORY: 'owner/recipes', GITHUB_REPO_TOKEN: 'github_pat_test' };
+  try {
+    expect(await checkRecipeTree(env, 'owner/recipes', root, commit, files)).toEqual({ paths: [], reason: '' });
+    expect(paths.filter((path) => path.includes('?recursive='))).toEqual([`trees/${hashes[3]}?recursive=1`]);
+    changedMode = true;
+    expect((await checkRecipeTree(env, 'owner/recipes', root, commit, files)).paths).toEqual([`${root}/hooks/install`]);
+    changedMode = false; changedBytes = true;
+    expect((await checkRecipeTree(env, 'owner/recipes', root, commit, files)).reason).toContain('hash mismatch');
+    changedBytes = false; extra = true;
+    expect((await checkRecipeTree(env, 'owner/recipes', root, commit, files)).paths).toEqual([`${root}/unexpected.install`]);
+    extra = false; truncated = true;
+    await expect(checkRecipeTree(env, 'owner/recipes', root, commit, files)).rejects.toThrow('incomplete');
+  } finally { globalThis.fetch = previous; }
 });
 
 test('recipe trees preserve bytes, commit coupled files once, and retry without extra commits', async () => {

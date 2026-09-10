@@ -8,6 +8,10 @@ import { error } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import type { Srcinfo } from '$lib/srcinfo';
 import { recipeSources } from '$lib/recipe-sources';
+import { preservedCatalog } from '../../../../../services/pipeline/preserved-revision';
+import { importPreservedRecipe, resumePreservedImport, cancelPreservedImport } from '$lib/server/preserved-imports';
+import type { Architecture } from '$lib/model';
+import { PolicyError } from '$lib/server/policy';
 
 export const load: PageServerLoad = async (event) => {
   const actor = maintainer(event), env = environment(event), detail = await getRecipeCapture(env, event.params.digest);
@@ -50,11 +54,22 @@ export const load: PageServerLoad = async (event) => {
     mappings.push({ ...link, comparison: inspection ? compareRecipeMetadata(inspection.metadata, entries) : JSON.parse(link.comparison_json) as RecipeComparison,
       inspected: Boolean(inspection), target: entries[0].target });
   }
+  let importTargets: Architecture[] = [], importBlocked: string | null = null;
+  try { importTargets = (await preservedCatalog(env.DB, detail.manifest.pkgbase)).policy.architectures; }
+  catch (cause) { if (cause instanceof PolicyError) importBlocked = cause.message; else throw cause; }
+  const recipeImports = await query<{ id: string; request_id: string; status: string; reason: string; pr_url: string | null; current: number }>(env.DB,
+    `SELECT i.id,i.request_id,i.reason,q.status,r.pr_url,EXISTS(SELECT 1 FROM current_preserved_recipe_imports current WHERE current.id=i.id) AS current
+      FROM preserved_recipe_imports i JOIN requests q ON q.id=i.request_id LEFT JOIN revisions r ON r.id=i.revision_id
+      WHERE i.capture_sha256=? ORDER BY i.created_at DESC,i.id LIMIT 50`, event.params.digest);
   return { ...detail, selected, preview, canInspect, images: images.filter((image) => image.enabled === 1),
-    inspections: inspected, attempts, links: mappings, sourceBundles };
+    inspections: inspected, attempts, links: mappings, sourceBundles, importTargets, importBlocked, recipeImports };
 };
 
 export const actions: Actions = {
   inspect: (event) => formAction(event, (form) => requestRecipeInspection(environment(event), event.locals.actor, event.params.digest, field(form, 'imageId'), field(form, 'reason'))),
   cancel: (event) => formAction(event, (form) => cancelRecipeInspection(environment(event).DB, event.locals.actor, event.params.digest, field(form, 'jobId'), field(form, 'reason'))),
+  importRecipe: (event) => formAction(event, (form) => importPreservedRecipe(environment(event), event.locals.actor, event.params.digest,
+    form.getAll('bundle').map(String), field(form, 'smokeCommands').split('\n').map((line) => line.trim()).filter(Boolean), field(form, 'reason'))),
+  resumeImport: (event) => formAction(event, (form) => resumePreservedImport(environment(event), event.locals.actor, event.params.digest, field(form, 'importId'))),
+  cancelImport: (event) => formAction(event, (form) => cancelPreservedImport(environment(event).DB, event.locals.actor, event.params.digest, field(form, 'importId'), field(form, 'reason'))),
 };

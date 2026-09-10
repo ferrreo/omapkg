@@ -12,7 +12,7 @@ import { beginCatalogImport, appendCatalogImport, sealCatalogImport } from '../s
 import type { ImportEntry, ImportManifest } from '../src/lib/imports';
 import { sha256 } from '../src/lib/server/db';
 import { TestD1, asD1 } from './d1';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { requestRecipeInspection, claimRecipeInspection, requireRecipeInspectionLease, recipeInspectionObject, completeRecipeInspection, listRecipeInspections } from '../src/lib/server/recipe-inspections';
 import { proposeCatalogPackage, approveCatalogPackage } from '../src/lib/server/catalog-ownership';
 import { registerBuildImage, setBuildImageEnabled } from '../src/lib/server/build-images';
@@ -21,6 +21,13 @@ import type { WorkerMetadata } from '../src/lib/server/worker-protocol';
 import { POST as inspectionInput } from '../src/routes/api/worker/inspections/[id]/inputs/[digest]/+server';
 import { parseRecipeSourceBundle, recipeSources } from '../src/lib/recipe-sources';
 import { recipeSourcePlan, retainRecipeSources } from '../src/lib/server/recipe-source-plans';
+import { reservePreservedImport, resumePreservedImport, assertPreservedImportCurrent } from '../src/lib/server/preserved-imports';
+import { revisionRecipeFiles } from '../services/pipeline/github-pr';
+import type { FactoryRevisionDraft } from '../services/pipeline/types';
+import { validateRevision } from '../src/lib/server/policy';
+import { reviewedPackageVersion } from '../src/lib/server/build-outputs';
+import { startFactory } from '../src/lib/server/requests';
+import type { Env } from '../src/lib/server/env';
 
 const metadata = `pkgbase = demo
 \tpkgver = 1.4
@@ -68,6 +75,8 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     writeFileSync(join(repo, 'recipe/PKGBUILD'), `pkgname=demo\npkgver=1.4\npkgrel=3.2\ntouch '${root}/MUST_NOT_EXECUTE'\n`);
     writeFileSync(join(repo, 'recipe/.SRCINFO'), metadata);
     writeFileSync(join(repo, 'recipe/demo.install'), 'post_install() { true; }\n');
+    writeFileSync(join(repo, 'recipe/opr-manifest.json'), '{"upstream":"must remain byte-for-byte"}\n');
+    writeFileSync(join(repo, 'recipe/.omarchy/update'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     writeFileSync(join(repo, 'recipe/empty'), '');
     writeFileSync(join(repo, 'recipe/Notes with spaces.md'), 'Original notes.\n');
     writeFileSync(join(repo, 'recipe/fix.patch'), new Uint8Array([0, 128, 255]));
@@ -209,11 +218,85 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     expect(() => parseRecipeSourceBundle({ ...sourceBundle, caches: [{ kind: 'go', object: sourceObject, entries: 200001, expandedBytes: 10 }] })).toThrow();
     expect(db.prepare('SELECT COUNT(*) AS n FROM recipe_inspection_results').first<{ n: number }>()).toEqual({ n: 1 });
     for (const table of ['approvals', 'builds']) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>()).toEqual({ n: 0 });
+    await expect(reservePreservedImport(env, actor, ref.sha256, { x86_64: sourceRef }, ['test -f /usr/share/doc/demo/README'], 'Preserve inspected fixture.')).rejects.toThrow('every admitted catalog target');
+    const armImage = await registerBuildImage(env, { id: 'github:3', role: 'admin', areas: ['system'] }, { label: 'ARM protocol fixture', image_ref: imageRef.replace('d'.repeat(64), 'e'.repeat(64)), architecture: 'aarch64', mirror: 'custom' });
+    await setBuildImageEnabled(env, { id: 'github:3', role: 'admin', areas: ['system'] }, armImage.id, true);
+    const armQueued = await requestRecipeInspection(env, actor, ref.sha256, armImage.id, 'Native ARM protocol fixture.');
+    const armKeys = generateKeyPairSync('ed25519');
+    const armPublicKey = Buffer.from(armKeys.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)).toString('base64');
+    db.prepare("INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,accepting_jobs) VALUES('inspection-arm','ARM protocol fixture','aarch64',?,'active',?,1)").bind(armPublicKey, Math.floor(Date.now() / 1000)).run();
+    const armWorker = db.prepare("SELECT * FROM workers WHERE id='inspection-arm'").first<Worker>()!;
+    const armLease = (await claimRecipeInspection(env.DB, armWorker, workerMetadata))!;
+    const armReport = JSON.stringify({ ...report, jobId: armQueued.id, attempt: armLease.attempt, architecture: 'aarch64', imageRef: armLease.imageRef,
+      host: { ...report.host, architecture: 'aarch64' }, srcinfo: metadata.replace('makedepends = cc', 'makedepends = cc\n\tmakedepends_aarch64 = arm-tool') });
+    const armReportValue = JSON.parse(armReport); armReportValue.srcinfoSha256 = await sha256(armReportValue.srcinfo);
+    const armSigned = JSON.stringify(armReportValue);
+    await completeRecipeInspection(env.DB, armWorker, armLease.id, { leaseToken: armLease.leaseToken, report: armSigned, signature: Buffer.from(sign(null, Buffer.from(armSigned), armKeys.privateKey)).toString('base64') });
+    const armPlan = await recipeSourcePlan(env, ref.sha256, armLease.id, armLease.attempt);
+    const armRef = await storeBundle({ ...sourceBundle, plan: await storeBundle(armPlan) });
+    await retainRecipeSources(env, actor, ref.sha256, armRef, 'Retain ARM protocol source bundle.');
+    const sources = { x86_64: sourceRef, aarch64: armRef }, commands = ['test -f /usr/share/doc/demo/README'];
+    const imported = await reservePreservedImport(env, actor, ref.sha256, sources, commands, 'Preserve inspected fixture.');
+    expect(await reservePreservedImport(env, actor, ref.sha256, sources, commands, 'Preserve inspected fixture.')).toEqual(imported);
+    const draft = JSON.parse(imported.draft_json) as FactoryRevisionDraft;
+    expect(draft.revision.recipe).toBe(readFileSync(join(repo, 'recipe/PKGBUILD'), 'utf8'));
+    expect(draft.revision.sources_json).toBe('[]');
+    expect(reviewedPackageVersion(draft.revision)).toBe('2:1.4-3.2');
+    expect(draft.revision.source_date_epoch).toBe(Number(git('show', '-s', '--format=%ct', commit)));
+    expect(JSON.parse(imported.evidence_json).dependencies).toEqual({ x86_64: { runtime: ['glibc'], build: ['cc'] }, aarch64: { runtime: ['glibc'], build: ['arm-tool', 'cc'] } });
+    const treeFiles = await revisionRecipeFiles(env, draft), rootPath = 'packages/omapkg/demo/';
+    expect(treeFiles).toHaveLength(manifest.files.length + 3);
+    for (const file of manifest.files) {
+      const retainedFile = treeFiles.find((item) => item.path === rootPath + file.path)!;
+      expect(retainedFile.mode).toBe(file.mode);
+      expect(await sha256(retainedFile.bytes)).toBe(file.object.sha256);
+    }
+    expect(treeFiles.filter((file) => file.path.startsWith(`${rootPath}.opr-review-${draft.revision.id}/`))).toHaveLength(3);
+    await expect(startFactory(env as Env, actor, imported.request_id, 'Must not invoke a model.')).rejects.toThrow('cannot be regenerated');
+    expect(() => db.prepare('UPDATE requests SET factory_run_id=? WHERE id=?').bind('another-generation', imported.request_id).run()).toThrow('different factory generation');
+    const previousFetch = globalThis.fetch;
+    let failUpload = true, head = '1'.repeat(40), prCalls = 0, fetchCalls = 0;
+    globalThis.fetch = (async (input, init) => {
+      fetchCalls++;
+      const path = new URL(String(input)).pathname, body = init?.body ? JSON.parse(String(init.body)) : null;
+      if (path === '/repos/example/recipes') return Response.json({ default_branch: 'main' });
+      if (path.includes('/git/ref/heads/')) return Response.json({ object: { sha: head } });
+      if (path.endsWith(`/git/commits/${head}`)) return Response.json({ tree: { sha: head === '1'.repeat(40) ? '2'.repeat(40) : '3'.repeat(40) } });
+      if (path.endsWith('/git/blobs')) {
+        if (failUpload) return new Response('upload unavailable', { status: 503 });
+        const bytes = Buffer.from(body.content, 'base64');
+        return Response.json({ sha: createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') }, { status: 201 });
+      }
+      if (path.endsWith('/git/trees')) return Response.json({ sha: '3'.repeat(40) }, { status: 201 });
+      if (path.endsWith('/git/commits')) return Response.json({ sha: '4'.repeat(40) }, { status: 201 });
+      if (path.includes('/git/refs/heads/')) { head = body.sha; return Response.json({ object: { sha: head } }); }
+      if (path.endsWith('/pulls') && init?.method !== 'POST') return Response.json([]);
+      if (path.endsWith('/pulls')) { prCalls++; return Response.json({ html_url: 'https://github.com/example/recipes/pull/1', head: { sha: head } }, { status: 201 }); }
+      throw new Error(`Unexpected fixture Git path ${path}`);
+    }) as typeof fetch;
+    try {
+      const gitEnv = { ...env, GITHUB_REPO_TOKEN: 'github_pat_test' };
+      await expect(resumePreservedImport(gitEnv, actor, ref.sha256, imported.id)).rejects.toMatchObject({ status: 503 });
+      expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(imported.request_id).first<{ status: string }>()).toEqual({ status: 'generating' });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM revisions').first<{ n: number }>()).toEqual({ n: 0 });
+      failUpload = false;
+      const resumed = await resumePreservedImport(gitEnv, actor, ref.sha256, imported.id);
+      expect(resumed).toEqual({ requestId: imported.request_id, revisionId: imported.revision_id, prUrl: 'https://github.com/example/recipes/pull/1' });
+      const recorded = db.prepare('SELECT * FROM revisions WHERE id=?').bind(imported.revision_id).first<FactoryRevisionDraft['revision']>()!;
+      await validateRevision(recorded);
+      const calls = fetchCalls;
+      expect(await resumePreservedImport(gitEnv, actor, ref.sha256, imported.id)).toEqual(resumed);
+      expect(fetchCalls).toBe(calls); expect(prCalls).toBe(1);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM approvals').first<{ n: number }>()).toEqual({ n: 0 });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM builds').first<{ n: number }>()).toEqual({ n: 0 });
+    } finally { globalThis.fetch = previousFetch; }
+    expect(readdirSync(root)).not.toContain('MUST_NOT_EXECUTE');
     db.exec("UPDATE workers SET status='revoked' WHERE id='inspection-worker'");
-    expect(db.prepare('SELECT COUNT(*) AS n FROM current_recipe_source_bundles').first<{ n: number }>()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM current_recipe_source_bundles').first<{ n: number }>()).toEqual({ n: 1 });
+    await expect(assertPreservedImportCurrent(env.DB, draft.revision)).rejects.toThrow('authority changed');
     await expect(retainRecipeSources(env, actor, ref.sha256, sourceRef, 'Revoked inspection.')).rejects.toThrow('current successful');
     await expect(recipeSourcePlan(env, ref.sha256, second.id, second.attempt)).rejects.toThrow('current successful');
-    expect((await listRecipeInspections(env.DB, ref.sha256))[0].current).toBe(0);
+    expect((await listRecipeInspections(env.DB, ref.sha256)).find((item) => item.id === second.id)!.current).toBe(0);
     db.exec("DELETE FROM team_memberships WHERE github_id='1'");
     await expect(retainRecipeCapture(env, actor, ref, importId, 'opr-x86', 'Stale authority.')).rejects.toThrow();
 

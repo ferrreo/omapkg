@@ -79,7 +79,7 @@ export async function githubFetch(env: GitHubEnv, input: string | URL, init: Req
   const path = `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
   if (url.pathname !== path && !url.pathname.startsWith(`${path}/`)) throw new Error('GitHub API request is outside the configured repository.');
   const headers = new Headers(init.headers);
-  headers.set('Accept', 'application/vnd.github+json');
+  if (!headers.has('Accept')) headers.set('Accept', 'application/vnd.github+json');
   headers.set('Authorization', `Bearer ${await githubAccessToken(env)}`);
   headers.set('User-Agent', 'omarpkg');
   headers.set('X-GitHub-Api-Version', API_VERSION);

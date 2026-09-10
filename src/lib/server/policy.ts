@@ -1,11 +1,13 @@
 import { Schema } from 'effect';
 import { areas, type Actor, type Architecture, type Revision, type Source } from '../model';
 import { sha256 } from './db';
-import { isArchPkgver, parseArchDependency } from './arch';
+import { isArchPkgver, parseArchDependency, parseArchRelation } from './arch';
 import { normalizeRequestDescription } from './descriptions';
 import { validateRecipePolicy } from '../../../services/pipeline/recipe-policy';
 import { reviewedPackageVersion } from './build-outputs';
 import { externalPackageSource } from '../distribution';
+import { preservedRecipe } from '../preserved-recipe';
+import { canonicalJson } from '../canonical-json';
 
 export class PolicyError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -193,8 +195,11 @@ export async function validateRevision(revision: Revision) {
   if (!isArchPkgver(revision.version)) throw new PolicyError(409, 'Reviewed version is not a valid Arch pkgver; regenerate with pkgrel separate.');
   if (!legacyPinnedImage.test(revision.image_digest)) throw new PolicyError(409, 'Builder image must be pinned by digest.');
   if (!revision.pr_url || !revision.commit_sha) throw new PolicyError(409, 'A generated GitHub pull request is required before review.');
+  let preserved: ReturnType<typeof preservedRecipe>;
+  try { preserved = preservedRecipe(revision); }
+  catch (cause) { throw new PolicyError(409, cause instanceof Error ? cause.message : 'Invalid preserved recipe.'); }
   const sources = manifestArray(revision.sources_json, 'Source manifest');
-  if (!sources.length || sources.some((value) => {
+  if ((!sources.length && !preserved) || sources.some((value) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return true;
     const source = value as Partial<Source>;
     return typeof source.url !== 'string' || !/^[a-f0-9]{64}$/.test(source.sha256 ?? '') || !/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,150}$/.test(source.name ?? '');
@@ -202,16 +207,21 @@ export async function validateRevision(revision: Revision) {
     throw new PolicyError(409, 'Every source needs a safe filename and pinned SHA-256.');
   }
   for (const source of sources as Source[]) publicSourceURL(source.url);
+  if (preserved && (sources.length || publicRecipe !== null)) throw new PolicyError(409, 'Preserved recipes use original bytes and retained source bundles.');
+  const dependencyParser = preserved ? parseArchRelation : parseArchDependency;
   const dependencies = manifestArray(revision.dependencies_json, 'Dependency manifest');
-  if (dependencies.some((value) => typeof value !== 'string' || value.length > 256 || !parseArchDependency(value))) throw new PolicyError(409, 'Dependency manifest is invalid.');
+  if (dependencies.some((value) => typeof value !== 'string' || value.length > 256 || !dependencyParser(value))) throw new PolicyError(409, 'Dependency manifest is invalid.');
   const makeDependencies = manifestArray(revision.make_dependencies_json ?? '[]', 'Build dependency manifest');
-  if (makeDependencies.some((value) => typeof value !== 'string' || value.length > 256 || !parseArchDependency(value))) throw new PolicyError(409, 'Build dependency manifest is invalid.');
+  if (makeDependencies.some((value) => typeof value !== 'string' || value.length > 256 || !dependencyParser(value))) throw new PolicyError(409, 'Build dependency manifest is invalid.');
+  if (preserved && (canonicalJson(dependencies) !== canonicalJson([...new Set(Object.values(preserved.dependencies).flatMap((value) => value!.runtime))].sort()) ||
+      canonicalJson(makeDependencies) !== canonicalJson([...new Set(Object.values(preserved.dependencies).flatMap((value) => value!.build))].sort()))) throw new PolicyError(409, 'Preserved dependency scope differs from reviewed native targets.');
   if (revision.description !== undefined && revision.description !== null &&
       (!revision.description.trim() || revision.description.length > 160 || /[\u0000\r\n]/.test(revision.description))) {
     throw new PolicyError(409, 'Final package description is invalid.');
   }
   if (!Number.isSafeInteger(revision.pkgrel ?? 1) || (revision.pkgrel ?? 1) < 1 || (revision.pkgrel ?? 1) > 9_999) throw new PolicyError(409, 'Package release number is invalid.');
   const smokeCommands = manifestArray(revision.smoke_commands_json, 'Smoke command manifest');
+  if (preserved && !smokeCommands.length) throw new PolicyError(409, 'Preserved recipes require maintainer smoke commands.');
   if (smokeCommands.some((value) => typeof value !== 'string' || !value || value.length > 4_096)) throw new PolicyError(409, 'Smoke command manifest is invalid.');
   const requestedArchitectures: unknown = manifestArray(revision.architectures_json, 'Architecture manifest');
   if (!Array.isArray(requestedArchitectures) || !requestedArchitectures.length || requestedArchitectures.some((a) => !architectures.includes(a as typeof architectures[number]))) {

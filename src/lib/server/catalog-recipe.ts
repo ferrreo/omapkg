@@ -21,8 +21,12 @@ export async function factoryCatalogPath(db: D1Database, requestId: string): Pro
   const request = await db.prepare(`SELECT q.name,c.collection FROM requests q LEFT JOIN catalog_revisions c
     ON c.pkgbase=q.catalog_pkgbase AND c.revision=q.catalog_revision WHERE q.id=?`).bind(requestId).first<{ name: string; collection: Collection | null }>();
   if (!request) throw new Error('Request not found');
+  return catalogRecipePath(db, request.name, request.collection ?? 'omapkg');
+}
+
+export async function catalogRecipePath(db: D1Database, name: string, collection: Collection): Promise<{ pkgbase: string; collection: Collection | null }> {
   const previous = await db.prepare(`SELECT r.sbom_json FROM revisions r JOIN requests q ON q.id=r.request_id
-    WHERE q.name=? ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1`).bind(request.name).first<{ sbom_json: string }>();
-  const path = previous ? revisionPackagePath(request.name, previous.sbom_json) : packagePath(request.name, request.collection ?? 'omapkg');
-  return { pkgbase: request.name, collection: path.split('/').length === 3 ? path.split('/')[1] as Collection : null };
+    WHERE q.name=? ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1`).bind(name).first<{ sbom_json: string }>();
+  const path = previous ? revisionPackagePath(name, previous.sbom_json) : packagePath(name, collection);
+  return { pkgbase: name, collection: path.split('/').length === 3 ? path.split('/')[1] as Collection : null };
 }

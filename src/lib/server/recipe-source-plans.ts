@@ -36,8 +36,7 @@ export async function recipeSourcePlan(env: Pick<Env, 'DB' | 'ARTIFACTS' | 'GITH
   return plan;
 }
 
-export async function retainRecipeSources(env: Pick<Env, 'DB' | 'ARTIFACTS' | 'GITHUB_REPOSITORY'>, actor: Actor | null, capture: string, ref: InputObject, reason: string) {
-  const human = await inputAuthority(env.DB, actor), message = reviewReason(reason);
+async function verifyRecipeSources(env: Pick<Env, 'DB' | 'ARTIFACTS' | 'GITHUB_REPOSITORY'>, capture: string, ref: InputObject) {
   let manifest: ReturnType<typeof parseRecipeSourceBundle>;
   try { manifest = parseRecipeSourceBundle(await inputJson(env, ref, 2 * 1024 * 1024)); }
   catch (cause) { if (cause instanceof PolicyError) throw cause; throw new PolicyError(400, 'Invalid source bundle, object budget or inventory.'); }
@@ -60,6 +59,23 @@ export async function retainRecipeSources(env: Pick<Env, 'DB' | 'ARTIFACTS' | 'G
     const rows = await query<InputObject>(env.DB, 'SELECT sha256,size FROM input_objects WHERE sha256 IN (SELECT value FROM json_each(?))', canonicalJson(batch.map((ref) => ref.sha256)));
     if (rows.length !== batch.length || batch.some((ref) => !rows.some((row) => row.sha256 === ref.sha256 && row.size === ref.size))) throw new PolicyError(409, 'Prepared source objects must be completely retained before import.');
   }
+  return { manifest, plan };
+}
+
+export async function retainedRecipeSources(env: Pick<Env, 'DB' | 'ARTIFACTS' | 'GITHUB_REPOSITORY'>, capture: string, ref: InputObject) {
+  const row = await env.DB.prepare(`SELECT b.manifest_json,r.metadata_json,i.image_ref FROM current_recipe_source_bundles b
+    JOIN recipe_inspection_results r ON r.job_id=b.inspection_id AND r.attempt=b.inspection_attempt
+    JOIN recipe_inspections i ON i.id=b.inspection_id WHERE b.sha256=? AND b.capture_sha256=?`)
+    .bind(ref.sha256, capture).first<{ manifest_json: string; metadata_json: string; image_ref: string }>();
+  if (!row) throw new PolicyError(409, 'A current retained source bundle is required for every catalog target.');
+  const verified = await verifyRecipeSources(env, capture, ref);
+  if (canonicalJson(verified.manifest) !== row.manifest_json) throw new PolicyError(409, 'Retained source inventory changed.');
+  return { ...verified, metadata: JSON.parse(row.metadata_json) as ReturnType<typeof parseSrcinfo>, imageRef: row.image_ref };
+}
+
+export async function retainRecipeSources(env: Pick<Env, 'DB' | 'ARTIFACTS' | 'GITHUB_REPOSITORY'>, actor: Actor | null, capture: string, ref: InputObject, reason: string) {
+  const human = await inputAuthority(env.DB, actor), message = reviewReason(reason);
+  const { manifest, plan } = await verifyRecipeSources(env, capture, ref);
   await inputAuthority(env.DB, actor);
   try { await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO recipe_source_bundles(sha256,plan_sha256,capture_sha256,inspection_id,inspection_attempt,architecture,manifest_json,created_by,reason,created_at)

@@ -3,6 +3,9 @@ import { githubFetch } from '../../src/lib/server/github';
 import type { FactoryEnv } from './types';
 import { redactText } from './security';
 import { revisionPackagePath } from '../../src/lib/server/catalog-recipe';
+import { preservedRecipe } from '../../src/lib/preserved-recipe';
+import { revisionRecipeFiles, type RecipeTreeFile } from './github-pr';
+import { createHash } from 'node:crypto';
 
 interface Repository {
   default_branch: string;
@@ -117,8 +120,8 @@ function parseJson(value: string, field: string): unknown {
   }
 }
 
-function expectedManifest(revision: CanonicalRevision): Record<string, unknown> {
-  const manifest: Record<string, unknown> = {
+function expectedManifest(revision: CanonicalRevision): Record<string, unknown> & { packageName: string } {
+  const manifest = {
     requestId: revision.request_id,
     packageName: revision.name,
     version: revision.version,
@@ -159,6 +162,10 @@ async function checkRevision(
   headSha: string,
   env: FactoryEnv,
 ): Promise<{ paths: string[]; reason: string }> {
+  if (preservedRecipe(revision)) {
+    const expected = await revisionRecipeFiles(env, { revision, manifest: expectedManifest(revision) });
+    return checkRecipeTree(env, repository, revisionPackagePath(revision.name, revision.sbom_json), headSha, expected);
+  }
   const expected = expectedFiles(revision);
   const entries = await Promise.all(Object.entries(expected).map(async ([path, content]) => {
     const actual = await readFile(api, repository, path, headSha, env);
@@ -174,6 +181,63 @@ async function checkRevision(
     paths: mismatches.map(([path]) => path),
     reason: mismatches.map(([path, reason]) => `${path}: ${reason}`).join('; '),
   };
+}
+
+/** Resolve the package subtree first; a large repository's recursive listing may be truncated. */
+export async function checkRecipeTree(env: FactoryEnv, repository: string, root: string, commit: string, expected: RecipeTreeFile[]): Promise<{ paths: string[]; reason: string }> {
+  const api = `https://api.github.com/repos/${repositoryPath(repository)}/git`;
+  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid canonical commit');
+  const head = await github<{ tree: { sha: string } }>(env, `${api}/commits/${commit}`);
+  type Entry = { path: string; mode: string; type: string; sha: string; size?: number };
+  type Tree = { sha: string; truncated?: boolean; tree: Entry[] };
+  const tree = async (sha: string, recursive = false) => {
+    if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid canonical tree identity');
+    const result = await github<Tree>(env, `${api}/trees/${sha}${recursive ? '?recursive=1' : ''}`);
+    if (result.sha !== sha || result.truncated || !Array.isArray(result.tree)) throw new Error('Canonical recipe tree listing is incomplete');
+    return result.tree;
+  };
+  let sha = head.tree.sha;
+  for (const part of root.split('/')) {
+    const entries = (await tree(sha)).filter((entry) => entry.path === part && entry.type === 'tree' && entry.mode === '040000');
+    if (entries.length !== 1) return { paths: [root], reason: `${root}: missing recipe directory` };
+    sha = entries[0].sha;
+  }
+  const subtree = await tree(sha, true);
+  const entries = subtree.filter((entry) => entry.type !== 'tree');
+  if (entries.length > 4096 || new Set(entries.map((entry) => entry.path)).size !== entries.length) throw new Error('Canonical recipe inventory exceeds its file budget');
+  const wanted = new Map(expected.map((file) => [file.path.slice(root.length + 1), file]));
+  const actual = new Map(entries.map((entry) => [entry.path, entry]));
+  const mismatches: Array<[string, string]> = [];
+  const directories = new Set<string>();
+  for (const path of wanted.keys()) {
+    const parts = path.split('/'); parts.pop();
+    while (parts.length) { directories.add(parts.join('/')); parts.pop(); }
+  }
+  for (const entry of subtree.filter((entry) => entry.type === 'tree')) {
+    if (!directories.has(entry.path) || entry.mode !== '040000') mismatches.push([`${root}/${entry.path}`, 'unexpected directory or mode']);
+  }
+  for (const [path, file] of wanted) {
+    const entry = actual.get(path);
+    if (!entry) { mismatches.push([`${root}/${path}`, 'missing']); continue; }
+    if (entry.type !== 'blob' || entry.mode !== (file.mode ?? '100644') || entry.size !== file.bytes.length) {
+      mismatches.push([`${root}/${path}`, 'type, mode or size mismatch']); continue;
+    }
+    if (!/^[a-f0-9]{40}$/.test(entry.sha)) throw new Error('Invalid canonical blob identity');
+    const blob = await githubFetch(env, `${api}/blobs/${entry.sha}`, { headers: { Accept: 'application/vnd.github.raw+json' } });
+    if (!blob.ok || !blob.body) throw new Error(`Canonical recipe blob request failed (${blob.status})`);
+    const reader = blob.body.getReader(), digest = createHash('sha256'); let size = 0;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        size += value.length;
+        if (size > file.bytes.length) { await reader.cancel(); break; }
+        digest.update(value);
+      }
+    } finally { reader.releaseLock(); }
+    if (size !== file.bytes.length || digest.digest('hex') !== await sha256(file.bytes)) mismatches.push([`${root}/${path}`, 'hash mismatch']);
+  }
+  for (const path of actual.keys()) if (!wanted.has(path)) mismatches.push([`${root}/${path}`, 'unexpected file']);
+  return { paths: mismatches.map(([path]) => path), reason: mismatches.map(([path, reason]) => `${path}: ${reason}`).join('; ') };
 }
 
 async function freezeRequest(env: Pick<FactoryEnv, 'DB'>, issue: Omit<IntegrityIssue, 'frozen'>): Promise<boolean> {

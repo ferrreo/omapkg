@@ -39,7 +39,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'preserved-recipe-v1'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 
@@ -507,6 +507,7 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
         r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
       FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
       WHERE b.id = ? AND b.worker_id = ?
+        AND (q.preserved_import_id IS NULL OR EXISTS(SELECT 1 FROM current_preserved_recipe_imports i WHERE i.id=q.preserved_import_id AND i.revision_id=r.id))
         AND (b.input_lock_sha256 IS NULL OR EXISTS(SELECT 1 FROM current_input_locks l JOIN build_input_selections s ON s.lock_sha256=l.sha256
           WHERE l.sha256=b.input_lock_sha256 AND s.recipe_revision_id=b.revision_id AND s.architecture=b.architecture
           AND s.cohort_id=l.cohort_id AND s.cohort_revision=l.cohort_revision))

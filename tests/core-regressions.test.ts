@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { manifestDigest, publicSourceURL, requireMaintainer, revisionImage, validateRevision } from '../src/lib/server/policy';
 import { sha256 } from '../src/lib/server/db';
 import { readOprEvidence, sourceRedirects } from '../src/lib/server/sbom';
 import { approveRevision, startFactory, submitRequest } from '../src/lib/server/requests';
-import { createFactoryRevision } from '../services/pipeline/revision';
+import { createFactoryRevision, persistFactoryRevision } from '../services/pipeline/revision';
+import type { FactoryRevisionDraft } from '../services/pipeline/types';
 import { nextPackageRelease } from '../services/pipeline/pkgrel';
 import { finalDescription } from '../src/lib/server/descriptions';
 import type { Env } from '../src/lib/server/env';
@@ -29,6 +30,26 @@ function env(db: TestD1): Env {
 }
 
 const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
+
+test('revision persistence rolls back when generation changes between read and write', async () => {
+  const db = new TestD1(readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n'));
+  try {
+    db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at,factory_run_id)
+      VALUES('request-1','hello','https://example.org/hello.tar.gz','archive','system','MIT','github:1','generating',1,1,'old-generation')`).run();
+    const draft: FactoryRevisionDraft = { revision: revision(), manifest: { requestId: 'request-1', packageName: 'hello', version: '1.0.0',
+      sourceKind: 'archive', sources: [], dependencies: [], makeDependencies: [], smokeCommands: ['hello --version'], architectures: ['x86_64'],
+      buildImages: {}, pkgrel: 1, sourceDateEpoch: 1700000000, imageDigest: revision().image_digest, license: 'MIT', surface: 'binary', description: 'Hello', publicRecipeSha256: null },
+      lint: { passed: true, checks: [], repairAttempts: 0 } };
+    const database = asD1(db);
+    const raced = { ...env(db), DB: { prepare: database.prepare.bind(database), async batch(statements: D1PreparedStatement[]) {
+      db.prepare("UPDATE requests SET factory_run_id='new-generation' WHERE id='request-1'").run();
+      return database.batch(statements);
+    } } as D1Database };
+    await expect(persistFactoryRevision(raced, draft, 'factory', 'old-generation')).rejects.toThrow('CHECK constraint');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM revisions').first<{ n: number }>()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT status,factory_run_id FROM requests').first<{ status: string; factory_run_id: string }>()).toEqual({ status: 'generating', factory_run_id: 'new-generation' });
+  } finally { db.close(); }
+});
 
 function revision(overrides: Partial<Revision> = {}): Revision {
   return {

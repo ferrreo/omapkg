@@ -60,6 +60,19 @@ export async function getRecipeCapture(env: CaptureEnv, digest: string) {
   return { record, reference: { sha256: digest, size: ref.size }, manifest: parseRecipeCapture(JSON.parse(record.manifest_json), env.GITHUB_REPOSITORY), summary: JSON.parse(record.summary_json) as RecipeSummary };
 }
 
+export async function recipeCaptureBytes(env: Pick<Env, 'DB' | 'ARTIFACTS'>, ref: InputObject): Promise<Uint8Array> {
+  let bytes = new Uint8Array();
+  if (ref.size) {
+    const row = await inputObject(env.DB, ref.sha256);
+    if (row.size !== ref.size) throw new PolicyError(409, 'Retained recipe object size changed.');
+    const body = await env.ARTIFACTS.get(row.object_key);
+    if (!body || body.size !== ref.size) throw new PolicyError(409, 'Retained recipe object is unavailable.');
+    bytes = new Uint8Array(await body.arrayBuffer());
+  }
+  if (bytes.length !== ref.size || await sha256(bytes) !== ref.sha256) throw new PolicyError(409, 'Retained recipe object checksum changed.');
+  return bytes;
+}
+
 export async function retainRecipeCapture(env: CaptureEnv, actor: Actor | null, ref: InputObject, importId: string, sourceId: string, reason: string) {
   const human = await inputAuthority(env.DB, actor), message = reviewReason(reason);
   const captured = await getCatalogImport(env.DB, importId);

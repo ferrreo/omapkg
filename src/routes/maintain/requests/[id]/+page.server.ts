@@ -9,6 +9,8 @@ import { revisionRecipePolicy } from '../../../../../services/pipeline/recipe-po
 import { createDependencyRequest, getDependencyBlockers, linkDependencyRequest, resolveDependencyBlockers } from '$lib/server/dependency-blockers';
 import { reviewedRuntimeExceptions } from '$lib/server/runtime-evidence';
 import { recipeGitUrl } from '$lib/server/catalog-recipe';
+import { preservedRecipe } from '$lib/preserved-recipe';
+import { reviewedPackageVersion } from '$lib/server/build-outputs';
 import type { Approval, Build, Revision } from '$lib/model';
 import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async (event) => {
@@ -24,12 +26,13 @@ export const load: PageServerLoad = async (event) => {
     listAuditEvents(env.DB, parseAuditQuery(new URLSearchParams({ request: request.id }))).then((page) => page.events),
     query<{ id: number; stage: string; detail: string; created_at: number }>(env.DB, 'SELECT * FROM factory_events WHERE request_id=? ORDER BY id LIMIT 200', request.id)
   ]);
-  const revisions = revisionRows.map((revision) => ({ ...revision, recipeUrl: recipeGitUrl(env.GITHUB_REPOSITORY, revision.commit_sha, request.name, revision.sbom_json), recipePolicy: revisionRecipePolicy(revision.sbom_json), runtimeExceptions: reviewedRuntimeExceptions(revision.sbom_json), description: finalDescription(revision, request.name) }));
+  const revisions = revisionRows.map((revision) => ({ ...revision, preserved: preservedRecipe(revision), fullVersion: reviewedPackageVersion(revision), recipeUrl: recipeGitUrl(env.GITHUB_REPOSITORY, revision.commit_sha, request.name, revision.sbom_json), recipePolicy: revisionRecipePolicy(revision.sbom_json), runtimeExceptions: reviewedRuntimeExceptions(revision.sbom_json), description: finalDescription(revision, request.name) }));
+  const imported = await env.DB.prepare('SELECT capture_sha256 FROM preserved_recipe_imports WHERE request_id=?').bind(request.id).first<{ capture_sha256: string }>();
   const blockers = await getDependencyBlockers(env.DB, request.id);
   const dependencyProposals = await query<{ id: string; blocker_id: string; status: string }>(env.DB,
     `SELECT p.id,l.blocker_id,p.status FROM dependency_proposals p JOIN dependency_proposal_blockers l ON l.proposal_id=p.id
       JOIN dependency_blockers d ON d.id=l.blocker_id WHERE d.request_id=? AND p.status<>'superseded'`, request.id);
-  return { request, revisions, approvals, builds, events, factoryEvents, blockers, dependencyProposals };
+  return { request, revisions, approvals, builds, events, factoryEvents, blockers, dependencyProposals, imported };
 };
 export const actions: Actions = {
   approveRequest: (event) => formAction(event, async () => startFactory(environment(event), event.locals.actor, event.params.id)),

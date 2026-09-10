@@ -158,5 +158,39 @@ Current limits are 2 MiB per plan or bundle, 2,048 declared sources, 200,000 ent
 per Git/cache archive, 32 GiB per retained object and 256 GiB total referenced
 objects. The capture tool defaults to 4 GiB per object and 32 GiB per run and accepts
 smaller or larger explicit limits within those ceilings. Empty source files use
-the SHA-256 empty-object identity. Runtime source materialization and preserved
-revision creation remain separate integration work.
+the SHA-256 empty-object identity. Runtime source materialization remains separate integration work. Original
+revision creation is described below.
+
+## Original recipe revisions
+
+After current catalog admission, select one retained source bundle for every
+admitted native target and supply installed-package smoke commands on the recipe
+page. The coordinator verifies the original Git proof again, checks native full
+versions, split outputs and portable-output policy, and assembles a review draft
+without evaluating or rendering PKGBUILD. Runtime, build and check dependencies
+remain separate for each target. The source timestamp comes from the captured
+Git commit. Epoch and fractional package release remain immutable review evidence.
+
+Import reserves the exact draft before GitHub work starts. An upload failure keeps
+that draft available under **Resume saved import**; cancellation closes the
+unfinished request. A completed retry returns the existing review. The factory
+cannot regenerate an imported request or substitute model-supplied preservation
+evidence. Catalog, inspection, source and operator authority are checked again
+before persistence. Revision insertion and the request transition commit together
+only while the reserved generation remains current.
+
+The pull request contains all original paths, byte contents, executable modes and
+symlinks. Three review sidecars live under `.opr-review-<revision-id>/`; an existing
+path at that location fails the import. Original `opr-manifest.json`, Omarchy
+metadata, patches and install hooks remain untouched. Git integrity resolves the
+package subtree before inspecting its complete inventory, checks file modes and
+hashes streamed raw blob bytes, and detects extra files or directories. Truncated
+GitHub tree listings fail verification. Raw blob access follows the
+[GitHub blob API](https://docs.github.com/en/rest/git/blobs#get-a-blob).
+
+Import creates no approval or build. Review still requires independent area and
+security approval with explicit custom-shell acknowledgement. Preserved jobs are
+excluded from workers without `preserved-recipe-v1`, a current cohort output
+contract and selected frozen dependency inputs. Native preserved-source execution
+and source-aware signing remain the next integration step; this review path does
+not itself establish a successful package build.

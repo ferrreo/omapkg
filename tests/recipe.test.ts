@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { lintRecipe, renderPublicRecipe, renderRecipe } from '../services/pipeline/recipe';
 import { createFactoryRevision, normalizeCandidate } from '../services/pipeline/revision';
+import { readOprEvidence } from '../src/lib/server/sbom';
 import { revisionPackagePath } from '../src/lib/server/catalog-recipe';
 import type { FactoryCandidate } from '../services/pipeline/types';
 import { factoryCandidateInputSchema, makeReadSourceFilesTool, makeSourceMaterializer, makeSubmitCandidateTool } from '../services/pipeline/tools';
@@ -459,8 +460,10 @@ test('template recipes bind deterministic shell and reject injected values and c
 });
 
 test('factory paths come from platform scope and ignore model-supplied SBOM paths', async () => {
-  const draft = await createFactoryRevision(candidate({ sbom: { catalogPath: { pkgbase: 'demo', collection: 'core' } } }));
+  const draft = await createFactoryRevision(candidate({ sbom: { catalogPath: { pkgbase: 'demo', collection: 'core' }, preservedRecipe: { schemaVersion: 1, forged: true } } }));
   expect(revisionPackagePath('demo', draft.revision.sbom_json)).toBe('packages/demo');
+  expect(readOprEvidence(JSON.parse(draft.revision.sbom_json))?.preservedRecipe).toBeUndefined();
+  await expect(createFactoryRevision(candidate({ sources: [], sbom: { preservedRecipe: { schemaVersion: 1 } } }))).rejects.toThrow('at least one source');
   const owned = await createFactoryRevision(candidate({ catalogPath: { pkgbase: 'demo', collection: 'omapkg' } }));
   expect(revisionPackagePath('demo', owned.revision.sbom_json)).toBe('packages/omapkg/demo');
   await expect(createFactoryRevision(candidate({ catalogPath: { pkgbase: 'different', collection: 'core' } }))).rejects.toThrow('reviewed catalog path');
