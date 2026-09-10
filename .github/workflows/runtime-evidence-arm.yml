@@ -40,6 +40,11 @@ jobs:
       REGISTRY_NAMESPACE: ${{ inputs.registry_namespace }}
       IMAGE_TAG: ${{ inputs.image_tag }}
     steps:
+      - name: Require private storage for retained bootstrap inputs
+        if: ${{ inputs.preserved_recipe && !github.event.repository.private }}
+        run: |
+          echo 'Preserved recipe acceptance retains private helper and bootstrap inputs. Run this mode in a private repository.' >&2
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -141,11 +146,11 @@ jobs:
           sudo env PATH="$PATH" python3 scripts/check-preserved-recipe.py \
             --output "$RUNNER_TEMP/preserved-asdcontrol" --helper-image "$BUILDER_IMAGE" --helper-shell-analysis --preparation-runtime docker
       - name: Archive native source, bootstrap and build evidence
-        if: ${{ inputs.preserved_recipe && always() }}
+        if: ${{ inputs.preserved_recipe && github.event.repository.private && always() }}
         shell: bash
         run: tar -cf "$RUNNER_TEMP/preserved-asdcontrol.tar" -C "$RUNNER_TEMP" preserved-asdcontrol
       - name: Retain native source, bootstrap and build evidence
-        if: ${{ inputs.preserved_recipe && always() }}
+        if: ${{ inputs.preserved_recipe && github.event.repository.private && always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: preserved-asdcontrol-arm
