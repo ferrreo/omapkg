@@ -21,7 +21,7 @@ import type { WorkerMetadata } from '../src/lib/server/worker-protocol';
 import { POST as inspectionInput } from '../src/routes/api/worker/inspections/[id]/inputs/[digest]/+server';
 import { parseRecipeSourceBundle, recipeSources } from '../src/lib/recipe-sources';
 import { recipeSourcePlan, retainRecipeSources } from '../src/lib/server/recipe-source-plans';
-import { reservePreservedImport, resumePreservedImport, assertPreservedImportCurrent } from '../src/lib/server/preserved-imports';
+import { reservePreservedImport, resumePreservedImport, assertPreservedImportCurrent, cancelPreservedImport } from '../src/lib/server/preserved-imports';
 import { revisionRecipeFiles } from '../services/pipeline/github-pr';
 import type { FactoryRevisionDraft } from '../services/pipeline/types';
 import { validateRevision } from '../src/lib/server/policy';
@@ -295,6 +295,10 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
       expect(db.prepare('SELECT COUNT(*) AS n FROM builds').first<{ n: number }>()).toEqual({ n: 0 });
     } finally { globalThis.fetch = previousFetch; }
     await checkPreservedWorker(db, env, (await env.DB.prepare('SELECT * FROM revisions WHERE id=?').bind(draft.revision.id).first<FactoryRevisionDraft['revision']>())!);
+    const replacement = await reservePreservedImport(env, actor, ref.sha256, sources, commands, 'New review after rejecting the old import.');
+    expect(replacement.request_id).not.toBe(imported.request_id);
+    await cancelPreservedImport(env.DB, actor, ref.sha256, replacement.id, 'Cancel unused replacement draft.');
+    await expect(resumePreservedImport(env, actor, ref.sha256, replacement.id)).rejects.toThrow('authority changed');
     expect(readdirSync(root)).not.toContain('MUST_NOT_EXECUTE');
     db.exec("UPDATE workers SET status='revoked' WHERE id='inspection-worker'");
     expect(db.prepare('SELECT COUNT(*) AS n FROM current_recipe_source_bundles').first<{ n: number }>()).toEqual({ n: 1 });

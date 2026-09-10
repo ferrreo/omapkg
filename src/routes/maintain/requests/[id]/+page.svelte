@@ -108,6 +108,16 @@
       {#if result.error}<div class="form-notice form-notice--danger" role="alert">{result.error}</div>{:else if result.success}<div class="notice-bar" role="status"><p>Review action recorded. Current state is shown below.</p><a href={auditHref(request.id)}>Open audit<Icon name="arrow" size={14} /></a></div>{/if}
 
       {#if data.imported}<p class="notice-bar">Original recipe import. <a href={`/maintain/recipes/${data.imported.capture_sha256}`}>Review captured files, source bundles and upload status</a>.</p>{/if}
+      {#if data.imported && ['review', 'queued', 'building', 'failed', 'blocked'].includes(request.status)}
+        <details class="workbench-panel"><summary>Reject this import for replacement</summary>
+          <p>Rejecting {request.name} cancels queued and running builds. Captured files, reviews and completed evidence remain in history. Review a new import and update cohort scope before building its replacement.</p>
+          <form class="review-form" method="POST" action="?/rejectRequest">
+            <label for="import-rejection-reason">Reason for rejecting this import</label><input id="import-rejection-reason" name="reason" required maxlength="2000" />
+            <button class="button" type="submit">Reject import</button>
+          </form>
+        </details>
+      {/if}
+      {#if request.status === 'rejected'}<p class="notice-bar">Rejected: {request.rejection_reason}</p>{/if}
       {#if request.status === 'pending'}
         <div class="notice-bar"><p>Approve this request before factory work begins. Review source scope and area ownership first.</p><div class="release-actions"><form method="POST" action="?/approveRequest"><button class="button button--primary" type="submit">Approve request<Icon name="check" size={14} /></button></form><form method="POST" action="?/rejectRequest"><input name="reason" required placeholder="Reason for rejection" aria-label="Reason for rejection" /><button class="button" type="submit">Reject</button></form></div></div>
       {/if}

@@ -83,13 +83,20 @@ export async function startFactory(env: Env, actor: Actor | null, requestId: str
   }
 }
 export async function rejectRequest(env: Env, actor: Actor | null, requestId: string, reason: string) {
-  const request = await getRequest(env, requestId) as PackageRequest & { factory_run_id?: string | null };
+  const request = await getRequest(env, requestId) as PackageRequest & { factory_run_id?: string | null; preserved_import_id?: string | null };
   const reviewer = requireMaintainer(actor, request.area);
   if (!reason.trim() || reason.length > 2000) throw new PolicyError(400, 'Provide a reason, up to 2,000 characters.');
-  if (!['pending', 'review', 'failed', 'blocked'].includes(request.status)) throw new PolicyError(409, 'Only pending, failed or review requests can be rejected.');
+  if (!['pending', 'review', 'failed', 'blocked'].includes(request.status) &&
+    !(request.preserved_import_id && ['queued', 'building'].includes(request.status))) {
+    throw new PolicyError(409, 'Only pending, failed, blocked or review requests and unpublished active imports can be rejected.');
+  }
   const generationId = request.factory_run_id ?? null;
   const result = await env.DB.batch([
-    env.DB.prepare("UPDATE requests SET status='rejected', rejection_reason=?,updated_at=? WHERE id=? AND status=? AND factory_run_id IS ?").bind(reason.trim(), now(), requestId, request.status, generationId),
+    env.DB.prepare(`UPDATE requests SET status='rejected', rejection_reason=?,updated_at=? WHERE id=? AND status=? AND factory_run_id IS ?
+      ${request.preserved_import_id ? `AND NOT EXISTS(SELECT 1 FROM revisions r JOIN builds b ON b.revision_id=r.id JOIN releases published ON published.build_id=b.id WHERE r.request_id=requests.id)
+        AND NOT EXISTS(SELECT 1 FROM revisions r JOIN cohort_recipe_ownership o ON o.recipe_revision_id=r.id JOIN cohorts c ON c.id=o.cohort_id
+          WHERE r.request_id=requests.id AND c.phase IN ('publish','observe'))` : ''}`)
+      .bind(reason.trim(), now(), requestId, request.status, generationId),
     env.DB.prepare('INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,?,?,?,? WHERE changes()=1')
       .bind(reviewer.id, 'request.rejected', requestId, JSON.stringify({ reason: reason.trim() }), now())
   ]);

@@ -16,6 +16,8 @@ import { POST as downloadInput } from '../src/routes/api/worker/jobs/[id]/inputs
 import { nativeBuildStatement, currentNativeBuild } from '../src/lib/server/native-signing';
 import { frozenFixture } from './frozen-fixtures';
 import { runtimeEvidence } from './runtime-fixtures';
+import { approveRevision, rejectRequest } from '../src/lib/server/requests';
+import { evaluateCohortGate } from '../src/lib/server/cohort-gates';
 import type { TestD1 } from './d1';
 
 // Called after real Git capture, signed inspection and import persistence in the
@@ -110,4 +112,26 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const statement = JSON.parse(await nativeBuildStatement(await currentNativeBuild(env, job.id)));
   expect(statement.predicate.buildDefinition.externalParameters.preservedRecipe).toEqual(inputs);
   expect(statement.predicate.buildDefinition.resolvedDependencies.slice(0, 2).map((item: { digest: { sha256: string } }) => item.digest.sha256)).toEqual([inputs.capture.sha256, inputs.sourceBundle.sha256]);
+  await expect(rejectRequest(env as Env, { ...actor, areas: ['desktop'] }, revision.request_id, 'Wrong owner.')).rejects.toMatchObject({ status: 403 });
+  holder.exec("UPDATE cohorts SET phase='publish' WHERE id='preserved-protocol-cohort'");
+  await expect(rejectRequest(env as Env, actor, revision.request_id, 'Published recovery required.')).rejects.toMatchObject({ status: 409 });
+  expect(() => holder.prepare("UPDATE requests SET status='rejected' WHERE id=?").bind(revision.request_id).run()).toThrow('release recovery');
+  holder.exec("UPDATE cohorts SET phase='build' WHERE id='preserved-protocol-cohort'");
+  const succeededAttempt = job.attempt!;
+  holder.prepare("UPDATE builds SET status='queued' WHERE id=?").bind(job.id).run();
+  job = (await claimJob(env.DB, worker, metadata, env))!;
+  holder.prepare("INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES('preserved-arm-queued',?,'aarch64','queued',?)").bind(revision.id, timestamp).run();
+  await rejectRequest(env as Env, actor, revision.request_id, 'Replace the obsolete imported recipe.');
+  expect(holder.prepare('SELECT status,lease_token FROM builds WHERE revision_id=? ORDER BY architecture').bind(revision.id).all().results)
+    .toEqual([{ status: 'cancelled', lease_token: null }, { status: 'cancelled', lease_token: null }]);
+  expect(holder.prepare('SELECT status,provenance FROM build_attempt_results WHERE build_id=? AND attempt=?').bind(job.id, succeededAttempt).first<{ status: string; provenance: string }>())
+    .toEqual({ status: 'succeeded', provenance: JSON.stringify(report) });
+  expect(holder.prepare('SELECT COUNT(*) AS n FROM current_preserved_recipe_imports WHERE revision_id=?').bind(revision.id).first<{ n: number }>()).toEqual({ n: 0 });
+  await expect(download(inputs.capture.sha256)).rejects.toMatchObject({ status: 409 });
+  await expect(completeJob(env.DB, env.ARTIFACTS, worker, job.id, complete(report))).rejects.toMatchObject({ status: 409 });
+  await expect(approveRevision(env as Env, actor, revision.request_id, revision.id, 'area', 'Cannot revive rejection.', true)).rejects.toMatchObject({ status: 409 });
+  expect(await claimJob(env.DB, worker, metadata, env)).toBeNull();
+  expect(() => holder.prepare("UPDATE requests SET status='queued' WHERE id=?").bind(revision.request_id).run()).toThrow('new reviewed request');
+  expect((await evaluateCohortGate(env as Env, await getCohort(env.DB, cohort.id), false)).blockers.some((blocker) => blocker.code === 'recipe-changed')).toBe(true);
+  expect(holder.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='request.rejected' AND target=?").bind(revision.request_id).first<{ n: number }>()).toEqual({ n: 1 });
 }

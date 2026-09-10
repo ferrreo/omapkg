@@ -526,3 +526,21 @@ platform limit.
 Full-catalog source retention, reviewed target adaptations, native ARM builds,
 cohort closure/ABI/reproducibility and system qualification, release/client work
 and controlled production migration remain required for the full plan.
+
+### Replacing obsolete preserved imports
+
+Unpublished imported requests can now be rejected while queued or building.
+Rejection cancels queued/leased builds and permanently invalidates their tokens;
+the original capture, reviews, signed outputs and immutable attempts remain in
+history. Rejected imports cannot be revived or approved. A new import gets a new
+request and must pass review and cohort binding again. Published imports require
+release recovery instead.
+
+The regression fails against the previous rejection handler, then passes with
+the fix, including old-token denial, publication guards and a replacement import.
+All 237 application tests pass (1,668 assertions); Svelte/pipeline checks and the
+production web build pass. Native SQL compiles at D1's expression-depth limit.
+The actual local asdcontrol acceptance request was rejected through the browser
+after its catalog changed, retaining its completed signed evidence. Layouts at
+320/375/414/768/1440/1920 pixels passed without JavaScript errors. No production
+request, catalog or release was changed.

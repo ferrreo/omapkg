@@ -21,5 +21,6 @@ with sqlite3.connect(":memory:") as db:
         db.execute("SELECT COUNT(*) FROM " + view).fetchall()
     db.execute("EXPLAIN UPDATE workers SET capabilities_json=capabilities_json WHERE id=?", [None]).fetchall()
     db.execute("EXPLAIN DELETE FROM team_memberships WHERE github_id=?", [None]).fetchall()
+    db.execute("EXPLAIN UPDATE requests SET status='rejected' WHERE id=?", [None]).fetchall()
     assert checked >= 20, "Native SQL coverage unexpectedly shrank"
     print(f"{checked + 1} native queries compile at D1 expression depth 100")
