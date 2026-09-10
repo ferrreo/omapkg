@@ -384,3 +384,10 @@ support or a production coordinator rollout.
 Preserved recipe adaptation, source archive/VCS/language-cache preparation,
 full inventory qualification, ABI cohorts, release/client integration and
 cutover remain open.
+
+The shared build helper now keeps temporary configuration under its output
+directory. Previously a reviewed source named `makepkg.conf` was overwritten
+before makepkg checked source hashes. The native split-output regression now
+uses that filename: it reproduced the checksum failure before the fix, then
+built and tested all four outputs successfully afterward. Go tests and vet
+also passed.

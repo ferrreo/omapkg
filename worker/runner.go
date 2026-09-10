@@ -230,7 +230,7 @@ func (r *Runner) build(ctx context.Context, workdir, output, jobName string, sou
 		// by an unmapped subuid.
 		args = insertBeforeImage(args, "--userns=keep-id")
 	}
-	args = append(args, "/bin/sh", "-ceu", "mkdir -m 700 /opr/work/.opr-tmp\ntrap 'rm -rf /opr/work/.opr-tmp' EXIT\nexport TMPDIR=/opr/work/.opr-tmp\ncp /etc/makepkg.conf /opr/work/makepkg.conf\nprintf '\\nOPTIONS=(\"${OPTIONS[@]/#debug/!debug}\")\\nPKGEXT=.pkg.tar.zst\\n' >> /opr/work/makepkg.conf\nexport MAKEPKG_CONF=/opr/work/makepkg.conf\nmakepkg --noconfirm --nodeps --check --log\nfound=0\nfor package in /opr/output/*.pkg.tar.zst; do\n  bsdtar -tf \"$package\" | grep -qx '.BUILDINFO'\n  bsdtar -xOf \"$package\" .PKGINFO > /opr/output/.PKGINFO\n  found=1\ndone\ntest \"$found\" -eq 1")
+	args = append(args, "/bin/sh", "-ceu", "mkdir -m 700 /opr/output/.opr-tmp\ntrap 'rm -rf /opr/output/.opr-tmp' EXIT\nexport TMPDIR=/opr/output/.opr-tmp\ncp /etc/makepkg.conf /opr/output/.opr-tmp/makepkg.conf\nprintf '\\nOPTIONS=(\"${OPTIONS[@]/#debug/!debug}\")\\nPKGEXT=.pkg.tar.zst\\n' >> /opr/output/.opr-tmp/makepkg.conf\nexport MAKEPKG_CONF=/opr/output/.opr-tmp/makepkg.conf\nmakepkg --noconfirm --nodeps --check --log\nfound=0\nfor package in /opr/output/*.pkg.tar.zst; do\n  bsdtar -tf \"$package\" | grep -qx '.BUILDINFO'\n  bsdtar -xOf \"$package\" .PKGINFO > /opr/output/.PKGINFO\n  found=1\ndone\ntest \"$found\" -eq 1")
 	log, err := r.runContainer(ctx, containerName(jobName, "build"), args...)
 	if err != nil {
 		return log, fmt.Errorf("offline Arch build: %w", err)

@@ -49,6 +49,7 @@ func TestOutputContractRejectsAmbiguousIdentity(t *testing.T) {
 
 // Native acceptance includes split metadata, epochs, subreleases, a portable
 // output, local sibling dependency installation, and exact-set rejection.
+// A source named makepkg.conf must survive helper configuration unchanged.
 func TestRunnerSplitOutputsNativeOCI(t *testing.T) {
 	image := os.Getenv("OPR_WORKER_E2E_IMAGE")
 	if image == "" {
@@ -64,7 +65,7 @@ func TestRunnerSplitOutputsNativeOCI(t *testing.T) {
 	}
 	directory := t.TempDir()
 	contents := []byte("#include <stdio.h>\nint main(void) { puts(\"split-output-ok\"); return 0; }\n")
-	source := Source{Name: "sample.c", URL: "https://example.org/sample.c", SHA256: hashBytes(contents)}
+	source := Source{Name: "makepkg.conf", URL: "https://example.org/sample.c", SHA256: hashBytes(contents)}
 	path := filepath.Join(directory, source.Name)
 	if err := os.WriteFile(path, contents, 0o644); err != nil {
 		t.Fatal(err)
@@ -76,9 +77,9 @@ pkgrel=3.1
 epoch=2
 arch=('%s')
 license=('MIT')
-source=('sample.c')
+source=('makepkg.conf')
 sha256sums=('%s')
-build() { cc -O2 -o split sample.c; }
+build() { cc -x c -O2 -o split makepkg.conf; }
 package_opr-split-core() {
   depends=('glibc')
   install -Dm755 split "$pkgdir/usr/bin/opr-split-core"
@@ -91,12 +92,12 @@ package_opr-split-core-full() {
 }
 package_opr-split-addon() {
   depends=('opr-split-core=2:1.2-3.1')
-  install -Dm644 sample.c "$pkgdir/usr/share/opr-split/addon.c"
+  install -Dm644 makepkg.conf "$pkgdir/usr/share/opr-split/addon.c"
 }
 package_opr-split-docs() {
   arch=('any')
   depends=()
-  install -Dm644 sample.c "$pkgdir/usr/share/doc/opr-split/sample.c"
+  install -Dm644 makepkg.conf "$pkgdir/usr/share/doc/opr-split/sample.c"
 }
 `, architecture, source.SHA256)
 	job := Job{ID: "split-native", LeaseToken: "test", LeaseExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339), RevisionID: "split-revision",
