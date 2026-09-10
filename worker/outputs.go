@@ -267,11 +267,11 @@ func (r *Runner) testOutputGroup(ctx context.Context, job Job, outputs []buildOu
 	}
 	defer analysisImage.cleanup()
 	for _, output := range outputs {
-		analysis, err := r.analyzePackage(ctx, output.Path, name+output.PackageMetadata.Name, analysisImage.ref, job.RuntimeExceptions)
+		analysis, err := r.analyzePackage(ctx, output.Path, name+output.PackageMetadata.Name, analysisImage.ref, job.RuntimeExceptions, output.Path+".abi")
 		if err != nil {
 			return test, log, err
 		}
-		if analysis.NativeCode == nil || !sha256Pattern.MatchString(analysis.PayloadSHA256) {
+		if analysis.NativeCode == nil || !sha256Pattern.MatchString(analysis.PayloadSHA256) || analysis.ABIInventory == nil || !validInputObject(*analysis.ABIInventory, maxABIDocument) {
 			return test, log, errors.New("native code inspection is missing")
 		}
 		if output.PackageMetadata.Architecture == "any" && len(*analysis.NativeCode) > 0 {

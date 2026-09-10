@@ -8,7 +8,7 @@ RUN pacman-key --init && pacman-key --populate archlinuxarm \
     && cp /etc/pacman.conf /tmp/opr-pacman.conf \
     && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls\nDisableSandboxFilesystem' /tmp/opr-pacman.conf \
     && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
-      base-devel arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools namcap curl xz \
+      base-devel arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools curl xz \
     && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm && rm /tmp/opr-pacman.conf \
     && rm -rf /etc/pacman.d/gnupg/openpgp-revocs.d /etc/pacman.d/gnupg/private-keys-v1.d
 

@@ -1,3 +1,4 @@
+import ROLLBACK_CLIENT from '$lib/rollback-client.sh?raw';
 import { error, type RequestHandler } from '@sveltejs/kit';
 import type { Architecture, Release } from '$lib/model';
 import { query } from '$lib/server/db';
@@ -8,82 +9,6 @@ const packageName = /^[a-z0-9][a-z0-9@._+:-]{0,63}$/;
 const releaseId = /^[A-Za-z0-9_-]{1,128}$/;
 const safeKey = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[\x21-\x7e]{1,1024}$/;
 const architectures = new Set<Architecture>(['x86_64', 'aarch64']);
-const ROLLBACK_CLIENT = `#!/usr/bin/env bash
-set -euo pipefail
-
-manifest_url=\${1:?usage: omapkg-rollback https://packages.example.org/repo/rollback/RELEASE_ID.json}
-case "$manifest_url" in https://*) ;; *) echo 'rollback manifest URL must use HTTPS' >&2; exit 2 ;; esac
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$tmp/manifest.json" "$manifest_url"
-mapfile -t fields < <(python3 - "$tmp/manifest.json" "$manifest_url" <<'PY'
-import hashlib, json, os, re, sys
-from urllib.parse import urlparse
-
-path, manifest_url = sys.argv[1:]
-with open(path, encoding='utf-8') as stream:
-    manifest = json.load(stream)
-if manifest.get('schemaVersion') != 1 or manifest.get('kind') != 'opr-downgrade':
-    raise SystemExit('unsupported rollback manifest')
-origin = urlparse(manifest_url)
-if origin.scheme != 'https' or not origin.netloc:
-    raise SystemExit('manifest origin must use HTTPS')
-def same_origin(value):
-    parsed = urlparse(value)
-    if parsed.scheme != 'https' or parsed.netloc != origin.netloc or parsed.username or parsed.password or parsed.fragment:
-        raise SystemExit('manifest contains an unsafe URL')
-    return value
-def digest(value):
-    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
-        raise SystemExit('manifest contains an invalid SHA-256')
-    return value
-artifact = manifest.get('artifact')
-if isinstance(artifact, dict):
-    url = same_origin(artifact.get('url', ''))
-    signature = same_origin(artifact.get('signatureUrl', url + '.sig'))
-    filename = os.path.basename(urlparse(url).path)
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+:-]{0,220}\.pkg\.tar\.zst', filename):
-        raise SystemExit('manifest contains an invalid package filename')
-    print('binary')
-    print(url)
-    print(signature)
-    print(filename)
-    print(digest(artifact.get('sha256')))
-    print(same_origin(manifest.get('publicKeyUrl', origin._replace(path='/repo/key.asc', params='', query='', fragment='').geturl())))
-else:
-    recipe = manifest.get('recipe')
-    if not isinstance(recipe, dict):
-        raise SystemExit('manifest has no supported downgrade target')
-    url = same_origin(recipe.get('url', ''))
-    print('recipe')
-    print(url)
-    print(digest(recipe.get('sha256')))
-PY
-)
-if [[ "\${fields[0]}" == binary ]]; then
-  package_url=\${fields[1]}
-  signature_url=\${fields[2]}
-  filename=\${fields[3]}
-  expected=\${fields[4]}
-  key_url=\${fields[5]}
-  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$tmp/$filename" "$package_url"
-  printf '%s  %s\n' "$expected" "$tmp/$filename" | sha256sum --check --status
-  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$tmp/$filename.sig" "$signature_url"
-  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$tmp/key.asc" "$key_url"
-  export GNUPGHOME="$tmp/gnupg"
-  mkdir -m 700 "$GNUPGHOME"
-  gpg --batch --quiet --homedir "$GNUPGHOME" --import "$tmp/key.asc"
-  gpg --batch --quiet --homedir "$GNUPGHOME" --verify "$tmp/$filename.sig" "$tmp/$filename"
-  sudo pacman -U --noconfirm "$tmp/$filename"
-else
-  recipe_url=\${fields[1]}
-  expected=\${fields[2]}
-  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$tmp/PKGBUILD" "$recipe_url"
-  printf '%s  %s\n' "$expected" "$tmp/PKGBUILD" | sha256sum --check --status
-  cd "$tmp"
-  makepkg -si -f
-fi
-`;
 
 function decodePart(value: string): string {
   try {

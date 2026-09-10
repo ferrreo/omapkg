@@ -12,6 +12,7 @@ import { getBuildForWorker } from './worker-protocol';
 import { assertReviewed, joinedBuild, signingRequest } from './release-evidence';
 import { attestationKey, releaseAttestation } from './release-attestation';
 import { selectedInputLock } from './input-locks';
+import { assertRetainedAbiEvidence } from './build-abi-evidence';
 
 export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, buildId: string) {
   const joined = await joinedBuild(env as Env, buildId);
@@ -55,6 +56,7 @@ export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, bui
       attempt.preserved_inputs_json !== (build.preserved_inputs_json ?? null) || attempt.installed_size !== build.installed_size) throw new PolicyError(409, 'Native signing must match immutable attempt evidence.');
   const artifacts = await buildArtifacts(env.DB, build);
   await verifyOutputProvenance(worker, build, artifacts, build.provenance, build.provenance_signature, build.installed_size ?? undefined);
+  await assertRetainedAbiEvidence(env.DB, build, JSON.parse(build.provenance));
   return { build, revision, worker, artifacts, contract, area: member.policy.ownerArea };
 }
 

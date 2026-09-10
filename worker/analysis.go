@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +10,6 @@ import (
 	"slices"
 	"strings"
 )
-
-//go:embed runtime-analysis.py
-var runtimeAnalysisScript string
 
 type analysisFinding struct {
 	Code       string  `json:"code"`
@@ -34,6 +30,7 @@ type runtimeAnalysis struct {
 	RuntimeClosureComplete bool               `json:"runtimeClosureComplete"`
 	Unknowns               []string           `json:"unknowns"`
 	Exceptions             []runtimeException `json:"exceptions,omitempty"`
+	ABIInventory           *inputObject       `json:"abiInventory,omitempty"`
 }
 
 type runtimeException struct {
@@ -110,27 +107,36 @@ func (r *Runner) inspectEnvironment(ctx context.Context, name, base, image strin
 	return environmentEvidence{BaseImage: base, PreparedImage: imageID, Packages: packages}, nil
 }
 
-func (r *Runner) analyzePackage(ctx context.Context, artifact, name, imageRef string, exceptions []runtimeException) (*runtimeAnalysis, error) {
-	directory, err := os.MkdirTemp(r.StateDir, "analysis-")
+func (r *Runner) analyzePackage(ctx context.Context, artifact, name, imageRef string, exceptions []runtimeException, evidenceDir ...string) (*runtimeAnalysis, error) {
+	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(directory)
-	script := filepath.Join(directory, "analysis.py")
-	if err := os.WriteFile(script, []byte(runtimeAnalysisScript), 0o644); err != nil {
-		return nil, err
-	}
-	args := r.baseContainerArgsForImage(containerName(name, "analysis"), "none", "", []mount{
-		{Source: script, Target: "/opr-analysis.py", ReadOnly: true},
+	mounts := []mount{
+		{Source: executable, Target: "/opr-analyzer", ReadOnly: true},
 		{Source: artifact, Target: "/opr-package.pkg.tar.zst", ReadOnly: true},
-	}, map[string]string{"PYTHONHASHSEED": "0", "PYTHONPATH": "", "PYTHONHOME": ""}, "65534:65534", imageRef)
-	args = append(args, "/usr/bin/python", "-s", "-P", "/opr-analysis.py", "/opr-package.pkg.tar.zst")
+	}
+	if len(evidenceDir) == 1 {
+		if err := os.MkdirAll(evidenceDir[0], 0o777); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(evidenceDir[0], 0o777); err != nil {
+			return nil, err
+		}
+		defer os.Chmod(evidenceDir[0], 0o700)
+		mounts = append(mounts, mount{Source: evidenceDir[0], Target: "/opr-evidence"})
+	}
+	args := r.baseContainerArgsForImage(containerName(name, "analysis"), "none", "", mounts, nil, "65534:65534", imageRef)
+	args = append(args, "/opr-analyzer", "analyze-package", "/opr-package.pkg.tar.zst")
+	if len(evidenceDir) == 1 {
+		args = append(args, "/opr-evidence")
+	}
 	output, err := r.runContainer(ctx, containerName(name, "analysis"), args...)
 	if err != nil {
 		return nil, fmt.Errorf("package analysis failed: %w: %s", err, output)
 	}
 	var analysis runtimeAnalysis
-	if len(output) > 256*1024 || json.Unmarshal([]byte(output), &analysis) != nil || analysis.SchemaVersion != 1 || analysis.Tool != "namcap" || analysis.RuntimeClosureComplete {
+	if len(output) > 256*1024 || json.Unmarshal([]byte(output), &analysis) != nil || analysis.SchemaVersion != 2 || analysis.Tool != "go-native-analysis" || analysis.RuntimeClosureComplete {
 		return nil, errors.New("package analysis returned invalid evidence")
 	}
 	analysis.Exceptions = exceptions

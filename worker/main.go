@@ -35,6 +35,10 @@ func main() {
 	case "version":
 		fmt.Println(workerVersion)
 		return
+	case "analyze-package":
+		err = analyzePackageCommand(os.Args[2:])
+	case "capture-catalog":
+		err = captureCatalogCommand(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -52,6 +56,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: opr-worker enroll --origin URL --name NAME --architecture x86_64|aarch64 [--image IMAGE@sha256:DIGEST --image-digest sha256:DIGEST] [--token TOKEN | --token-stdin]")
 	fmt.Fprintln(os.Stderr, "       opr-worker run [--config PATH] [--once]")
 	fmt.Fprintln(os.Stderr, "       opr-worker version")
+	fmt.Fprintln(os.Stderr, "       opr-worker capture-catalog --source arch|omarchy|opr --output DIRECTORY [--channel CHANNEL --arch ARCH]")
 }
 
 func enrollCommand(args []string) error {
@@ -344,6 +349,9 @@ func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, 
 				return reportFailure(parent, client, job, &result, err)
 			}
 			artifacts = append(artifacts, Artifact{Key: response.Key, SHA256: response.SHA256, Size: response.Size, Filename: response.Filename})
+		}
+		if err := client.uploadABI(parent, job, result); err != nil {
+			return reportFailure(parent, client, job, &result, err)
 		}
 		provenance, err = provenanceForOutputs(job, cfg.WorkerID, result, started, finished)
 	} else {

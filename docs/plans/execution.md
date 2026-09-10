@@ -736,3 +736,28 @@ stopped; no production admission, rebuild campaign or release cutover was run.
 Artifact ABI/symbol, dependency-closure, reproducibility and system-test producers,
 complete signed system/OPR release activation and client integration remain
 required implementation work.
+
+
+## Go runtime analysis and ABI retention
+
+Package analysis now uses Go and native Arch tools; no Python or namcap process
+runs in the worker analysis path. Signed schema-2 runtime reports retain exact
+file, symbol, symbol-version, loader and static-archive observations through
+bounded immutable ABI chunks. Historical namcap evidence remains verifiable.
+Worker completion, private signing and cohort checks bind retained objects to the
+exact uploaded artifact and build attempt. Private downloads recheck hashes.
+
+Catalog capture execution now uses the same Go binary in the pipeline image.
+The legacy rollback client uses jq with strict origin, filename and digest
+validation. No imports or bulk captures were run for this change. Matching build
+progress now recognizes registered split outputs as well as legacy evidence.
+
+Validation: 244 application tests and 14,305 assertions passed; Svelte reported
+zero errors/warnings, pipeline and signer type checks passed, and web production
+build passed. The signer suite passed 14 tests. Go tests, vet and race checks
+passed. Native x86 Hello and split-output regressions passed, including rejection
+of an undeclared runtime dependency. Both Linux architectures compile; fresh ARM
+runtime acceptance remains separate. Complete system/OPR release implementation
+and qualification continue in subsequent batches; this is not release cutover.
+
+See [native analysis](../native-analysis.md) for protocol, limits and checks.

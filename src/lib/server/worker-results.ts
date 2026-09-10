@@ -5,6 +5,7 @@ import { type DependencyPlan, parseDependencyPlan, dependencyPlansEqual } from '
 import { assertRuntimeEvidence, reviewedRuntimeExceptions } from './runtime-evidence';
 import { blockerStatements, parseDependencyBlockers } from './dependency-blockers';
 import { artifactInsert, assertExpectedFilename, buildArtifacts, sameArtifacts, storedOutputContract, MAX_BUILD_OUTPUTS } from './build-outputs';
+import { assertRetainedAbiEvidence } from './build-abi-evidence';
 import { verifyOutputProvenance } from './build-output-evidence';
 import {
   type WorkerMetadata,
@@ -437,7 +438,10 @@ export async function completeJob(
       throw new WorkerProtocolError(409, 'Recipe completion cannot contain an artifact');
     }
     if (!input.provenance || !input.provenanceSignature) throw new WorkerProtocolError(400, 'Successful completion requires provenance');
-    if (outputContract) await verifyOutputProvenance(worker, build, outputs, input.provenance, input.provenanceSignature, input.installedSize);
+    if (outputContract) {
+      await verifyOutputProvenance(worker, build, outputs, input.provenance, input.provenanceSignature, input.installedSize);
+      await assertRetainedAbiEvidence(db, build, JSON.parse(input.provenance));
+    }
     else await verifyProvenance(worker, build, artifact, input.provenance, input.provenanceSignature, input.installedSize);
   } else if (input.installedSize !== undefined || input.smokePassed || input.artifact || input.artifacts || input.provenance || input.provenanceSignature) {
     throw new WorkerProtocolError(400, 'Failed completion contains success evidence');

@@ -5,6 +5,8 @@ import { assertRuntimeEvidence, assertRuntimeAnalysis, preparedEnvironment, type
 import { assertFrozenEvidence, type FrozenEvidence } from '../frozen-inputs';
 import { parseDependencyPlan, type DependencyPlan } from './dependency-plan';
 import { parsePreservedBuildInputs, type PreservedBuildInputs } from '../preserved-recipe';
+import { parseAbiReference } from '../abi-inventory';
+import type { InputObject } from '../frozen-inputs';
 
 export interface OutputEvidence {
   schemaVersion: 2; attempt: number; outputContract: OutputContract;
@@ -13,7 +15,7 @@ export interface OutputEvidence {
   dependencyPlan?: DependencyPlan | null; frozenInputs?: FrozenEvidence; preservedRecipe?: PreservedBuildInputs; buildEnvironment: unknown;
   outputs: { pkgbase: string; filename: string; artifactSha256: string; packageMetadata: OutputMetadata }[];
   runtimeTests: { outputs: string[]; environment: { baseImage: string; preparedImage: string }; smokePassed: true;
-    analyses: { name: string; runtimeAnalysis: { elf: { machine: string }[]; nativeCode: string[]; payloadSha256: string } }[] }[];
+    analyses: { name: string; runtimeAnalysis: { elf: { machine: string }[]; nativeCode: string[]; payloadSha256: string; abiInventory?: InputObject } }[] }[];
 }
 
 const hash = /^[a-f0-9]{64}$/;
@@ -63,6 +65,7 @@ export async function assertOutputEvidence(value: unknown, exceptions: RuntimeEx
       environments: [preparedEnvironment(report.buildEnvironment), ...report.runtimeTests.map((test) => preparedEnvironment(test.environment))] });
   }
   const payloads = new Map<string, string>();
+  const abi = new Map<string, string>();
   for (const [index, test] of report.runtimeTests.entries()) {
     keys(test, ['outputs', 'environment', 'analyses', 'smokePassed']);
     const group = contract.runtimeGroups[index];
@@ -75,6 +78,10 @@ export async function assertOutputEvidence(value: unknown, exceptions: RuntimeEx
       if (report.frozenInputs) await assertRuntimeAnalysis(item.runtimeAnalysis, exceptions);
       else await assertRuntimeEvidence({ buildEnvironment: report.buildEnvironment, runtimeEnvironment: test.environment, runtimeAnalysis: item.runtimeAnalysis }, report.imageDigest, exceptions);
       const analysis = item.runtimeAnalysis;
+      if (analysis.abiInventory !== undefined) parseAbiReference(analysis.abiInventory);
+      const ref = canonicalJson(analysis.abiInventory ?? null);
+      if (abi.has(item.name) && abi.get(item.name) !== ref) throw new Error('ABI inventory differs between installation groups');
+      abi.set(item.name, ref);
       if (!hash.test(analysis.payloadSha256) || (payloads.has(item.name) && payloads.get(item.name) !== analysis.payloadSha256)) throw new Error('Package payload comparison digest is missing or inconsistent');
       payloads.set(item.name, analysis.payloadSha256);
       if (!Array.isArray(analysis.nativeCode) || analysis.nativeCode.length > 4096 || analysis.nativeCode.some((path) => typeof path !== 'string' || !path || path.length > 4096)) throw new Error('Native code inspection is missing or invalid');

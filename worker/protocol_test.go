@@ -64,7 +64,7 @@ func TestDaemonMetadataIsFixedAndIndependent(t *testing.T) {
 	if metadata.Version != workerVersion || metadata.Runtime != "podman" {
 		t.Fatalf("metadata identity = %+v", metadata)
 	}
-	want := []string{"offline-oci", "multipart-upload", "registry-pull", "runtime-analysis-v1", "multi-output-v2", "frozen-inputs-v1", "helper-shell-analysis-v1", "recipe-inspection-v1", "preserved-recipe-v1"}
+	want := []string{"offline-oci", "multipart-upload", "registry-pull", "runtime-analysis-v1", "multi-output-v2", "frozen-inputs-v1", "helper-shell-analysis-v1", "recipe-inspection-v1", "preserved-recipe-v1", "abi-inventory-v1"}
 	if strings.Join(metadata.Capabilities, ",") != strings.Join(want, ",") {
 		t.Fatalf("capabilities = %v, want %v", metadata.Capabilities, want)
 	}

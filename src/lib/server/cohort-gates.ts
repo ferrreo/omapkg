@@ -17,6 +17,7 @@ import type { Worker } from '../model';
 import type { FrozenEvidence } from '../frozen-inputs';
 import { selectedInputLock } from './input-locks';
 import { cohortMembers, readCohortManifest } from './cohort-members';
+import { assertRetainedAbiEvidence } from './build-abi-evidence';
 
 export interface CohortMatrixRow {
   pkgbase: string; architecture: Architecture; required: boolean; status: string;
@@ -144,6 +145,7 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
           }
           const artifacts = await buildArtifacts(env.DB, lease);
           await verifyOutputProvenance(worker, lease, artifacts, build.provenance, build.provenance_signature, build.installed_size ?? undefined);
+          await assertRetainedAbiEvidence(env.DB, lease, JSON.parse(build.provenance));
           if (verifyArtifacts) for (const artifact of artifacts) await verifyR2Object(env, artifact.key, artifact.sha256, artifact.size);
           const report = JSON.parse(build.provenance) as { frozenInputs?: FrozenEvidence; outputs: { packageMetadata: { name: string; architecture: string } }[];
             runtimeTests: { analyses: { name: string; runtimeAnalysis: { payloadSha256: string } }[] }[] };

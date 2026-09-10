@@ -1,6 +1,6 @@
 # omapkg worker
 
-Build static Linux binaries:
+Build static Linux binaries with Go 1.26 or newer:
 
 ```sh
 WORKER_VERSION=v0.1.0
@@ -9,6 +9,11 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main
 ```
 
 Release binaries report this embedded version through `opr-worker version`.
+
+Runtime package analysis is implemented in Go; it needs no Python or namcap.
+[Native analysis and ABI evidence](../docs/native-analysis.md) documents the
+retained observations, bounds and verification contract. The same executable
+provides `capture-catalog` for explicitly requested catalog capture operations.
 
 Install or upgrade with a versioned binary. The installer keeps prior releases,
 updates launcher symlink atomically, refuses to replace a regular launcher or a

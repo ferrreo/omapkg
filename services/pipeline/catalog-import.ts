@@ -1,7 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
 import { cloudflareSandbox } from '@flue/runtime/cloudflare';
-import captureScript from './capture-catalog.py?raw';
 import type { PipelineEnv } from './types';
 import type { Env } from '../../src/lib/server/env';
 import type { CaptureJob, CapturePayload } from '../../src/lib/server/catalog-capture';
@@ -32,7 +31,7 @@ export class CatalogImportWorkflow extends WorkflowEntrypoint<PipelineEnv, { job
       await stub.setAllowedHosts(['geo.mirror.pkgbuild.com', 'fl.us.mirror.archlinuxarm.org', 'stable-mirror.omarchy.org', 'rc-mirror.omarchy.org', 'mirror.omarchy.org', 'pkgs.omarchy.org',
         ...(payload.oprOrigin ? [new URL(payload.oprOrigin).hostname] : [])]);
       const sandbox = await cloudflareSandbox(stub, { cwd: '/workspace' }).createSandbox({ id: `catalog-${job.id}` });
-      const run = (args: string[]) => sandbox.exec(`python3 -c ${shellQuote(captureScript)} ${args.map(shellQuote).join(' ')}`, { timeoutMs: 300_000 });
+      const run = (args: string[]) => sandbox.exec(`/usr/local/bin/omapkg-tools capture-catalog ${args.map(shellQuote).join(' ')}`, { timeoutMs: 300_000 });
       const read = async (path: string, maximum: number) => {
         const bytes = new Uint8Array(await sandbox.readFileBuffer(path));
         if (bytes.length > maximum) throw new Error('Capture file exceeds its declared budget');

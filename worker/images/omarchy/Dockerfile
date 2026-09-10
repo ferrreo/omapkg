@@ -18,7 +18,7 @@ RUN set -eux; \
     pacman-key --populate omarchy; \
     sed -i '/^\[omarchy\]$/,/^$/d' /etc/pacman.conf; \
     pacman -Syyuu --noconfirm; \
-    pacman -S --needed --noconfirm arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools namcap shellcheck; \
+    pacman -S --needed --noconfirm arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools shellcheck; \
     pacman -Scc --noconfirm; \
     rm -f /tmp/omarchy-signing-key.asc; \
     rm -rf /etc/pacman.d/gnupg/openpgp-revocs.d /etc/pacman.d/gnupg/private-keys-v1.d

@@ -165,8 +165,15 @@ export async function importBuildCoverage(db: D1Database, importId: string) {
       JOIN requests q ON q.catalog_pkgbase=p.pkgbase AND q.catalog_revision=p.admitted_revision
       JOIN revisions v ON v.request_id=q.id JOIN builds b ON b.revision_id=v.id
       WHERE o.name=e.name AND b.architecture=e.target_architecture AND b.status='succeeded' AND b.smoke_passed=1
-        AND b.provenance_signature IS NOT NULL AND json_extract(b.provenance,'$.packageMetadata.name')=e.name
-        AND json_extract(b.provenance,'$.packageMetadata.fullVersion')=json_extract(e.entry_json,'$.version')
+        AND b.provenance_signature IS NOT NULL AND (
+          (b.output_contract_json IS NULL AND json_extract(b.provenance,'$.packageMetadata.name')=e.name
+            AND json_extract(b.provenance,'$.packageMetadata.fullVersion')=json_extract(e.entry_json,'$.version')) OR
+          (b.output_contract_json IS NOT NULL AND json_extract(b.provenance,'$.schemaVersion')=2 AND EXISTS (
+            SELECT 1 FROM json_each(b.provenance,'$.outputs') output JOIN build_artifacts artifact
+              ON artifact.build_id=b.id AND artifact.attempt=b.attempt AND artifact.filename=json_extract(output.value,'$.filename')
+              AND artifact.sha256=json_extract(output.value,'$.artifactSha256')
+            WHERE json_extract(output.value,'$.packageMetadata.name')=e.name
+              AND json_extract(output.value,'$.packageMetadata.fullVersion')=json_extract(e.entry_json,'$.version'))))
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=v.id AND a.kind='area' AND a.revoked_at IS NULL AND a.manifest_sha256=v.manifest_sha256)
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=v.id AND a.kind='security' AND a.revoked_at IS NULL AND a.manifest_sha256=v.manifest_sha256)) THEN 1 ELSE 0 END) AS built
     FROM catalog_import_entries e WHERE e.import_id=?`).bind(importId).first<{ captured: number; admitted: number | null; built: number | null }>();

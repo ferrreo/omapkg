@@ -52,6 +52,42 @@ test('capture is resumable and sealed only after exact source counts and index m
   } finally { db.close(); }
 });
 
+test('import build progress includes registered split outputs and preserves legacy evidence', async () => {
+  const holder = new TestD1(`
+    CREATE TABLE catalog_import_entries(import_id TEXT,name TEXT,target_architecture TEXT,entry_json TEXT);
+    CREATE TABLE catalog_outputs(name TEXT,pkgbase TEXT);
+    CREATE TABLE catalog_packages(pkgbase TEXT,admitted_revision INTEGER);
+    CREATE TABLE requests(id TEXT,catalog_pkgbase TEXT,catalog_revision INTEGER);
+    CREATE TABLE revisions(id TEXT,request_id TEXT,manifest_sha256 TEXT);
+    CREATE TABLE builds(id TEXT,revision_id TEXT,architecture TEXT,status TEXT,smoke_passed INTEGER,provenance_signature TEXT,provenance TEXT,output_contract_json TEXT,attempt INTEGER);
+    CREATE TABLE build_artifacts(build_id TEXT,attempt INTEGER,filename TEXT,sha256 TEXT);
+    CREATE TABLE approvals(revision_id TEXT,kind TEXT,revoked_at INTEGER,manifest_sha256 TEXT);
+    INSERT INTO catalog_packages VALUES('base',1);
+    INSERT INTO requests VALUES('request','base',1);
+    INSERT INTO revisions VALUES('revision','request','reviewed');
+    INSERT INTO approvals VALUES('revision','area',NULL,'reviewed'),('revision','security',NULL,'reviewed');
+  `);
+  const db = asD1(holder);
+  try {
+    for (const name of ['legacy', 'split', 'split-docs', 'missing-output']) {
+      holder.prepare('INSERT INTO catalog_outputs VALUES(?,?)').bind(name, 'base').run();
+      holder.prepare('INSERT INTO catalog_import_entries VALUES(?,?,?,?)').bind('capture', name, 'x86_64', JSON.stringify({ version: '2:1.0-1' })).run();
+    }
+    holder.prepare("INSERT INTO builds VALUES('legacy-build','revision','x86_64','succeeded',1,'signed',?,NULL,1)")
+      .bind(JSON.stringify({ packageMetadata: { name: 'legacy', fullVersion: '2:1.0-1' } })).run();
+    const outputs = ['split', 'split-docs', 'missing-output'].map((name) => ({ filename: `${name}.pkg.tar.zst`, artifactSha256: name,
+      packageMetadata: { name, fullVersion: '2:1.0-1' } }));
+    holder.prepare("INSERT INTO builds VALUES('split-build','revision','x86_64','succeeded',1,'signed',?,'contract',2)")
+      .bind(JSON.stringify({ schemaVersion: 2, outputs })).run();
+    for (const output of outputs.slice(0, 2)) holder.prepare("INSERT INTO build_artifacts VALUES('split-build',2,?,?)").bind(output.filename, output.artifactSha256).run();
+    expect(await importBuildCoverage(db, 'capture')).toEqual({ captured: 4, admitted: 4, built: 3 });
+    holder.exec("UPDATE build_artifacts SET attempt=1 WHERE filename='split-docs.pkg.tar.zst'");
+    expect((await importBuildCoverage(db, 'capture')).built).toBe(2);
+    holder.exec("UPDATE approvals SET revoked_at=1 WHERE kind='security'");
+    expect((await importBuildCoverage(db, 'capture')).built).toBe(0);
+  } finally { holder.close(); }
+});
+
 test('reconciliation retains missing packages and target gaps when an ARM baseline exists', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
   try {

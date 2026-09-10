@@ -244,7 +244,7 @@ publication.
 
 ## Capturing a complete Arch inventory
 
-`services/pipeline/capture-arch-recipes.py` reads a sealed `capture-catalog.py`
+`services/pipeline/capture-arch-recipes.py` reads a sealed `opr-worker capture-catalog`
 folder and verifies every entry against its index digest. It fetches exact version
 tags from Arch's canonical Git namespace, using the same project/tag naming rules
 as Arch devtools. Core packages are captured first. No PKGBUILD or hook executes.

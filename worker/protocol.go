@@ -84,6 +84,7 @@ var supportedWorkerCapabilities = [...]string{
 	"helper-shell-analysis-v1",
 	"recipe-inspection-v1",
 	"preserved-recipe-v1",
+	"abi-inventory-v1",
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {

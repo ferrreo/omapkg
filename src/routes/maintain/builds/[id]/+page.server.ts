@@ -12,6 +12,7 @@ import { retryBuild } from '$lib/server/workers';
 import { buildArtifacts, packageFilename, storedOutputContract } from '$lib/server/build-outputs';
 import { preservedBuildInputs } from '$lib/preserved-recipe';
 import type { Build, Revision } from '$lib/model';
+import type { OutputEvidence } from '$lib/server/output-evidence';
 import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async (event) => {
   const actor = maintainer(event);
@@ -31,7 +32,9 @@ export const load: PageServerLoad = async (event) => {
   let canRetain = false; try { await inputAuthority(DB, actor); canRetain = !!build.input_lock_sha256 && canSign; } catch { /* Retention requires system authority. */ }
   const retained = await query<{ package_sha256: string; origin_evidence: string }>(DB,
     'SELECT package_sha256,origin_evidence FROM input_owned_packages WHERE build_id=? AND attempt=? AND revoked_at IS NULL', build.id, build.attempt);
+  const report = contract && build.provenance ? JSON.parse(build.provenance) as OutputEvidence : null;
   const outputs = contract?.outputs.map((output) => ({ ...output, filename: packageFilename(output),
+    abi: report?.runtimeTests.flatMap((test) => test.analyses).find((item) => item.name === output.name)?.runtimeAnalysis.abiInventory ?? null,
     signature: signatures.find((item) => item.artifact_filename === packageFilename(output)) ?? null,
     artifact: artifacts.find((artifact) => artifact.filename === packageFilename(output)) ?? null })) ?? [];
   return { build, revision, logs, preserved: revisionRow ? preservedBuildInputs(revisionRow, build.architecture) : null,

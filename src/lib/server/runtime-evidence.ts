@@ -1,5 +1,6 @@
 import { sha256 } from './db';
 import { readOprEvidence } from './sbom';
+import { parseAbiReference } from '../abi-inventory';
 
 export type RuntimeException = { findingSha256: string; reason: string };
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -47,12 +48,13 @@ export async function assertRuntimeEvidence(provenance: Record<string, unknown>,
 
 export async function assertRuntimeAnalysis(value: unknown, exceptions: RuntimeException[]): Promise<void> {
   const analysis = value as Record<string, unknown> | undefined;
-  if (!analysis || analysis.schemaVersion !== 1 || analysis.tool !== 'namcap' || typeof analysis.toolVersion !== 'string' || !analysis.toolVersion || analysis.toolVersion.length > 128 ||
+  if (!analysis || !(analysis.schemaVersion === 1 && analysis.tool === 'namcap' || analysis.schemaVersion === 2 && analysis.tool === 'go-native-analysis') || typeof analysis.toolVersion !== 'string' || !analysis.toolVersion || analysis.toolVersion.length > 128 ||
       analysis.runtimeClosureComplete !== false || !Array.isArray(analysis.unknowns) || !analysis.unknowns.length || analysis.unknowns.length > 32 || analysis.unknowns.some((item) => typeof item !== 'string' || !item || item.length > 4096) ||
       !Array.isArray(analysis.elf) || analysis.elf.length > 4096 || !Array.isArray(analysis.findings) || analysis.findings.length > 1024 ||
       JSON.stringify(runtimeExceptions(analysis.exceptions)) !== JSON.stringify(exceptions)) {
-    throw new Error('Bounded namcap evidence with explicit coverage and reviewed exceptions is required');
+    throw new Error('Bounded runtime evidence with explicit coverage and reviewed exceptions is required');
   }
+  if (analysis.abiInventory !== undefined) parseAbiReference(analysis.abiInventory);
   for (const value of analysis.elf) {
     if (!value || typeof value.path !== 'string' || !value.path || value.path.length > 4096 || typeof value.machine !== 'string' ||
         !Array.isArray(value.needed) || !Array.isArray(value.searchPaths) || [...value.needed, ...value.searchPaths].some((item) => typeof item !== 'string' || item.length > 4096)) {

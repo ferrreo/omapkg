@@ -7,6 +7,12 @@ import { assembleOwnedInputLock, ownedInputChoices } from '../src/lib/server/inp
 import { signNativeOutput } from '../src/lib/server/native-signing';
 import { claimSigningIntent, completeSigningIntent } from '../src/lib/server/signing-control';
 import { runtimeEvidence } from './runtime-fixtures';
+import { PUT as uploadAbi } from '../src/routes/api/worker/jobs/[id]/evidence/[digest]/+server';
+import { canonicalJson } from '../src/lib/canonical-json';
+import { retainedAbiInventory, readAbiChunk, abiObjectKey } from '../src/lib/server/build-abi-evidence';
+import type { InputObject } from '../src/lib/frozen-inputs';
+import type { AbiChunk, AbiInventory } from '../src/lib/abi-inventory';
+import { GET as downloadArtifact } from '../src/routes/maintain/builds/[id]/artifact/+server';
 import { expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { sha256 } from '../src/lib/server/db';
@@ -618,7 +624,7 @@ for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} com
       ...(retained ? { frozenInputs: { lock: retained.lock, manifest: retained.manifest, host: { architecture: 'x86_64', kernel: 'Linux TEST', cpuInfoSha256: 'a'.repeat(64), cpuModel: 'INERT CPU', runtime: 'podman', runtimeVersion: 'TEST', goVersion: 'TEST' } } } : {}),
       buildEnvironment: retained ? { baseImage: job.imageRef, preparedImage: `sha256:${'d'.repeat(64)}`, packages: [`${retained.pkg.name} ${retained.pkg.version}`] } : runtimeEvidence(job.imageDigest).buildEnvironment,
       runtimeTests: job.outputContract!.runtimeGroups.map((group) => ({ outputs: group, environment: retained ? { baseImage: job.imageRef, preparedImage: `sha256:${'e'.repeat(64)}`, packages: [`${retained.pkg.name} ${retained.pkg.version}`] } : runtimeEvidence(job.imageDigest).runtimeEnvironment, smokePassed: true,
-        analyses: group.map((name, i) => ({ name, runtimeAnalysis: { ...runtimeEvidence(job.imageDigest).runtimeAnalysis, nativeCode: [] as string[], payloadSha256: String(i + 1).repeat(64) } })) })),
+        analyses: group.map((name, i) => ({ name, runtimeAnalysis: { ...runtimeEvidence(job.imageDigest).runtimeAnalysis, nativeCode: [] as string[], payloadSha256: String(i + 1).repeat(64), abiInventory: undefined as InputObject | undefined } })) })),
       outputs: job.outputContract!.outputs.map((output) => ({ pkgbase: job.packageName, filename: packageFilename(output), artifactSha256: artifact.sha256,
         packageMetadata: { ...output, installedSize: 10, depends: [], provides: [], conflicts: [], replaces: [] } })),
     };
@@ -637,11 +643,49 @@ for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} com
     await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).rejects.toThrow('incomplete');
     const other = await uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, packageFilename(second), bytes);
     complete.artifacts.push(other);
+    const chunk: AbiChunk = { schemaVersion: 1, kind: 'abi-records', artifactSha256: artifact.sha256, start: 0,
+      records: [{ kind: 'file', path: 'usr/share/fixture', sha256: artifact.sha256, type: '0', mode: 420, link: '', nativeKind: null, elf: null }] };
+    const reference = async (value: unknown) => { const body = new TextEncoder().encode(canonicalJson(value)); return { sha256: await sha256(body), size: body.length }; };
+    const upload = async (value: unknown, token = job.leaseToken) => {
+      const body = new TextEncoder().encode(canonicalJson(value)); const digest = await sha256(body);
+      const path = `/api/worker/jobs/${job.id}/evidence/${digest}?leaseToken=${encodeURIComponent(token)}`;
+      const request = await signedRequest('PUT', path, body, worker.id, keys.privateKey);
+      return uploadAbi({ request, url: new URL(request.url), params: { id: job.id, digest }, platform: { env: inputEnv } } as never);
+    };
+    const chunkRef = await reference(chunk);
+    const manifest: AbiInventory = { schemaVersion: 1, kind: 'abi-inventory', artifactSha256: artifact.sha256, tool: 'go-debug-elf', toolVersion: 'go1.26.0',
+      files: 1, symbols: 0, chunks: [{ ...chunkRef, start: 0, count: 1, files: 1, symbols: 0 }], typeAbi: 'not-checked' };
+    const abiRef = await reference(manifest);
+    for (const test of v2Report.runtimeTests) for (const item of test.analyses) Object.assign(item.runtimeAnalysis, { schemaVersion: 2, tool: 'go-native-analysis', toolVersion: 'go1.26.0', abiInventory: abiRef });
+    Object.assign(complete, await sign(v2Report));
+    await expect(completeJob(db, inputEnv.ARTIFACTS, worker, job.id, complete)).rejects.toThrow('ABI evidence is incomplete');
+    await expect(upload(manifest)).rejects.toMatchObject({ status: 409 });
+    await expect(upload(chunk, 'wrong-lease')).rejects.toMatchObject({ status: 409 });
+    await expect(upload({ ...chunk, artifactSha256: 'f'.repeat(64) })).rejects.toMatchObject({ status: 409 });
+    expect(await (await upload(chunk)).json() as InputObject).toEqual(chunkRef);
+    expect(await (await upload(chunk)).json() as InputObject).toEqual(chunkRef);
+    expect(await (await upload(manifest)).json() as InputObject).toEqual(abiRef);
+    expect(await retainedAbiInventory(db, { id: job.id, attempt: job.attempt! }, abiRef, artifact.sha256)).toEqual(manifest);
+    await expect(retainedAbiInventory(db, { id: job.id, attempt: job.attempt! + 1 }, abiRef, artifact.sha256)).rejects.toThrow('ABI evidence is incomplete');
+    await expect(retainedAbiInventory(db, { id: job.id, attempt: job.attempt! }, abiRef, 'a'.repeat(64))).rejects.toThrow('ABI evidence is incomplete');
+    expect(await readAbiChunk(inputEnv, chunkRef, artifact.sha256)).toEqual(chunk);
+    const downloadEvent = { request: new Request('https://opr.test/abi'), params: { id: job.id }, locals: { actor }, platform: { env: inputEnv },
+      url: new URL(`https://opr.test/abi?attempt=${job.attempt}&evidence=${abiRef.sha256}`) };
+    const downloadedAbi = await downloadArtifact(downloadEvent as never);
+    expect(await sha256(new Uint8Array(await downloadedAbi.arrayBuffer()))).toBe(abiRef.sha256);
+    expect(downloadedAbi.headers.get('Cache-Control')).toBe('private, no-store');
+    await expect(downloadArtifact({ ...downloadEvent, locals: { actor: null } } as never)).rejects.toMatchObject({ status: 401 });
+    const original = bucket.objects.get(abiObjectKey(chunkRef.sha256))!;
+    await bucket.put(abiObjectKey(chunkRef.sha256), 'changed');
+    await expect(readAbiChunk(inputEnv, chunkRef, artifact.sha256)).rejects.toThrow('ABI evidence is incomplete');
+    bucket.objects.set(abiObjectKey(chunkRef.sha256), original);
+    expect(() => holder.exec('DELETE FROM build_abi_evidence')).toThrow('immutable');
     const tampered = structuredClone(v2Report); tampered.runtimeTests[0].analyses[1].runtimeAnalysis.nativeCode = ['usr/lib/hidden.a'];
     await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, ...await sign(tampered) })).rejects.toThrow('native code');
     await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, ...await sign({ ...v2Report, attempt: 99 }) })).rejects.toThrow('leased inputs');
     await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, ...await sign({ ...v2Report, runtimeTests: [] }) })).rejects.toThrow('matrix is incomplete');
     expect(await completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).toEqual({ status: 'succeeded', idempotent: false });
+    await expect(upload(chunk)).rejects.toMatchObject({ status: 409 });
     expect(await completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).toEqual({ status: 'succeeded', idempotent: true });
     await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, { ...complete, artifacts: [artifact] })).rejects.toThrow('already completed');
     expect((await buildArtifacts(db, { id: job.id, attempt: job.attempt! })).length).toBe(2);

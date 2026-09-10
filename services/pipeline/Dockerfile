@@ -67,6 +67,10 @@ RUN set -eux; \
   ln -s ../cargo/bin/cargo /opt/rust/bin/cargo; \
   rm -rf "$work_dir" /var/lib/apt/lists/*
 
+COPY worker/*.go worker/go.mod /tmp/omapkg-tools/
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local /opt/go/bin/go build -C /tmp/omapkg-tools -trimpath -ldflags="-s -w" -o /opt/omapkg-tools . \
+    && rm -rf /tmp/omapkg-tools
+
 FROM docker.io/cloudflare/sandbox:0.12.9@sha256:4a56a37a3cfd9b38d65bb4b5d0b341e6490a3a4c0226274ae4c1cca4948e85fe
 
 # Keep xz available for source archives. Go's complete GOROOT (including src)
@@ -83,3 +87,4 @@ RUN set -eux; \
 
 COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/rust /opt/rust
+COPY --from=toolchain /opt/omapkg-tools /usr/local/bin/omapkg-tools
