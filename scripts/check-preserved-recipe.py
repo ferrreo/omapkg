@@ -10,8 +10,10 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import tarfile
+from urllib.parse import urlsplit
 
 PROJECT = Path(__file__).resolve().parents[1]
 REPOSITORY = "https://github.com/omacom/omarchy-pkgs"
@@ -94,6 +96,7 @@ def capture(root, image, helper_analysis):
         command("podman", "run", "--rm", "--read-only", "--network=none", "--cap-drop=ALL",
                 "--security-opt=no-new-privileges", image, "cat", "/etc/makepkg.conf", stdout=file)
     mirror = "https://geo.mirror.pkgbuild.com/$repo/os/$arch" if architecture == "x86_64" else "https://fl.us.mirror.archlinuxarm.org/$arch/$repo"
+    mirror_host = urlsplit(mirror).hostname
     (frozen / "resolver.conf").write_text(f"""[options]
 Architecture = {architecture}
 SigLevel = Required DatabaseOptional
@@ -106,7 +109,8 @@ Server = {mirror}
 [extra]
 Server = {mirror}
 """)
-    command("podman", "run", "--rm", "--read-only", "--network=bridge", "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
+    command("podman", "run", "--rm", "--read-only", "--network=bridge", "--add-host", f"{mirror_host}:{socket.gethostbyname(mirror_host)}",
+            "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
             "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
             "--mount", f"type=bind,src={frozen},dst=/capture",
             "--mount", f"type=bind,src={PROJECT / 'services/pipeline/capture-bootstrap-inputs.py'},dst=/capture.py,ro",

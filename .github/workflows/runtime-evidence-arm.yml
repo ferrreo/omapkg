@@ -45,7 +45,7 @@ jobs:
         with:
           go-version-file: worker/go.mod
       - name: Build signature-verified ARM images
-        if: ${{ inputs.builder_image == '' && inputs.runtime_image == '' }}
+        if: ${{ !inputs.preserved_recipe && inputs.builder_image == '' && inputs.runtime_image == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -58,7 +58,7 @@ jobs:
           docker build -t "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG" \
             -f worker/images/aarch64/runtime.Dockerfile "$OPR_ARM_WORKDIR/context"
       - name: Push images with temporary rollout credential
-        if: ${{ inputs.builder_image == '' && inputs.runtime_image == '' }}
+        if: ${{ !inputs.preserved_recipe && inputs.builder_image == '' && inputs.runtime_image == '' }}
         shell: bash
         env:
           REGISTRY_ROLLOUT_AUTH: ${{ secrets.REGISTRY_ROLLOUT_AUTH }}
@@ -76,7 +76,7 @@ jobs:
           printf 'OPR_WORKER_E2E_IMAGE=%s\nOPR_WORKER_E2E_RUNTIME_IMAGE=%s\n' "$builder" "$runtime" >> "$GITHUB_ENV"
           printf '%s\n%s\n' "$builder" "$runtime"
       - name: Pull retained images for native regression
-        if: ${{ inputs.builder_image != '' || inputs.runtime_image != '' }}
+        if: ${{ !inputs.preserved_recipe && (inputs.builder_image != '' || inputs.runtime_image != '') }}
         shell: bash
         env:
           BUILDER_IMAGE: ${{ inputs.builder_image }}
@@ -100,6 +100,7 @@ jobs:
           test "$(docker image inspect --format '{{.Architecture}}' "$RUNTIME_IMAGE")" = arm64
           printf 'OPR_WORKER_E2E_IMAGE=%s\nOPR_WORKER_E2E_RUNTIME_IMAGE=%s\n' "$BUILDER_IMAGE" "$RUNTIME_IMAGE" >> "$GITHUB_ENV"
       - name: Native dependency and isolation regression
+        if: ${{ !inputs.preserved_recipe }}
         shell: bash
         env:
           OPR_WORKER_E2E_RUNTIME: docker
@@ -112,9 +113,12 @@ jobs:
         if: ${{ inputs.preserved_recipe }}
         shell: bash
         env:
+          BUILDER_IMAGE: ${{ inputs.builder_image }}
           REGISTRY_NATIVE_TEST_AUTH: ${{ secrets.REGISTRY_NATIVE_TEST_AUTH }}
         run: |
           set -euo pipefail
+          test "$(uname -m)" = aarch64
+          [[ "$BUILDER_IMAGE" =~ ^registry\.cloudflare\.com/[a-f0-9]{32}/[a-z0-9._-]+@sha256:[a-f0-9]{64}$ ]]
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends podman
           auth="$RUNNER_TEMP/preserved-registry.json"
@@ -128,9 +132,10 @@ jobs:
           printf '%s' "$REGISTRY_NATIVE_TEST_AUTH" > "$auth"
           chmod 600 "$auth"
           unset REGISTRY_NATIVE_TEST_AUTH
-          sudo podman pull --authfile "$auth" "$OPR_WORKER_E2E_IMAGE"
+          sudo podman pull --authfile "$auth" "$BUILDER_IMAGE"
+          test "$(sudo podman image inspect --format '{{.Architecture}}' "$BUILDER_IMAGE")" = arm64
           sudo env PATH="$PATH" python3 scripts/check-preserved-recipe.py \
-            --output "$RUNNER_TEMP/preserved-asdcontrol" --helper-image "$OPR_WORKER_E2E_IMAGE" --helper-shell-analysis
+            --output "$RUNNER_TEMP/preserved-asdcontrol" --helper-image "$BUILDER_IMAGE" --helper-shell-analysis
       - name: Archive native source, bootstrap and build evidence
         if: ${{ inputs.preserved_recipe && always() }}
         shell: bash
