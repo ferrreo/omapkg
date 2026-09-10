@@ -241,3 +241,28 @@ include both roots, which transitively identify every original and prepared byte
 The build page links these reviewed inputs. This remains private build evidence;
 it does not qualify another architecture, approve an owned release or authorize
 publication.
+
+## Capturing a complete Arch inventory
+
+`services/pipeline/capture-arch-recipes.py` reads a sealed `capture-catalog.py`
+folder and verifies every entry against its index digest. It fetches exact version
+tags from Arch's canonical Git namespace, using the same project/tag naming rules
+as Arch devtools. Core packages are captured first. No PKGBUILD or hook executes.
+
+```sh
+python3 services/pipeline/capture-arch-recipes.py \
+  --catalog /path/to/arch-inventory --output /path/to/recipe-run \
+  --jobs 2 --interval 3
+```
+
+The run retains original files, Git proof and raw version-tag evidence per attempt.
+Split outputs share their package base/version capture; mixed versions remain
+separate tasks. Each resulting capture folder can be attached through the existing
+maintainer import flow. Capture is not source admission or native qualification.
+
+Run the same command to resume. `--retry-failed` creates new attempts while keeping
+previous failures. `progress.json` reports captured, failed and pending tasks;
+`results/` retains their exact inventory mappings. HTTP 429 stops further dispatch,
+records the server's cooldown, and prevents premature retry. The default interval
+paces repository fetches; a new run is required if the inventory or selection
+changes. `--self-test` checks naming and sealed-index integrity.
