@@ -870,3 +870,40 @@ publication and cutover remain stopped at the requester's direction. Native
 system installation/upgrade/recovery/boot acceptance requires an authorized owned
 release and remains an enforced release gate. Service deployment is recorded
 separately below; deploying implementation does not activate a distribution.
+
+## Production rollout: owned release implementation
+
+Commit `1aa0afcade7c621981b45aadc854464741620f77` reached `main` and was deployed
+on 10 September 2026. Migrations 0046–0051 applied successfully. Cloudflare
+verified these versions at 100% traffic:
+
+- Web: `d1910211-d5c9-4b0a-9ada-e608ab95a049`.
+- Signer: `68fa5a49-4af0-4cf3-819d-c83178f2fe52`.
+- Pipeline: `864bbf3e-baef-4d2c-8671-6b64c862095a`.
+
+The pipeline image is
+`registry.cloudflare.com/02b05e9d2ce87ca2ccd30cbb50b6eaf3/omarpkg-pipeline-sandbox:distribution-20260910-381dceb06488@sha256:77b2a31adb053e7e469cbb0e79f3d9c4b12ab3fc8cce1a8cee62b9e1102b0b60`.
+Its remote manifest/configuration and exact source file set were checked against
+the tested build before deployment. Existing service secrets were retained.
+
+The idle live worker was drained, upgraded to `v0.1.0-1aa0afc`, restarted and
+observed by the coordinator; job acceptance was restored. Its binary SHA-256 is
+`79c92791a4b8af39afe03b666c64a4189f42f341a8f003be513711dad8eb4d67`.
+Public home, packages, repository, releases and documentation pages return 200.
+Unauthenticated import, cohort, release and qualification APIs return 401. No
+resolved transaction is active (404); distribution mode remains `shadow`.
+
+The isolated commit passed 281 application tests (14,447 assertions), 16 signer
+tests (128 assertions), Svelte/pipeline/signer type checks, production web build,
+and Go checks. The opt-in native repository-name check passed separately.
+[Native ARM run 34493739045](https://github.com/ferrreo/omapkg/actions/runs/34493739045)
+passed on the same commit using retained digest-pinned images. It exercised native
+worker build/runtime regressions and qualification digest checks; the explicitly
+x86 qualification fixture was skipped on ARM. No preserved capture or image
+build/push ran in that workflow, and its temporary pull-only secret was deleted.
+
+The requester added [factory workflow improvements](factory-build-workflow.md)
+and approved continuing that implementation after this verified deployment.
+Factory retry accounting, single-build reproducibility contracts, the complete
+template/native-fixture matrix, dossiers/diagnostics, and anti-slop review are a
+subsequent workstream; this rollout does not claim those additions complete.
