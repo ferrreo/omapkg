@@ -16,7 +16,8 @@ runtime environment per reviewed installation group.
 Every environment pins its complete package count, archive bytes, sorted
 `name version\n` inventory digest and pages of up to 64 package records. Records
 pin package/signature/public-key bytes, primary signing fingerprint, full
-version/architecture/filename, origin and origin evidence digest. Arch filenames
+version/architecture/filename, origin and origin evidence digest. Retained seed
+archives support both `.pkg.tar.zst` and `.pkg.tar.xz`. Arch filenames
 may omit an epoch; metadata and installed versions must retain it. `any` inputs
 can serve either native architecture.
 

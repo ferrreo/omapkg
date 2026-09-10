@@ -71,7 +71,7 @@ export function parseFrozenPage(value: unknown, manifest: FrozenManifest): Froze
     if (typeof item.name !== 'string' || !/^[a-z0-9][a-z0-9@._+-]{0,63}$/.test(item.name) || typeof item.version !== 'string' ||
         !/^(?:[0-9]+:)?[A-Za-z0-9][A-Za-z0-9@._+%~^-]{0,127}$/.test(item.version) ||
         ![manifest.architecture, 'any'].includes(item.architecture) || typeof item.filename !== 'string' || item.filename.length > 256 ||
-        ![item.version, item.version.replace(/^[0-9]+:/, '')].some((version) => item.filename === `${item.name}-${version}-${item.architecture}.pkg.tar.zst`) ||
+        !['zst', 'xz'].some((extension) => [item.version, item.version.replace(/^[0-9]+:/, '')].some((version) => item.filename === `${item.name}-${version}-${item.architecture}.pkg.tar.${extension}`)) ||
         !/^[A-F0-9]{40}$/.test(item.fingerprint) || !INPUT_HASH.test(item.originEvidence) ||
         !['external-bootstrap', 'owned-build'].includes(item.origin) || (manifest.purpose === 'owned' && item.origin !== 'owned-build')) {
       throw new Error('Invalid frozen package identity or origin');

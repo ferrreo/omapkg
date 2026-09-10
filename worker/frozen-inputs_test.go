@@ -112,6 +112,16 @@ func TestFrozenInputPagesBindCompleteInventoryAndBudget(t *testing.T) {
 	if _, err := load(withHelper, false); err != nil {
 		t.Fatal(err)
 	}
+	xz := item
+	xz.Filename = strings.TrimSuffix(xz.Filename, ".zst") + ".xz"
+	withXZ := manifest
+	withXZ.Environments = append([]frozenEnvironment{}, manifest.Environments...)
+	for index := range withXZ.Environments {
+		withXZ.Environments[index].Chunks = []inputObject{pack([]frozenPackage{xz})}
+	}
+	if _, err := load(withXZ, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := inputs.verifyEnvironment("build", environmentEvidence{Packages: []string{"base 1:1.0-1"}}); err != nil {
 		t.Fatal(err)
 	}

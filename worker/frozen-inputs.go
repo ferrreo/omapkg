@@ -434,10 +434,11 @@ func materializeFrozenInputs(ctx context.Context, job Job, directory string, get
 				if colon := strings.IndexByte(fileVersion, ':'); colon >= 0 {
 					fileVersion = fileVersion[colon+1:]
 				}
-				validFilename := item.Filename == item.Name+"-"+item.Version+"-"+item.Architecture+".pkg.tar.zst" || item.Filename == item.Name+"-"+fileVersion+"-"+item.Architecture+".pkg.tar.zst"
+				extension := filepath.Ext(item.Filename)
+				validFilename := (extension == ".zst" || extension == ".xz") && (item.Filename == item.Name+"-"+item.Version+"-"+item.Architecture+".pkg.tar"+extension || item.Filename == item.Name+"-"+fileVersion+"-"+item.Architecture+".pkg.tar"+extension)
 				if !depNamePattern.MatchString(item.Name) || names[item.Name] || !validArchVersion(item.Version) ||
 					(item.Architecture != m.Architecture && item.Architecture != "any") ||
-					!validFilename || validateArtifactFilename(item.Filename) != nil ||
+					!validFilename || len(item.Filename) > 256 ||
 					!dependencyFingerprintPattern.MatchString(item.Fingerprint) || !sha256Pattern.MatchString(item.OriginEvidence) ||
 					(item.Origin != "external-bootstrap" && item.Origin != "owned-build") || (m.Purpose == "owned" && item.Origin != "owned-build") {
 					return nil, errors.New("invalid, repeated or ineligible frozen package")

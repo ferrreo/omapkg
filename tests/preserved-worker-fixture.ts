@@ -5,6 +5,7 @@ import type { Revision, Worker } from '../src/lib/model';
 import type { RecipeCapture } from '../src/lib/recipe-capture';
 import { preservedBuildInputs } from '../src/lib/preserved-recipe';
 import { canonicalJson } from '../src/lib/canonical-json';
+import { parseFrozenPage } from '../src/lib/frozen-inputs';
 import { sha256 } from '../src/lib/server/db';
 import { claimJob, completeJob, uploadArtifact } from '../src/lib/server/workers';
 import { parseRevisionForJob, getBuildForWorker, type WorkerMetadata } from '../src/lib/server/worker-protocol';
@@ -49,6 +50,8 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   expect(await claimJob(env.DB, worker, metadata, env)).toBeNull();
   const contract = (await cohortOutputContract(env.DB, { ...revision, pkgrel: revision.pkgrel ?? 1 }, 'x86_64'))!;
   const frozen = await frozenFixture(env, revision, contract);
+  expect(parseFrozenPage([{ ...frozen.pkg, filename: frozen.pkg.filename.replace('.zst', '.xz') }], frozen.manifest)).toHaveLength(1);
+  expect(() => parseFrozenPage([{ ...frozen.pkg, filename: frozen.pkg.filename + '.xz' }], frozen.manifest)).toThrow('Invalid frozen package');
   await expect(proposeInputLock(env, actor, revision.id, await frozen.retain({ ...frozen.manifest, shellAnalysis: 'skip' }), 'Invalid analyzer.')).rejects.toThrow('Invalid frozen manifest');
   frozen.manifest.shellAnalysis = 'helper'; frozen.lock = await frozen.retain(frozen.manifest);
   await proposeInputLock(env, actor, revision.id, frozen.lock, 'INERT frozen scope.');

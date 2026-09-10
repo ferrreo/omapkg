@@ -120,7 +120,8 @@ def parse_plan(text, architecture, sizes):
         size = sizes.get(repository, {}).get(filename, 0)
         if (not re.fullmatch(r"[a-z0-9][a-z0-9@._+-]{0,63}", name)
                 or not re.fullmatch(r"(?:[0-9]+:)?[A-Za-z0-9][A-Za-z0-9@._+%~^:-]{0,127}", version)
-                or arch not in (architecture, "any") or filename not in (f"{name}-{version}-{arch}.pkg.tar.zst", f"{name}-{version.split(':')[-1]}-{arch}.pkg.tar.zst")
+                or arch not in (architecture, "any") or filename not in [f"{name}-{full_version}-{arch}.pkg.tar.{extension}"
+                    for full_version in (version, version.split(':')[-1]) for extension in ("zst", "xz")]
                 or not re.fullmatch(r"[0-9a-f]{64}", digest) or not 0 < size <= MAX_PACKAGE_BYTES):
             raise ValueError(f"pacman returned an invalid package identity, checksum or size for {name!r}")
         parsed = urlsplit(url)
@@ -260,6 +261,8 @@ def main():
             line = "\t".join(["base", "1:1.0-1", "any", "base-1.0-1-any.pkg.tar.zst", "a" * 64,
                               "https://example.org/base-1.0-1-any.pkg.tar.zst", base64.b64encode(b"signature").decode(), "core"])
             assert parse_plan(line, "x86_64", sizes)[0]["size"] == 123
+            xz_line = line.replace(".pkg.tar.zst", ".pkg.tar.xz")
+            assert parse_plan(xz_line, "x86_64", {"core": {"base-1.0-1-any.pkg.tar.xz": 123}})[0]["size"] == 123
             for invalid in [line.replace("https://", "file://"), line.replace("any\t", "aarch64\t"), line + "\n" + line]:
                 try:
                     parse_plan(invalid, "x86_64", sizes)
