@@ -40,7 +40,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'preserved-recipe-v1'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'preserved-recipe-v1', 'helper-shell-analysis-v1'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 

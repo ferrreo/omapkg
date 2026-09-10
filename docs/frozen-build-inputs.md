@@ -48,7 +48,11 @@ preparation. Both stages disable networking and retain existing capability
 restrictions, adding `SYS_CHROOT` for pacman installation.
 
 Build/runtime roots have separate complete inventory checks. Shell analysis uses
-locked build tools. Compilation uses the pinned makepkg configuration copied to
+locked build tools by default. A new lock can explicitly set `shellAnalysis` to
+`helper` to use the retained OCI helper for analysis before preparation. This
+requires worker capability `helper-shell-analysis-v1` and new input review; the
+helper archive, analysis choice and inventories remain bound by the signed lock.
+Both paths analyze read-only script mounts without network access. Compilation uses the pinned makepkg configuration copied to
 the work directory, existing fixed output/debug settings, locale `C`, UTC and
 the locked source epoch. Execution remains offline and unprivileged. Evidence
 includes the lock, prepared images, inventories, native worker/kernel
@@ -66,7 +70,12 @@ and reads archive sizes from `%CSIZE%` (printed download size can be zero for
 cached packages). It verifies package hashes/signatures and retains the public
 keys. Output: `manifest.json`, `reference.json`, digest-addressed `objects/` and
 a private-bootstrap notice. Capture never installs or publishes packages.
+Only explicitly resolved package records supply archive sizes; malformed selected
+records still fail capture. Original database bytes remain retained in full, and
+this subset capture does not qualify unrelated database records.
 A failed or changed capture needs a new output directory.
+`--helper-shell-analysis` selects the explicit helper analysis option when preparing
+a new capture; otherwise the build package list must include ShellCheck.
 
 From `worker/`, run:
 

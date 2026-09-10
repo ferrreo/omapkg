@@ -45,14 +45,17 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const publicKey = Buffer.from(keys.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)).toString('base64');
   await env.DB.prepare("INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,accepting_jobs) VALUES('preserved-builder','Protocol fixture','x86_64',?,'active',?,1)").bind(publicKey, timestamp).run();
   const worker = (await env.DB.prepare("SELECT * FROM workers WHERE id='preserved-builder'").first<Worker>())!;
-  const metadata: WorkerMetadata = { version: 'preserved-test', runtime: 'podman', capabilities: ['preserved-recipe-v1', 'multi-output-v2', 'runtime-analysis-v1', 'frozen-inputs-v1'] };
+  const metadata: WorkerMetadata = { version: 'preserved-test', runtime: 'podman', capabilities: ['preserved-recipe-v1', 'multi-output-v2', 'runtime-analysis-v1', 'frozen-inputs-v1', 'helper-shell-analysis-v1'] };
   expect(await claimJob(env.DB, worker, metadata, env)).toBeNull();
   const contract = (await cohortOutputContract(env.DB, { ...revision, pkgrel: revision.pkgrel ?? 1 }, 'x86_64'))!;
   const frozen = await frozenFixture(env, revision, contract);
+  await expect(proposeInputLock(env, actor, revision.id, await frozen.retain({ ...frozen.manifest, shellAnalysis: 'skip' }), 'Invalid analyzer.')).rejects.toThrow('Invalid frozen manifest');
+  frozen.manifest.shellAnalysis = 'helper'; frozen.lock = await frozen.retain(frozen.manifest);
   await proposeInputLock(env, actor, revision.id, frozen.lock, 'INERT frozen scope.');
   await reviewInputLock(env, actor, frozen.lock.sha256, 'area', 'INERT owner review.');
   await reviewInputLock(env, security, frozen.lock.sha256, 'security', 'INERT security review.');
   await selectInputLock(env, actor, frozen.lock.sha256, 'INERT selected inputs.');
+  expect(await claimJob(env.DB, worker, { ...metadata, capabilities: metadata.capabilities.filter((value) => value !== 'helper-shell-analysis-v1') }, env)).toBeNull();
   expect(await claimJob(env.DB, worker, { ...metadata, capabilities: metadata.capabilities.filter((value) => value !== 'preserved-recipe-v1') }, env)).toBeNull();
   let job = (await claimJob(env.DB, worker, metadata, env))!;
   const inputs = preservedBuildInputs(revision, 'x86_64')!;
@@ -83,6 +86,7 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
     [`UPDATE build_images SET enabled=0 WHERE id='${image.image_id}'`, `UPDATE build_images SET enabled=1 WHERE id='${image.image_id}'`],
     ["DELETE FROM team_memberships WHERE github_id='2'", "INSERT INTO team_memberships VALUES('2','security')"],
     ["UPDATE workers SET capabilities_json='[]' WHERE id='preserved-builder'", `UPDATE workers SET capabilities_json='${JSON.stringify(metadata.capabilities)}' WHERE id='preserved-builder'`],
+    [`UPDATE workers SET capabilities_json='${JSON.stringify(metadata.capabilities.filter((value) => value !== 'helper-shell-analysis-v1'))}' WHERE id='preserved-builder'`, `UPDATE workers SET capabilities_json='${JSON.stringify(metadata.capabilities)}' WHERE id='preserved-builder'`],
   ]) {
     const token = job.leaseToken, attempt = job.attempt!;
     holder.exec(revoke); holder.exec(restore);

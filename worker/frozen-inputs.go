@@ -59,6 +59,7 @@ type frozenInputManifest struct {
 	MakepkgConfig      inputObject         `json:"makepkgConfig"`
 	TransferLimitBytes int64               `json:"transferLimitBytes"`
 	Environments       []frozenEnvironment `json:"environments"`
+	ShellAnalysis      string              `json:"shellAnalysis,omitempty"`
 }
 
 func verifyHelperArchive(path, imageRef string) error {
@@ -364,7 +365,7 @@ func materializeFrozenInputs(ctx context.Context, job Job, directory string, get
 		return nil, err
 	}
 	m := result.Manifest
-	if m.SchemaVersion != 1 || (m.Purpose != "bootstrap" && m.Purpose != "owned") || m.Architecture != job.Architecture ||
+	if (m.ShellAnalysis != "" && m.ShellAnalysis != "helper") || m.SchemaVersion != 1 || (m.Purpose != "bootstrap" && m.Purpose != "owned") || m.Architecture != job.Architecture ||
 		m.RecipeSHA256 != job.RecipeSHA256 || m.CohortSHA256 != job.OutputContract.Cohort.ManifestSHA256 || m.SourceDateEpoch != job.SourceDateEpoch ||
 		m.HelperImage != job.ImageRef || len(m.Environments) != len(job.OutputContract.RuntimeGroups)+1 ||
 		m.TransferLimitBytes < 1 || m.TransferLimitBytes > maxFrozenTransferBytes {

@@ -544,3 +544,36 @@ The actual local asdcontrol acceptance request was rejected through the browser
 after its catalog changed, retaining its completed signed evidence. Layouts at
 320/375/414/768/1440/1920 pixels passed without JavaScript errors. No production
 request, catalog or release was changed.
+
+### Explicit helper analysis and native acceptance capture
+
+A frozen input lock may explicitly select shell analysis in its retained helper.
+The new `helper-shell-analysis-v1` capability fences selection, completion and
+capability loss. Existing locks continue to use their locked build-root tools.
+The choice changes the lock digest and requires input review; source inspection,
+compilation, runtime checks and analysis all keep their native isolation checks.
+
+This resolves a concrete ARM bootstrap tool gap: the retained ARM helper has the
+pinned upstream ShellCheck binary, while the captured ARM package repository has
+no ShellCheck package. No tool check is skipped. Bootstrap capture now reads sizes
+only for the explicitly resolved package subset, retaining complete original
+repository databases. A malformed selected record still rejects capture. The
+unrelated NUL-filled `findnewest` record remains a full-catalog reference gap.
+
+`scripts/check-preserved-recipe.py` captures the pinned original asdcontrol Git
+recipe, obtains a signed native inspection, retains source bytes and signed
+bootstrap packages, and runs the offline preserved-source worker. It retains the
+output archive and signed worker evidence. The ARM regression workflow exposes
+this explicit acceptance run and saves its complete input/evidence archive.
+
+The new path passed natively on x86 with 164 build packages and 118 runtime
+packages. Independent checks verified inspection/build signatures, Git proof,
+source-plan equivalence to the coordinator parser, frozen evidence and the output
+hash `e272e7c3e647cb5e8a6d7493ab122978a6a02f81cb483b2480f219af5778f1d2`.
+This input lock differs from earlier asdcontrol runs; it is not an independent
+reproduction comparison. ARM execution remains pending at this checkpoint.
+
+Validation: 237 application tests (1,675 assertions), 14 signer tests (117
+assertions), Go tests/vet, clean Svelte/pipeline/signer type checks, production
+web build, bootstrap parser self-check and native SQL depth checks. No production
+admission, input approval, build approval or release was created.

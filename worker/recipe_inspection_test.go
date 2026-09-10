@@ -174,7 +174,11 @@ func testNativeRecipeInspection(t *testing.T, directory string, ref inputObject)
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := Job{Kind: "recipe-inspection", ID: "native-inspection", PackageName: "demo", Architecture: architecture, RecipeCapture: &ref,
+	var capture recipeCaptureManifest
+	if err := json.Unmarshal(mustReadFile(t, filepath.Join(directory, "objects", ref.SHA256)), &capture); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Kind: "recipe-inspection", ID: "native-inspection", PackageName: capture.Pkgbase, Architecture: architecture, RecipeCapture: &ref,
 		ImageRef: image, ImageDigest: image[strings.LastIndex(image, "@")+1:], Attempt: 1, LeaseToken: "native-test-lease",
 		LeaseExpiresAt: time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339)}
 	completed := make(chan recipeInspectionReport, 1)
@@ -216,6 +220,10 @@ func testNativeRecipeInspection(t *testing.T, directory string, ref inputObject)
 				return
 			}
 			completed <- report
+			evidence, _ := json.Marshal(map[string]string{"report": input.Report, "signature": input.Signature, "publicKey": base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))})
+			if err := os.WriteFile(filepath.Join(directory, "native-inspection.json"), evidence, 0o600); err != nil {
+				t.Error(err)
+			}
 			t.Logf("Native inspection evidence: %s; signature=%s; publicKey=%s", input.Report, input.Signature, base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)))
 			io.WriteString(w, `{"status":"succeeded"}`)
 		default:
@@ -232,10 +240,25 @@ func testNativeRecipeInspection(t *testing.T, directory string, ref inputObject)
 	select {
 	case report := <-completed:
 		if report.Error != nil || report.Host == nil || report.Host.Architecture != architecture || report.Capture != ref ||
-			report.SrcinfoSHA256 != hashBytes([]byte(report.Srcinfo)) || !strings.Contains(report.Srcinfo, "pkgbase = demo") || !strings.Contains(report.Srcinfo, "epoch = 2") {
+			report.SrcinfoSHA256 != hashBytes([]byte(report.Srcinfo)) || !strings.Contains(report.Srcinfo, "pkgbase = "+capture.Pkgbase) {
 			t.Fatalf("native inspection evidence incomplete: %+v", report)
+		}
+		if capture.Pkgbase == "demo" && !strings.Contains(report.Srcinfo, "epoch = 2") {
+			t.Fatal("native fixture inspection lost its epoch")
 		}
 	default:
 		t.Fatal("native inspection omitted signed completion")
 	}
+}
+
+func TestRetainedRecipeInspectionNativeOCI(t *testing.T) {
+	directory := os.Getenv("OPR_INSPECTION_E2E_CAPTURE")
+	if directory == "" {
+		t.Skip("OPR_INSPECTION_E2E_CAPTURE is not set")
+	}
+	var ref inputObject
+	if err := json.Unmarshal(mustReadFile(t, filepath.Join(directory, "reference.json")), &ref); err != nil {
+		t.Fatal(err)
+	}
+	testNativeRecipeInspection(t, directory, ref)
 }

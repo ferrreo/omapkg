@@ -107,6 +107,11 @@ func TestFrozenInputPagesBindCompleteInventoryAndBudget(t *testing.T) {
 	if len(inputs.Environments["build"]) != 1 {
 		t.Fatal("input page was not materialized")
 	}
+	withHelper := manifest
+	withHelper.ShellAnalysis = "helper"
+	if _, err := load(withHelper, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := inputs.verifyEnvironment("build", environmentEvidence{Packages: []string{"base 1:1.0-1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +122,7 @@ func TestFrozenInputPagesBindCompleteInventoryAndBudget(t *testing.T) {
 		t.Fatal("accepted changed retained package")
 	}
 	for _, mutate := range []func(*frozenInputManifest){
+		func(m *frozenInputManifest) { m.ShellAnalysis = "skip" },
 		func(m *frozenInputManifest) { m.Purpose = "owned" },
 		func(m *frozenInputManifest) { m.TransferLimitBytes = 1 },
 		func(m *frozenInputManifest) { m.RecipeSHA256 = strings.Repeat("f", 64) },

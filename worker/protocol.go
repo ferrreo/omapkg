@@ -81,6 +81,7 @@ var supportedWorkerCapabilities = [...]string{
 	"runtime-analysis-v1",
 	"multi-output-v2",
 	"frozen-inputs-v1",
+	"helper-shell-analysis-v1",
 	"recipe-inspection-v1",
 	"preserved-recipe-v1",
 }

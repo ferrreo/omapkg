@@ -9,7 +9,7 @@ import { runtimeEvidence } from '../../tests/runtime-fixtures';
 import { canonicalJson } from '../../src/lib/canonical-json';
 import type { FrozenEvidence, FrozenManifest } from '../../src/lib/frozen-inputs';
 
-for (const policy of ['shadow', 'bootstrap', 'owned', 'preserved'] as const) test(`native ${policy} signing and offline verification bind every output, runtime group, input policy and exact attempt`, async () => {
+for (const policy of ['shadow', 'bootstrap', 'owned', 'preserved', 'helper-analysis'] as const) test(`native ${policy} signing and offline verification bind every output, runtime group, input policy and exact attempt`, async () => {
   const key = await openpgp.generateKey({ type: 'rsa', rsaBits: 2048, userIDs: [{ name: 'Native signing test' }], format: 'armored', config: { v6Keys: false } });
   const privateKey = await openpgp.readPrivateKey({ armoredKey: key.privateKey });
   const fingerprint = privateKey.getFingerprint();
@@ -24,7 +24,8 @@ for (const policy of ['shadow', 'bootstrap', 'owned', 'preserved'] as const) tes
   const artifact = encode('native fixture bytes'); const artifactSha256 = await sha256(artifact);
   let frozenInputs: FrozenEvidence | undefined;
   if (policy !== 'shadow') {
-    const manifest: FrozenManifest = { schemaVersion: 1, purpose: policy === 'preserved' ? 'bootstrap' : policy, architecture: 'x86_64', recipeSha256: 'c'.repeat(64),
+    const manifest: FrozenManifest = { schemaVersion: 1, purpose: policy === 'preserved' || policy === 'helper-analysis' ? 'bootstrap' : policy, architecture: 'x86_64', recipeSha256: 'c'.repeat(64),
+      ...(policy === 'helper-analysis' ? { shellAnalysis: 'helper' } : {}),
       cohortSha256: outputContract.cohort.manifestSha256, sourceDateEpoch: 1, helperImage: runtime.buildEnvironment.baseImage,
       helperArchive: { sha256: '5'.repeat(64), size: 1 }, makepkgConfig: { sha256: '6'.repeat(64), size: 1 }, transferLimitBytes: 1024 * 1024,
       environments: await Promise.all([runtime.buildEnvironment, runtime.runtimeEnvironment, runtime.runtimeEnvironment].map(async (env, index) => ({
@@ -83,6 +84,12 @@ for (const policy of ['shadow', 'bootstrap', 'owned', 'preserved'] as const) tes
     expect((await sign()).status).toBe(409);
     if (frozenInputs) {
       control = { ...control, build: base.build, review: { ...base.review, inputLockSha256: '9'.repeat(64) } };
+      expect((await sign()).status).toBe(409);
+      const changed = structuredClone(report);
+      changed.frozenInputs!.manifest.shellAnalysis = frozenInputs.manifest.shellAnalysis ? undefined : 'helper';
+      const raw = JSON.stringify(changed);
+      control = { ...base, kind: 'package', artifact: { key: artifactKey, filename, sha256: artifactSha256, size: artifact.length },
+        attestation: { ...base.attestation, provenance: raw, provenanceSignature: Buffer.from(await crypto.subtle.sign('Ed25519', workerKey.privateKey, encode(raw))).toString('base64') } };
       expect((await sign()).status).toBe(409);
     }
     if (preservedRecipe) {

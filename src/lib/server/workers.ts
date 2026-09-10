@@ -323,7 +323,7 @@ export async function retryBuild(db: D1Database, actor: Actor | null, buildId: s
   }
 }
 
-async function reviewedCandidate(db: D1Database, architecture: Architecture, timestamp: number, multiOutput: boolean, frozenInputs: boolean, preservedInputs: boolean): Promise<CandidateBuild | null> {
+async function reviewedCandidate(db: D1Database, architecture: Architecture, timestamp: number, multiOutput: boolean, frozenInputs: boolean, preservedInputs: boolean, helperAnalysis: boolean): Promise<CandidateBuild | null> {
   try {
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
@@ -348,7 +348,9 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
         AND q.status IN ('queued', 'building')
         AND (?=1 OR r.surface='recipe' OR NOT EXISTS(SELECT 1 FROM cohort_recipe_ownership WHERE recipe_revision_id=r.id))
         AND NOT EXISTS(SELECT 1 FROM build_input_selections s JOIN cohorts c ON c.id=s.cohort_id AND c.current_revision=s.cohort_revision
-          WHERE s.recipe_revision_id=r.id AND s.architecture=b.architecture AND (?=0 OR NOT EXISTS(SELECT 1 FROM current_input_locks l WHERE l.sha256=s.lock_sha256)))
+          JOIN input_locks selected ON selected.sha256=s.lock_sha256
+          WHERE s.recipe_revision_id=r.id AND s.architecture=b.architecture AND (?=0 OR (?=0 AND json_extract(selected.manifest_json,'$.shellAnalysis')='helper')
+            OR NOT EXISTS(SELECT 1 FROM current_input_locks l WHERE l.sha256=s.lock_sha256)))
         AND NOT EXISTS (SELECT 1 FROM cohort_recipe_ownership owned JOIN cohorts cohort ON cohort.id=owned.cohort_id
           WHERE owned.recipe_revision_id=r.id AND (cohort.phase<>'build' OR cohort.condition NOT IN ('ready','blocked')
             OR NOT EXISTS(SELECT 1 FROM cohort_members member WHERE member.cohort_id=cohort.id
@@ -359,7 +361,7 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'area' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'security' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
       ORDER BY b.created_at ASC, b.id ASC
-      LIMIT 1`).bind(architecture, Number(preservedInputs), Number(multiOutput), Number(frozenInputs), timestamp).first<CandidateBuild>();
+      LIMIT 1`).bind(architecture, Number(preservedInputs), Number(multiOutput), Number(frozenInputs), Number(helperAnalysis), timestamp).first<CandidateBuild>();
   } catch (cause) {
     return databaseFailure(cause);
   }
@@ -375,7 +377,8 @@ export async function claimJob(
   await refreshWorkerMetadata(db, worker, metadata, timestamp);
   const capabilities = metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]');
   const candidate = await reviewedCandidate(db, worker.architecture, timestamp, capabilities.includes('multi-output-v2'), Boolean(dependencyContext) && capabilities.includes('frozen-inputs-v1'),
-    Boolean(dependencyContext) && ['preserved-recipe-v1', 'multi-output-v2', 'frozen-inputs-v1', 'runtime-analysis-v1'].every((capability) => capabilities.includes(capability)));
+    Boolean(dependencyContext) && ['preserved-recipe-v1', 'multi-output-v2', 'frozen-inputs-v1', 'runtime-analysis-v1'].every((capability) => capabilities.includes(capability)),
+    capabilities.includes('helper-shell-analysis-v1'));
   if (!candidate) return null;
   if (revisionRecipePolicy(candidate.revision_sbom_json).recorded &&
       !(metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]')).includes('runtime-analysis-v1')) return null;

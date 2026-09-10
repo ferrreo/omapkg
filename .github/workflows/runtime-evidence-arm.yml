@@ -19,6 +19,11 @@ on:
         description: Existing digest-pinned ARM runtime for regression
         required: false
         type: string
+      preserved_recipe:
+        description: Capture private frozen inputs and build original asdcontrol offline on ARM
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -103,3 +108,38 @@ jobs:
           set -euo pipefail
           cd worker
           go test -v ./...
+      - name: Native preserved recipe with frozen bootstrap inputs
+        if: ${{ inputs.preserved_recipe }}
+        shell: bash
+        env:
+          REGISTRY_NATIVE_TEST_AUTH: ${{ secrets.REGISTRY_NATIVE_TEST_AUTH }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends podman
+          auth="$RUNNER_TEMP/preserved-registry.json"
+          cleanup() {
+            rm -f "$auth"
+            if [[ -d "$RUNNER_TEMP/preserved-asdcontrol" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/preserved-asdcontrol"
+            fi
+          }
+          trap cleanup EXIT
+          printf '%s' "$REGISTRY_NATIVE_TEST_AUTH" > "$auth"
+          chmod 600 "$auth"
+          unset REGISTRY_NATIVE_TEST_AUTH
+          sudo podman pull --authfile "$auth" "$OPR_WORKER_E2E_IMAGE"
+          sudo env PATH="$PATH" python3 scripts/check-preserved-recipe.py \
+            --output "$RUNNER_TEMP/preserved-asdcontrol" --helper-image "$OPR_WORKER_E2E_IMAGE" --helper-shell-analysis
+      - name: Archive native source, bootstrap and build evidence
+        if: ${{ inputs.preserved_recipe && always() }}
+        shell: bash
+        run: tar -cf "$RUNNER_TEMP/preserved-asdcontrol.tar" -C "$RUNNER_TEMP" preserved-asdcontrol
+      - name: Retain native source, bootstrap and build evidence
+        if: ${{ inputs.preserved_recipe && always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: preserved-asdcontrol-arm
+          path: ${{ runner.temp }}/preserved-asdcontrol.tar
+          if-no-files-found: error
+          compression-level: 0

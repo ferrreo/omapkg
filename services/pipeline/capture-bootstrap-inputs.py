@@ -76,17 +76,22 @@ def verify_helper_archive(path, image):
                 raise ValueError("retained helper OCI blob checksum mismatch")
 
 
-def database_sizes(path):
+def database_sizes(path, package_names=None):
     sizes = {}
     total = 0
+    prefixes = tuple(name + "-" for name in package_names) if package_names is not None else None
     if path.stat().st_size > 32 << 20:
         raise ValueError("bootstrap repository database exceeds 32 MiB")
     with tarfile.open(path, "r:*") as archive:
-        for member in archive:
+        for index, member in enumerate(archive):
             total += member.size
-            if total > 512 << 20 or len(sizes) > 100000:
+            if total > 512 << 20 or index >= 100000:
                 raise ValueError("expanded repository database exceeds capture budget")
             if not member.isfile() or not member.name.endswith("/desc"):
+                continue
+            # Bootstrap resolves an explicit subset; the original database is
+            # retained in full. A selected malformed record still fails closed.
+            if prefixes is not None and not member.name.startswith(prefixes):
                 continue
             if member.size > 1 << 20:
                 raise ValueError("package database record exceeds 1 MiB")
@@ -186,15 +191,16 @@ def capture(args):
         # Empty local database: the helper's installed packages cannot disappear
         # from the lock merely because the resolver considers them satisfied.
         command("pacman", "--config", str(config), "--dbpath", str(resolver), "-Sy", "--noconfirm")
+        text = command("pacman", "--config", str(config), "--dbpath", str(resolver), "--cachedir", str(cache), "-Sp", "--noconfirm", "--print-format",
+                       "%n\t%v\t%a\t%f\t%h\t%l\t%g\t%r", "--", *targets)
+        package_names = {line.split("\t", 1)[0] for line in text.splitlines()}
         databases = []
         sizes = {}
         for path in sorted((resolver / "sync").iterdir()):
             if path.is_file():
                 databases.append({"name": path.name, "object": retain_file(objects, path)})
                 if path.suffix == ".db":
-                    sizes[path.stem] = database_sizes(path)
-        text = command("pacman", "--config", str(config), "--dbpath", str(resolver), "--cachedir", str(cache), "-Sp", "--noconfirm", "--print-format",
-                       "%n\t%v\t%a\t%f\t%h\t%l\t%g\t%r", "--", *targets)
+                    sizes[path.stem] = database_sizes(path, package_names)
         records = parse_plan(text, args.architecture, sizes)
         evidence = retain(objects, canonical({"schemaVersion": 1, "kind": "external-bootstrap-capture",
             "architecture": args.architecture, "helperImage": args.helper_image, "pacmanConfig": retain_file(objects, config), "databases": databases,
@@ -232,6 +238,8 @@ def capture(args):
         "recipeSha256": args.recipe_sha256, "cohortSha256": args.cohort_sha256, "sourceDateEpoch": args.source_date_epoch,
         "helperImage": args.helper_image, "helperArchive": helper_archive, "makepkgConfig": makepkg_config,
         "transferLimitBytes": args.transfer_limit_bytes, "environments": environments}
+    if args.helper_shell_analysis:
+        manifest["shellAnalysis"] = "helper"
     reference = retain(objects, canonical(manifest))
     (root / "manifest.json").write_bytes(canonical(manifest))
     (root / "reference.json").write_bytes(canonical(reference))
@@ -258,6 +266,18 @@ def main():
                 except ValueError:
                     continue
                 raise AssertionError("accepted invalid frozen package plan")
+            with tarfile.open(path, "w:gz") as archive:
+                for name, data in [("base-1.0-1/desc", record), ("broken-1.0-1/desc", b"\0" * 100)]:
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+            assert database_sizes(path, {"base"}) == sizes["core"]
+            for selected in (None, {"broken"}):
+                try:
+                    database_sizes(path, selected)
+                except ValueError:
+                    continue
+                raise AssertionError("accepted malformed selected database record")
         print("bootstrap capture self-check passed")
         return
     parser = argparse.ArgumentParser(description=__doc__)
@@ -273,6 +293,7 @@ def main():
     parser.add_argument("--transfer-limit-bytes", type=int, required=True)
     parser.add_argument("--build-packages", nargs="+", required=True)
     parser.add_argument("--runtime-packages", nargs="+", action="append", required=True)
+    parser.add_argument("--helper-shell-analysis", action="store_true", help="Pin shell analysis to retained helper instead of build-root tools")
     args = parser.parse_args()
     if (not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", args.helper_image)
             or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in (args.recipe_sha256, args.cohort_sha256))

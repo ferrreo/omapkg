@@ -493,7 +493,7 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 			return BuildResult{}, fmt.Errorf("runtime image: %w", err)
 		}
 	}
-	if frozen == nil {
+	if frozen == nil || frozen.Manifest.ShellAnalysis == "helper" {
 		if log, err := r.checkShell(ctx, job, jobName, imageRef); err != nil {
 			return BuildResult{Log: log}, fmt.Errorf("shell analysis failed: %w", err)
 		}
@@ -526,8 +526,10 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		if err := r.checkFrozenDependencies(ctx, jobName, prepared.ref, uniqueStrings(dependencies)); err != nil {
 			return BuildResult{Log: log}, err
 		}
-		if shellLog, err := r.checkShell(ctx, job, jobName, prepared.ref); err != nil {
-			return BuildResult{Log: log + shellLog}, fmt.Errorf("frozen shell analysis failed: %w", err)
+		if frozen.Manifest.ShellAnalysis != "helper" {
+			if shellLog, err := r.checkShell(ctx, job, jobName, prepared.ref); err != nil {
+				return BuildResult{Log: log + shellLog}, fmt.Errorf("frozen shell analysis failed: %w", err)
+			}
 		}
 	}
 	for _, directory := range []string{workdir, output} {

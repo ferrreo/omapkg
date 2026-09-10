@@ -15,6 +15,7 @@ export type FrozenManifest = {
   schemaVersion: 1; purpose: 'bootstrap' | 'owned'; architecture: Architecture;
   recipeSha256: string; cohortSha256: string; sourceDateEpoch: number; helperImage: string;
   helperArchive: InputObject; makepkgConfig: InputObject; transferLimitBytes: number; environments: FrozenEnvironment[];
+  shellAnalysis?: 'helper';
 };
 export type FrozenEvidence = {
   lock: InputObject; manifest: FrozenManifest;
@@ -41,9 +42,10 @@ export function parseInputObject(value: unknown, max = MAX_INPUT_OBJECT): InputO
   return ref;
 }
 export function parseFrozenManifest(value: unknown): FrozenManifest {
-  exact(value, 'schemaVersion,purpose,architecture,recipeSha256,cohortSha256,sourceDateEpoch,helperImage,helperArchive,makepkgConfig,transferLimitBytes,environments');
+  const helperAnalysis = value && typeof value === 'object' && Object.hasOwn(value, 'shellAnalysis');
+  exact(value, 'schemaVersion,purpose,architecture,recipeSha256,cohortSha256,sourceDateEpoch,helperImage,helperArchive,makepkgConfig,transferLimitBytes,environments' + (helperAnalysis ? ',shellAnalysis' : ''));
   const m = value as FrozenManifest;
-  if (m.schemaVersion !== 1 || !['bootstrap', 'owned'].includes(m.purpose) || !['x86_64', 'aarch64'].includes(m.architecture) ||
+  if ((helperAnalysis && m.shellAnalysis !== 'helper') || m.schemaVersion !== 1 || !['bootstrap', 'owned'].includes(m.purpose) || !['x86_64', 'aarch64'].includes(m.architecture) ||
       !INPUT_HASH.test(m.recipeSha256) || !INPUT_HASH.test(m.cohortSha256) || !integer(m.sourceDateEpoch, 0, Number.MAX_SAFE_INTEGER) ||
       typeof m.helperImage !== 'string' || m.helperImage.length > 1024 || !/^[^\s\x00-\x1f]+@sha256:[a-f0-9]{64}$/.test(m.helperImage) ||
       !integer(m.transferLimitBytes, 1, MAX_INPUT_TRANSFER) || !Array.isArray(m.environments) || !m.environments.length || m.environments.length > 257) {

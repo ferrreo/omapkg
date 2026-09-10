@@ -278,7 +278,11 @@ func TestRunnerPreservedRecipeNativeOCI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(state)
-	runner := Runner{Runtime: "podman", Origin: server.URL, StateDir: state}
+	runtime := os.Getenv("OPR_WORKER_E2E_RUNTIME")
+	if runtime == "" {
+		runtime = "podman"
+	}
+	runner := Runner{Runtime: runtime, Origin: server.URL, StateDir: state}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	started := time.Now().UTC().Format(time.RFC3339)
@@ -302,12 +306,22 @@ func TestRunnerPreservedRecipeNativeOCI(t *testing.T) {
 	}
 	for _, output := range result.Outputs {
 		t.Logf("built %s %s", output.Filename, output.ArtifactSHA256)
+		if err := copyFile(ctx, output.Path, filepath.Join(directory, output.Filename)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	report, err := provenanceForOutputs(job, client.WorkerID, result, started, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "native-provenance.json"), []byte(report), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := json.Marshal(map[string]string{"report": report, "signature": base64.StdEncoding.EncodeToString(ed25519.Sign(key, []byte(report))), "publicKey": base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "signed-native-provenance.json"), evidence, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
