@@ -266,8 +266,8 @@ fi
 [[ "$output" != "$provenance" ]] || die "image and provenance paths must differ"
 [[ ! -L "$output" && ! -L "$provenance" ]] || die "output paths must not be symlinks"
 if [[ -e "$output" || -e "$provenance" ]] && (( ! overwrite )); then die "refusing to overwrite existing output; pass --overwrite"; fi
-output_parent=$(CDPATH='' cd -- "$(dirname -- "$output")" 2>/dev/null || true); [[ -n "$output_parent" && -d "$output_parent" ]] || die "output parent must exist"
-prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null || true); [[ -n "$prov_parent" && -d "$prov_parent" ]] || die "provenance parent must exist"
+output_parent=$(CDPATH='' cd -- "$(dirname -- "$output")" 2>/dev/null && pwd -P); [[ -n "$output_parent" && -d "$output_parent" ]] || die "output parent must exist"
+prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null && pwd -P); [[ -n "$prov_parent" && -d "$prov_parent" ]] || die "provenance parent must exist"
 [[ "$EUID" == 0 ]] || die "image build needs root for loop devices and filesystems"
 native_host=$(uname -m)
 case "$native_host" in x86_64) [[ "$architecture" == x86_64 ]] || die "x86_64 builder cannot produce aarch64 native image" ;; aarch64|arm64) [[ "$architecture" == aarch64 ]] || die "aarch64 builder cannot produce x86_64 native image" ;; *) die "unsupported native builder architecture: $native_host" ;; esac
