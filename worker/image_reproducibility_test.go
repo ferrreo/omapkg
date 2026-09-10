@@ -411,6 +411,9 @@ func bootImageBuilder(repoRoot, profile string) ReproducibilityBuilder {
 			}
 		}
 		args = append(args, "--key", os.Getenv("SYSTEM_IMAGE_REPRO_KEY"), "--fingerprint", os.Getenv("SYSTEM_IMAGE_REPRO_FINGERPRINT"))
+		if packageCache := os.Getenv("SYSTEM_IMAGE_REPRO_PACKAGE_CACHE"); packageCache != "" {
+			args = append(args, "--package-cache", packageCache)
+		}
 		if client := os.Getenv("SYSTEM_IMAGE_REPRO_CLIENT"); client != "" {
 			args = append(args, "--client", client)
 		}

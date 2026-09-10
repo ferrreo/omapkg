@@ -7,6 +7,7 @@ if [[ "${OMAPKG_IMAGE_CLEAN_ENV:-}" != 1 ]]; then
 fi
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+builder_script=${BASH_SOURCE[0]}
 mode=build
 lock=
 candidate_lock=
@@ -15,6 +16,7 @@ native_plan=
 candidate_lock_signature=
 native_plan_signature=
 coordinator_binding=
+package_cache=
 candidate_mode=0
 profile=
 output=
@@ -47,6 +49,7 @@ while (($#)); do
     --native-plan) native_plan=${2:-}; candidate_mode=1; shift ;;
     --native-plan-signature) native_plan_signature=${2:-}; candidate_mode=1; shift ;;
     --coordinator-binding) coordinator_binding=${2:-}; candidate_mode=1; shift ;;
+    --package-cache) package_cache=${2:-}; shift ;;
     --profile) profile=${2:-}; shift ;;
     --manifest) manifest_url=${2:-}; shift ;;
     --signature) manifest_signature=${2:-}; shift ;;
@@ -65,6 +68,7 @@ while (($#)); do
 done
 
 [[ -n "$profile" && -f "$profile" ]] || die "--profile must name a regular file"
+if [[ -n "$package_cache" ]]; then [[ -d "$package_cache" && ! -L "$package_cache" ]] || die "package cache must be a regular directory"; fi
 if (( ! candidate_mode )); then
   [[ -n "$manifest_url" ]] || die "--manifest is required; image locks must be reverified by the manifest client"
 else
@@ -273,6 +277,7 @@ prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null && pwd -
 native_host=$(uname -m)
 case "$native_host" in x86_64) [[ "$architecture" == x86_64 ]] || die "x86_64 builder cannot produce aarch64 native image" ;; aarch64|arm64) [[ "$architecture" == aarch64 ]] || die "aarch64 builder cannot produce x86_64 native image" ;; *) die "unsupported native builder architecture: $native_host" ;; esac
 for command_name in curl qemu-img sgdisk losetup partx udevadm mknod mkfs.fat mkfs.ext4 mount umount blkid pacman grub-install arch-chroot gpg realpath bsdtar gzip unshare debugfs e2fsck tune2fs mcopy truncate dd; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
+builder_script=$(realpath -e -- "$builder_script") || die "builder script path is unavailable"
 if [[ -n "$work_dir" ]]; then mkdir -p -- "$work_dir"; chmod 700 "$work_dir"; build_root=$(mktemp -d "$work_dir/build.XXXXXX"); else build_root=$(mktemp -d "${TMPDIR:-/tmp}/omapkg-system-image.XXXXXX"); fi
 cleanup_paths+=("$build_root"); temporary_root=$build_root
 chmod 700 "$temporary_root"
@@ -382,9 +387,15 @@ for filename in "${!selected_packages[@]}"; do
   row=$(jq -ce --arg filename "$filename" '.packages[] | select(.filename == $filename)' "$lock") || die "pacman selected unbound package: $filename"
   [[ "$(jq -r '.install' <<<"$row")" == true || "$filename" == "$firmware_filename" ]] || die "selected package is not installable: $filename"
   url=$(jq -er '.url' <<<"$row"); sig_url=$(jq -er '.signatureUrl' <<<"$row"); expected=$(jq -er '.sha256' <<<"$row")
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename" "$url"
+  if [[ -n "$package_cache" ]]; then
+    safe_file "$package_cache/$filename" || die "package cache is missing: $filename"
+    safe_file "$package_cache/$filename.sig" || die "package cache is missing signature: $filename.sig"
+    cp -- "$package_cache/$filename" "$cache/$filename"
+  else
+    curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename" "$url"
+  fi
   [[ "$(sha256_value "$cache/$filename")" == "$expected" ]] || die "package bytes changed: $filename"
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename.sig" "$sig_url"
+  if [[ -n "$package_cache" ]]; then cp -- "$package_cache/$filename.sig" "$cache/$filename.sig"; else curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename.sig" "$sig_url"; fi
   [[ "$(sha256_value "$cache/$filename.sig")" == "$(jq -er '.signatureSha256' <<<"$row")" ]] || die "package signature bytes changed: $filename.sig"
   inspect_package_archive "$cache/$filename"
 done
@@ -433,7 +444,7 @@ image_name=$(basename -- "$output")
 source_manifest_sha=$(jq -cS -n --arg system "$system_digest" --arg opr "$opr_digest" '[{name:"system",sha256:$system},{name:"opr",sha256:$opr}]' | tr -d '\n' | sha256sum | awk '{print $1}')
 image_output_set_sha=$(jq -cS -n --arg filename "$image_name" --arg sha "$image_sha256" --argjson size "$image_size" '[{filename:$filename,size:$size,sha256:$sha}]' | tr -d '\n' | sha256sum | awk '{print $1}')
 input_identity_sha=${candidate_input_lock:-$lock_sha256}
-profile_recipe=$(sha256_value "$repo_root/scripts/build-system-image.sh")
+profile_recipe=$(sha256_value "$builder_script")
 profile_arch=$(jq -er '.architecture' "$profile")
 firmware_code=$(realpath -e -- "$(jq -er '.firmware.codePath' "$profile")") || die "UEFI code path is unavailable"
 firmware_vars=$(realpath -e -- "$(jq -er '.firmware.varsTemplatePath' "$profile")") || die "UEFI variable template path is unavailable"

@@ -64,13 +64,13 @@ make_package() {
 if [[ -n "$real_package_dir" ]]; then
   mkdir -p "$fixture/signatures"
   for source_package in "$real_package_dir"/*.pkg.tar.zst "$real_package_dir"/*.pkg.tar.xz; do
-    [[ -f "$source_package" || -L "$source_package" ]] || continue
+    [[ -f "$source_package" ]] || continue
     filename=$(basename "$source_package")
-    ln -s "$source_package" "$fixture/packages/$filename"
+    cp -- "$source_package" "$fixture/packages/$filename"
     gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" --output "$fixture/signatures/$filename.sig" "$source_package"
-    ln -s "$fixture/signatures/$filename.sig" "$fixture/packages/$filename.sig"
+    cp -- "$fixture/signatures/$filename.sig" "$fixture/packages/$filename.sig"
   done
-  firmware_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) \( -name "$firmware_package_name-*.pkg.tar.zst" -o -name "$firmware_package_name-*.pkg.tar.xz" \) | head -n1)
+  firmware_package=$(find "$fixture/packages" -maxdepth 1 -type f \( -name "$firmware_package_name-*.pkg.tar.zst" -o -name "$firmware_package_name-*.pkg.tar.xz" \) | head -n1)
   [[ -n "$firmware_package" ]] || { echo "incomplete: real package fixture has no $firmware_package_name archive" >&2; exit 3; }
   bsdtar -xOf "$firmware_package" "${firmware_code_path#/}" >"$firmware_code_path"
   bsdtar -xOf "$firmware_package" "${firmware_vars_path#/}" >"$firmware_vars_path"
@@ -124,7 +124,7 @@ for package in "${package_files[@]}"; do
   version=$(awk -F' = ' '$1 == "pkgver" { print $2; exit }' <<<"$pkginfo")
   architecture=$(awk -F' = ' '$1 == "arch" { print $2; exit }' <<<"$pkginfo")
   [[ -n "$name" && -n "$version" && -n "$architecture" ]] || { echo "incomplete: package metadata missing in $filename" >&2; exit 3; }
-  jq -c -n --arg name "$name" --arg version "$version" --arg architecture "$architecture" --arg filename "$filename" --arg url "https://localhost:8443/packages/$filename" --arg signatureUrl "https://localhost:8443/packages/$filename.sig" --arg sha256 "$(sha256_file "$package")" --arg signatureSha256 "$(sha256_file "$package.sig")" '{name:$name,version:$version,filename:$filename,url:$url,signatureUrl:$signatureUrl,sha256:$sha256,signatureSha256:$signatureSha256,architecture:$architecture,install:true}' >>"$package_rows.ndjson"
+  jq -c -n --arg name "$name" --arg version "$version" --arg architecture "$architecture" --arg filename "$filename" --arg url "https://packages.invalid/$filename" --arg signatureUrl "https://packages.invalid/$filename.sig" --arg sha256 "$(sha256_file "$package")" --arg signatureSha256 "$(sha256_file "$package.sig")" '{name:$name,version:$version,filename:$filename,url:$url,signatureUrl:$signatureUrl,sha256:$sha256,signatureSha256:$signatureSha256,architecture:$architecture,install:true}' >>"$package_rows.ndjson"
 done
 jq -s '.' "$package_rows.ndjson" >"$package_rows"
 package_set=$(jq -cS 'sort_by(.name,.architecture,.version,.sha256)' "$package_rows" | tr -d '\n' | sha256sum | awk '{print $1}')
@@ -138,19 +138,6 @@ gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fi
 lock=$fixture/candidate-lock.json
 jq -cS -n --arg candidateId fixture-candidate --arg architecture "$architecture" --arg owned "$owned_universe" --arg input "$input_lock" --arg plan "$plan_sha" --arg tx "$transaction_sha" --arg txSig "$transaction_sig_sha" --arg system "$system_sha" --arg systemSig "$system_sig_sha" --arg opr "$opr_sha" --arg oprSig "$opr_sig_sha" --arg repoSha "$repo_sha" --arg repoSig "$repo_sig_sha" --arg packageSet "$package_set" --argjson packages "$(cat "$package_rows")" '{schemaVersion:1,authority:"factory-candidate-v1",candidate:{id:$candidateId,executionScope:"private",ownedUniverseSha256:$owned,inputLockSha256:$input,nativePlanSha256:$plan},architecture:$architecture,systemVersion:"fixture-system",oprGeneration:"fixture-opr",sourceDateEpoch:1700000000,transactionSha256:$tx,transaction:{path:"transaction.json",signature:"transaction.json.sig",signatureSha256:$txSig},systemManifestSha256:$system,systemManifest:{path:"system.json",sha256:$system,signature:"system.json.sig",signatureSha256:$systemSig},oprManifestSha256:$opr,oprManifest:{path:"opr.json",sha256:$opr,signature:"opr.json.sig",signatureSha256:$oprSig},packageChunks:[],repositories:[{name:"fixture",path:"packages/fixture.db.tar.gz",signature:"packages/fixture.db.tar.gz.sig",sha256:$repoSha,signatureSha256:$repoSig}],packages:$packages,packageSetSha256:$packageSet,packageCount:($packages|length),sourcePackageCount:($packages|length)}' >"$lock"
 gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" "$lock"
-
-mkdir -p "$fixture/http" "$fixture/http/packages"
-for package in "${package_files[@]}"; do
-  filename=$(basename "$package")
-  ln -s "$package" "$fixture/http/packages/$filename"
-  ln -s "$package.sig" "$fixture/http/packages/$filename.sig"
-done
-openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -addext subjectAltName=DNS:localhost -days 1 -keyout "$fixture/tls.key" -out "$fixture/tls.crt" >/dev/null 2>&1
-(cd "$fixture/http" && exec openssl s_server -quiet -WWW -accept 8443 -cert "$fixture/tls.crt" -key "$fixture/tls.key") >"$fixture/http.log" 2>&1 &
-server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null || true' EXIT INT TERM
-health_package=$(basename "${package_files[0]}")
-for _ in $(seq 1 30); do curl --silent --fail --cacert "$fixture/tls.crt" "https://localhost:8443/packages/$health_package" -o /dev/null && break; sleep 0.2; done
 
 if [[ -z "$real_package_dir" ]]; then
 cat >"$fixture/bin/arch-chroot" <<'EOF'
@@ -167,7 +154,7 @@ exit 0
 EOF
 chmod +x "$fixture/bin/grub-install"
 else
-  grub_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) \( -name 'grub-*.pkg.tar.zst' -o -name 'grub-*.pkg.tar.xz' \) | head -n1)
+  grub_package=$(find "$fixture/packages" -maxdepth 1 -type f \( -name 'grub-*.pkg.tar.zst' -o -name 'grub-*.pkg.tar.xz' \) | head -n1)
   [[ -n "$grub_package" ]] || { echo 'incomplete: real package fixture has no grub archive' >&2; exit 3; }
   bsdtar -xOf "$grub_package" usr/bin/grub-install >"$fixture/bin/grub-install"
   chmod +x "$fixture/bin/grub-install"
@@ -186,12 +173,12 @@ export OPR_IMAGE_REPRO_REPO_ROOT=/repo
 export OPR_IMAGE_REPRO_PROFILE="$profile"
 export OPR_IMAGE_REPRO_OUTPUT="$results"
 export OPR_IMAGE_REPRO_GAP=${OPR_IMAGE_REPRO_GAP-5}
-export CURL_CA_BUNDLE="$fixture/tls.crt"
+export SYSTEM_IMAGE_REPRO_PACKAGE_CACHE="$fixture/packages"
 export PATH="$fixture/bin:$PATH"
 mkdir -p "$fixture/home"
 exec env -i \
   PATH="$fixture/bin:/usr/bin:/bin" HOME="$fixture/home" LANG=C LC_ALL=C TZ=UTC TMPDIR=/tmp \
-  SOURCE_DATE_EPOCH="$epoch" OMAPKG_IMAGE_CLEAN_ENV=1 CURL_CA_BUNDLE="$fixture/tls.crt" \
+  SOURCE_DATE_EPOCH="$epoch" OMAPKG_IMAGE_CLEAN_ENV=1 \
   SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK="$SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK" \
   SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK_SIGNATURE="$SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK_SIGNATURE" \
   SYSTEM_IMAGE_REPRO_CANDIDATE_ID="$SYSTEM_IMAGE_REPRO_CANDIDATE_ID" \
@@ -200,4 +187,5 @@ exec env -i \
   SYSTEM_IMAGE_REPRO_KEY="$SYSTEM_IMAGE_REPRO_KEY" SYSTEM_IMAGE_REPRO_FINGERPRINT="$SYSTEM_IMAGE_REPRO_FINGERPRINT" \
   OPR_IMAGE_REPRO_ACCEPTANCE=1 OPR_IMAGE_REPRO_KIND=boot OPR_IMAGE_REPRO_REPO_ROOT=/repo \
   OPR_IMAGE_REPRO_PROFILE="$profile" OPR_IMAGE_REPRO_OUTPUT="$results" OPR_IMAGE_REPRO_GAP="${OPR_IMAGE_REPRO_GAP-5}" \
+  SYSTEM_IMAGE_REPRO_PACKAGE_CACHE="$SYSTEM_IMAGE_REPRO_PACKAGE_CACHE" \
   "$test_binary" -test.run '^TestImageReproducibilityAcceptance$' -test.count=1 -test.v
