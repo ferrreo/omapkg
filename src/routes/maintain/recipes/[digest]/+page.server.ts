@@ -7,6 +7,7 @@ import { query, sha256 } from '$lib/server/db';
 import { error } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import type { Srcinfo } from '$lib/srcinfo';
+import { recipeSources } from '$lib/recipe-sources';
 
 export const load: PageServerLoad = async (event) => {
   const actor = maintainer(event), env = environment(event), detail = await getRecipeCapture(env, event.params.digest);
@@ -28,7 +29,20 @@ export const load: PageServerLoad = async (event) => {
   const [inspections, images, attempts] = await Promise.all([listRecipeInspections(env.DB, event.params.digest), getBuildImages(env),
     query<{ job_id: string; attempt: number; error: string | null; created_at: number }>(env.DB,
       'SELECT r.job_id,r.attempt,r.error,r.created_at FROM recipe_inspection_results r JOIN recipe_inspections i ON i.id=r.job_id WHERE i.capture_sha256=? ORDER BY r.created_at DESC,r.attempt DESC LIMIT 100', event.params.digest)]);
-  const inspected = inspections.map((inspection) => ({ ...inspection, metadata: inspection.metadata_json ? JSON.parse(inspection.metadata_json) as Srcinfo : null }));
+  const inspected = inspections.map((inspection) => {
+    const metadata = inspection.metadata_json ? JSON.parse(inspection.metadata_json) as Srcinfo : null;
+    let sourceCount: number | null = null, sourceError: string | null = null;
+    if (metadata && inspection.current) {
+      try { sourceCount = recipeSources(detail.manifest, metadata, inspection.architecture).sources.length; }
+      catch (cause) { sourceError = cause instanceof Error ? cause.message : 'Source plan requires recipe adaptation.'; }
+    }
+    return { ...inspection, metadata, sourceCount, sourceError };
+  });
+  const sourceBundles = await query<{ sha256: string; architecture: string; created_at: number; reason: string; sources: number; caches: number; keys: number; current: number }>(env.DB,
+    `SELECT b.sha256,b.architecture,b.created_at,b.reason,json_array_length(b.manifest_json,'$.sources') AS sources,
+      json_array_length(b.manifest_json,'$.caches') AS caches,json_array_length(b.manifest_json,'$.keys') AS keys,
+      EXISTS(SELECT 1 FROM current_recipe_source_bundles current WHERE current.sha256=b.sha256) AS current
+      FROM recipe_source_bundles b WHERE b.capture_sha256=? ORDER BY b.created_at DESC,b.sha256 LIMIT 50`, event.params.digest);
   const mappings = [];
   for (const link of links) {
     const entries = await recipeCapturedEntries(env.DB, link.import_id, link.source_id, detail.manifest.pkgbase);
@@ -37,7 +51,7 @@ export const load: PageServerLoad = async (event) => {
       inspected: Boolean(inspection), target: entries[0].target });
   }
   return { ...detail, selected, preview, canInspect, images: images.filter((image) => image.enabled === 1),
-    inspections: inspected, attempts, links: mappings };
+    inspections: inspected, attempts, links: mappings, sourceBundles };
 };
 
 export const actions: Actions = {

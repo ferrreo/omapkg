@@ -111,3 +111,52 @@ Checks:
 python3 services/pipeline/capture-recipe.py --self-test
 bun test tests/recipe-capture.test.ts tests/recipe-git.test.ts
 ```
+
+## Retained build sources
+
+A successful, current native inspection exposes a source preparation plan on the
+private recipe page. The plan binds the capture, exact signed inspection attempt,
+native target and full package version. Architecture-specific source/checksum
+arrays retain makepkg ordering. Local file precedence, aliases, archive filenames,
+Git refs and source signing keys are explicit. Unsupported transports, missing
+local files, duplicate destinations, short Git commit pins and incompatible output
+architectures block preparation instead of being silently omitted.
+
+Capture the exported plan without evaluating recipe shell:
+
+```sh
+python3 services/pipeline/capture-recipe-sources.py \
+  --plan package-x86_64-sources.json --output /capture/package-sources
+```
+
+The tool follows bounded HTTPS redirects with public DNS addresses pinned through
+TLS connections, checks declared file hashes and records SHA-256 identities for
+all bytes. Git sources use a retained bare mirror, record the resolved commit and
+preserve refs needed by makepkg. Git redirects, credentials, extra protocols,
+submodule fetching and hooks are disabled during capture. Moving branches and
+unsigned inputs remain explicit review evidence; retaining them grants no approval.
+Git disk usage is polled and each file is bounded; a filesystem quota is required
+when a strict host disk allocation is necessary.
+
+Supply prepared language caches with `--cache go=/path/to/modcache`,
+`--cache cargo=/path/to/cargo-home` or `--cache npm=/path/to/npm-cache`, and explicit
+public signing keys with repeated `--key /path/to/public-key.asc`. Cache archives
+preserve file modes and contained symlinks, normalize archive metadata and expand
+hard links into regular files. Credential files and request logs must be removed
+from a prepared cache. The tool rejects escaping links, special files and secret
+keys. Source signature verification and cache completeness remain native build
+gates; capture alone does not establish either.
+
+Select the output folder under **Prepared build sources** to upload its objects
+and retain the immutable manifest. The server reconstructs its source plan from
+current signed inspection evidence, checks every required object and key reference,
+and rejects stale inspection authority or changed inputs. Historical manifests
+stay downloadable to maintainers. This operation creates no recipe approval,
+cohort build, public source URL or publication record.
+
+Current limits are 2 MiB per plan or bundle, 2,048 declared sources, 200,000 entries
+per Git/cache archive, 32 GiB per retained object and 256 GiB total referenced
+objects. The capture tool defaults to 4 GiB per object and 32 GiB per run and accepts
+smaller or larger explicit limits within those ceilings. Empty source files use
+the SHA-256 empty-object identity. Runtime source materialization and preserved
+revision creation remain separate integration work.

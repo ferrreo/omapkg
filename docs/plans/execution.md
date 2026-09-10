@@ -391,3 +391,40 @@ before makepkg checked source hashes. The native split-output regression now
 uses that filename: it reproduced the checksum failure before the fix, then
 built and tested all four outputs successfully afterward. Go tests and vet
 also passed.
+
+## Preserved recipe source preparation
+
+Signed native inspections now export private, architecture-specific source plans.
+They preserve full versions, local-file precedence, aliases, checksum arrays, Git
+refs and source signing keys. The offline capture tool retains HTTPS downloads,
+bare Git mirrors and explicitly prepared language caches/public keys without
+executing recipe shell. Immutable source bundles are uploaded through the existing
+resumable object protocol and checked against the current signed inspection.
+Source preparation creates no recipe approval or build.
+
+Measured local scope: 54 current x86 inspections yielded 51 usable source plans.
+Three captured recipes (`hyprland`, `hyprland-guiutils`, `hyprtoolkit`) declared
+ARM-only outputs and correctly blocked x86 source preparation. This is a source
+mapping difference, not evidence of x86 or ARM build coverage.
+
+Real capture retained the `asdcontrol` HTTPS archive and local recipe inputs,
+`omarchy-audio-tuner` Git tag, and the resolved `omarchy-dev` branch. Native x86
+makepkg source verification/extraction passed for the first two with networking
+disabled and original recipe files mounted read-only. Git source directories must
+be owned by the container build user; using Podman's matching user namespace
+resolved the initial manual harness ownership error. These checks are source
+preparation acceptance, not package builds or a full worker/coordinator run.
+
+Browser acceptance uploaded both source bundles, downloaded manifests matching
+the retained hashes, checked stale-attempt rejection and denied anonymous access.
+Layouts passed at 320, 375, 414, 768, 1440 and 1920px. The complete application suite
+passes 235 tests (1,532 assertions); Svelte and pipeline checks and production web
+build pass. Source capture's runnable parser/archive self-check passes, including
+unsafe paths and escaping cache links. The new source authority view executes
+within D1's expression-depth limit.
+
+Preserved revision/PR creation, full source-tree materialization in native workers,
+source-aware signing, per-target source/caches for the complete catalog and the
+remaining release/client/ABI/system/cutover phases are still in progress. None of
+these captures constitutes production admission, source signature approval or
+full-plan completion.

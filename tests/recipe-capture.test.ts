@@ -19,6 +19,8 @@ import { registerBuildImage, setBuildImageEnabled } from '../src/lib/server/buil
 import type { Worker } from '../src/lib/model';
 import type { WorkerMetadata } from '../src/lib/server/worker-protocol';
 import { POST as inspectionInput } from '../src/routes/api/worker/inspections/[id]/inputs/[digest]/+server';
+import { parseRecipeSourceBundle, recipeSources } from '../src/lib/recipe-sources';
+import { recipeSourcePlan, retainRecipeSources } from '../src/lib/server/recipe-source-plans';
 
 const metadata = `pkgbase = demo
 \tpkgver = 1.4
@@ -79,6 +81,28 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     const manifest = parseRecipeCapture(JSON.parse(readFileSync(join(capture, 'manifest.json'), 'utf8')), env.GITHUB_REPOSITORY);
     const read = async (ref: { sha256: string }) => new Uint8Array(readFileSync(join(capture, 'objects', ref.sha256)));
     const inspected = await verifyRecipeCapture(manifest, read);
+    const sourceMetadata = parseSrcinfo(metadata);
+    sourceMetadata.base.source = ['fix.patch', 'archive.zip::https://example.org/source?release=1', 'git+https://example.org/source.git#branch=release/quattro', 'https://example.org/file?release=1'];
+    sourceMetadata.base.sha256sums = ['SKIP', 'b'.repeat(64), 'SKIP', 'c'.repeat(64)];
+    sourceMetadata.base.source_aarch64 = ['arm.patch::https://example.org/arm.patch'];
+    sourceMetadata.base.sha512sums_aarch64 = ['d'.repeat(128)];
+    const planned = recipeSources(manifest, sourceMetadata, 'aarch64');
+    expect(planned.sources.map((source) => [source.kind, source.name])).toEqual([['local', 'fix.patch'], ['file', 'archive.zip'], ['git', 'source'], ['file', 'file?release=1'], ['file', 'arm.patch']]);
+    expect(planned.sources[2]).toMatchObject({ url: 'https://example.org/source.git', ref: { kind: 'branch', value: 'release/quattro' } });
+    expect(planned.sources[4].checksums).toEqual({ sha512: 'd'.repeat(128) });
+    expect(recipeSources(manifest, sourceMetadata, 'x86_64').sources).toHaveLength(4);
+    const invalidSources = structuredClone(sourceMetadata);
+    invalidSources.base.source[1] = 'fix.patch::https://example.org/archive.zip';
+    expect(() => recipeSources(manifest, invalidSources, 'x86_64')).toThrow('unique');
+    invalidSources.base.source[1] = '../escape::https://example.org/archive.zip';
+    expect(() => recipeSources(manifest, invalidSources, 'x86_64')).toThrow('Unsafe');
+    invalidSources.base.source[1] = 'git+https://example.org/archive.git#commit=abcdef';
+    expect(() => recipeSources(manifest, invalidSources, 'x86_64')).toThrow('full immutable commit');
+    invalidSources.base.source[1] = 'file:///etc/passwd';
+    expect(() => recipeSources(manifest, invalidSources, 'x86_64')).toThrow('supported HTTPS');
+    invalidSources.base.source = sourceMetadata.base.source;
+    invalidSources.base.sha256sums.pop();
+    expect(() => recipeSources(manifest, invalidSources, 'x86_64')).toThrow('checksum array');
     expect(new TextDecoder().decode(inspected.get('.SRCINFO'))).toBe(metadata);
     expect(readdirSync(root)).not.toContain('MUST_NOT_EXECUTE');
     await expect(verifyRecipeCapture({ ...manifest, files: manifest.files.slice(1) }, read)).rejects.toThrow('inventory');
@@ -164,9 +188,31 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     expect(await completeRecipeInspection(env.DB, worker, second.id, completion())).toEqual({ status: 'succeeded' });
     expect(await completeRecipeInspection(env.DB, worker, second.id, completion())).toEqual({ status: 'succeeded' });
     expect((await listRecipeInspections(env.DB, ref.sha256))[0]).toMatchObject({ current: 1, status: 'succeeded' });
+    expect(await recipeSourcePlan(env, ref.sha256, second.id, second.attempt)).toMatchObject({ capture: ref, architecture: 'x86_64', version: '2:1.4-3.2',
+      inspection: { jobId: second.id, attempt: 2, srcinfoSha256: report.srcinfoSha256 }, sources: [{ kind: 'file', name: 'demo.tar.xz', url: 'https://example.org/source.tar.xz', checksums: { sha256: 'a'.repeat(64) } }] });
+    await expect(recipeSourcePlan(env, ref.sha256, second.id, 1)).rejects.toThrow('current successful');
+    const sourcePlan = await recipeSourcePlan(env, ref.sha256, second.id, second.attempt);
+    const sourcePlanRef = await retainInputBytes(env, actor, new TextEncoder().encode(canonicalJson(sourcePlan)));
+    const sourceObject = await retainInputBytes(env, actor, new TextEncoder().encode('Source protocol fixture; native makepkg must verify upstream checksums.'));
+    const sourceBundle = { schemaVersion: 1, kind: 'recipe-source-bundle', plan: sourcePlanRef,
+      sources: [{ kind: 'file', name: 'demo.tar.xz', object: sourceObject, redirects: ['https://example.org/source.tar.xz'] }], caches: [], keys: [] };
+    const storeBundle = (value: unknown) => retainInputBytes(env, actor, new TextEncoder().encode(canonicalJson(value)));
+    const sourceRef = await storeBundle(sourceBundle);
+    expect(await retainRecipeSources(env, actor, ref.sha256, sourceRef, 'Protocol source retention.')).toEqual({ sha256: sourceRef.sha256 });
+    expect(await retainRecipeSources(env, actor, ref.sha256, sourceRef, 'Identical retry.')).toEqual({ sha256: sourceRef.sha256 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM current_recipe_source_bundles').first<{ n: number }>()).toEqual({ n: 1 });
+    expect(() => db.exec("UPDATE recipe_source_bundles SET reason='changed'")).toThrow('immutable');
+    await expect(retainRecipeSources(env, actor, ref.sha256, await storeBundle({ ...sourceBundle, sources: [] }), 'Missing input.')).rejects.toThrow('differ from inspected');
+    const alteredPlan = await storeBundle({ ...sourcePlan, version: '9.0-1' });
+    await expect(retainRecipeSources(env, actor, ref.sha256, await storeBundle({ ...sourceBundle, plan: alteredPlan }), 'Changed plan.')).rejects.toThrow('differs from current');
+    expect(() => parseRecipeSourceBundle({ ...sourceBundle, sources: [...sourceBundle.sources, ...sourceBundle.sources] })).toThrow('repeats');
+    expect(() => parseRecipeSourceBundle({ ...sourceBundle, caches: [{ kind: 'go', object: sourceObject, entries: 200001, expandedBytes: 10 }] })).toThrow();
     expect(db.prepare('SELECT COUNT(*) AS n FROM recipe_inspection_results').first<{ n: number }>()).toEqual({ n: 1 });
     for (const table of ['approvals', 'builds']) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>()).toEqual({ n: 0 });
     db.exec("UPDATE workers SET status='revoked' WHERE id='inspection-worker'");
+    expect(db.prepare('SELECT COUNT(*) AS n FROM current_recipe_source_bundles').first<{ n: number }>()).toEqual({ n: 0 });
+    await expect(retainRecipeSources(env, actor, ref.sha256, sourceRef, 'Revoked inspection.')).rejects.toThrow('current successful');
+    await expect(recipeSourcePlan(env, ref.sha256, second.id, second.attempt)).rejects.toThrow('current successful');
     expect((await listRecipeInspections(env.DB, ref.sha256))[0].current).toBe(0);
     db.exec("DELETE FROM team_memberships WHERE github_id='1'");
     await expect(retainRecipeCapture(env, actor, ref, importId, 'opr-x86', 'Stale authority.')).rejects.toThrow();
