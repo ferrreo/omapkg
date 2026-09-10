@@ -17,10 +17,10 @@ const imageDigest = `ghcr.io/opr/builder@sha256:${'a'.repeat(64)}`;
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 
-function runtimeDependencies(id: string): string[] {
+function runtimeDependencies(id: string, architecture: 'x86_64' | 'aarch64'): string[] {
   if (id.startsWith('node-')) return ['nodejs'];
   if (id === 'python-v1') return ['python', 'glibc', 'gcc-libs'];
-  if (id === 'electron-v1') return ['electron43', 'bash'];
+  if (id === 'electron-v1') return [architecture === 'aarch64' ? 'electron43-arm-runtime' : 'electron43', 'bash'];
   if (id === 'script-data-v1') return ['bash'];
   return ['bash', 'glibc', 'gcc-libs'];
 }
@@ -75,7 +75,7 @@ const source = { name: input.sourceName, url: `https://example.invalid/template/
 
 const candidate: FactoryCandidate = {
   request: { id: `template-${input.id}`, name: `opr-template-${input.id}`, upstreamUrl: source.url, sourceKind: 'archive', area: 'development', declaredLicense: 'MIT' },
-  version: '1.0.0', sources: [source], sourceRoot: sourceRoot(input.sourceName), dependencies: runtimeDependencies(input.id), makeDependencies: [], smokeCommands: [], architectures: [input.architecture], pkgrel: 1, sourceDateEpoch: 1_700_000_000, imageDigest, license: 'MIT', surface: 'binary', description: `typed ${input.id} fixture`, recipeMode: 'template', template: selected.value, vendorArtifact: selected.vendorArtifact, buildCommands: [], packageCommands: [], explanation: 'native template fixture',
+  version: '1.0.0', sources: [source], sourceRoot: sourceRoot(input.sourceName), dependencies: runtimeDependencies(input.id, input.architecture), makeDependencies: [], smokeCommands: [], architectures: [input.architecture], pkgrel: 1, sourceDateEpoch: 1_700_000_000, imageDigest, license: 'MIT', surface: 'binary', description: `typed ${input.id} fixture`, recipeMode: 'template', template: selected.value, vendorArtifact: selected.vendorArtifact, buildCommands: [], packageCommands: [], explanation: 'native template fixture',
 };
 
 const recipe = renderRecipe(candidate);

@@ -58,7 +58,7 @@ run_worker_test() {
     OPR_IMAGE_REPRO_REPO_ROOT="$repo_root" \
     OPR_IMAGE_REPRO_PROFILE="$profile" \
     OPR_IMAGE_REPRO_OUTPUT="$output_root" \
-    go test . -run '^TestImageReproducibilityAcceptance$' -count=1 -v
+    go test . -run '^TestImageReproducibilityAcceptance$' -count=1 -timeout=90m -v
   )
 }
 

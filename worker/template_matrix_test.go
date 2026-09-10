@@ -109,7 +109,7 @@ func TestTemplateFamilyReproducibilityNativeOCI(t *testing.T) {
 				RevisionID: "template-matrix", PackageName: "opr-template-" + fixture.id, Version: "1.0.0", Pkgrel: 1,
 				Architecture: architecture, Recipe: recipe, RecipeSHA256: hashBytes([]byte(recipe)), SourceDateEpoch: 1_700_000_000,
 				ImageDigest: imageDigest, ImageRef: imageRef, Sources: []Source{{Name: fixture.sourceName, URL: "https://example.invalid/template/" + fixture.sourceName, SHA256: sourceHash}},
-				SmokeCommands: fixture.smoke, Surface: "binary", Dependencies: fixtureRuntimeDependencies(fixture.id),
+				SmokeCommands: fixture.smoke, Surface: "binary", Dependencies: fixtureRuntimeDependencies(fixture.id, architecture),
 			}
 			if fixture.split {
 				job.Attempt = 1
@@ -169,7 +169,7 @@ func TestTemplateFamilyReproducibilityNativeOCI(t *testing.T) {
 	}
 }
 
-func fixtureRuntimeDependencies(id string) []string {
+func fixtureRuntimeDependencies(id, architecture string) []string {
 	if strings.HasPrefix(id, "node-") {
 		return []string{"nodejs"}
 	}
@@ -177,6 +177,9 @@ func fixtureRuntimeDependencies(id string) []string {
 		return []string{"python", "glibc", "gcc-libs"}
 	}
 	if id == "electron-v1" {
+		if architecture == "aarch64" {
+			return []string{"electron43-arm-runtime", "bash"}
+		}
 		return []string{"electron43", "bash"}
 	}
 	if id == "script-data-v1" {
@@ -488,10 +491,14 @@ func rpmFixtureBytes(t *testing.T, architecture string) []byte {
 		runtime = "podman"
 	}
 	mount := root + ":/root/rpmbuild:Z"
+	rpmbuildRoot := "/root/rpmbuild"
+	args := []string{"run", "--rm"}
 	if runtime == "docker" {
-		mount = root + ":/root/rpmbuild"
+		mount = root + ":/tmp/rpmbuild"
+		rpmbuildRoot = "/tmp/rpmbuild"
+		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	}
-	args := []string{"run", "--rm", "-v", mount, image, "rpmbuild", "-bb", "/root/rpmbuild/SPECS/demo.spec"}
+	args = append(args, "-v", mount, image, "rpmbuild", "-bb", rpmbuildRoot+"/SPECS/demo.spec")
 	if output, err := exec.Command(runtime, args...).CombinedOutput(); err != nil {
 		t.Skipf("incomplete: generate RPM fixture in pinned image: %v (%s)", err, output)
 	}

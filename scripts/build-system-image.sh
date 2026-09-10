@@ -14,6 +14,7 @@ candidate_id=
 native_plan=
 candidate_lock_signature=
 native_plan_signature=
+coordinator_binding=
 candidate_mode=0
 profile=
 output=
@@ -45,6 +46,7 @@ while (($#)); do
     --candidate-id) candidate_id=${2:-}; candidate_mode=1; shift ;;
     --native-plan) native_plan=${2:-}; candidate_mode=1; shift ;;
     --native-plan-signature) native_plan_signature=${2:-}; candidate_mode=1; shift ;;
+    --coordinator-binding) coordinator_binding=${2:-}; candidate_mode=1; shift ;;
     --profile) profile=${2:-}; shift ;;
     --manifest) manifest_url=${2:-}; shift ;;
     --signature) manifest_signature=${2:-}; shift ;;
@@ -66,7 +68,7 @@ done
 if (( ! candidate_mode )); then
   [[ -n "$manifest_url" ]] || die "--manifest is required; image locks must be reverified by the manifest client"
 else
-  [[ -z "$manifest_url" && -n "$candidate_lock" && -n "$candidate_lock_signature" && -n "$candidate_id" && -n "$native_plan" && -n "$native_plan_signature" ]] || die "private candidate builds require signed candidate lock, candidate id, native plan, and native plan signature without --manifest"
+  [[ -z "$manifest_url" && -n "$candidate_lock" && -n "$candidate_id" && -n "$native_plan" && ( -n "$coordinator_binding" || ( -n "$candidate_lock_signature" && -n "$native_plan_signature" ) ) ]] || die "private candidate builds require a coordinator binding or signed candidate inputs without --manifest"
   [[ -n "$trusted_key" && -n "$trusted_fingerprint" ]] || die "private candidate builds require --key and --fingerprint for package signatures"
 fi
 command -v jq >/dev/null || die "missing jq"
@@ -164,16 +166,15 @@ lock_sha256=$(canonical_sha "$lock")
 if (( candidate_mode )); then
   safe_file "$native_plan"
   safe_file "$trusted_key"
-  command -v gpg >/dev/null || die "missing gpg for candidate authority verification"
-  verify_reviewed_signature "$lock" "$candidate_lock_signature"
-  verify_reviewed_signature "$native_plan" "$native_plan_signature"
+  if [[ -n "$coordinator_binding" ]]; then safe_file "$coordinator_binding"; else command -v gpg >/dev/null || die "missing gpg for candidate authority verification"; verify_reviewed_signature "$lock" "$candidate_lock_signature"; verify_reviewed_signature "$native_plan" "$native_plan_signature"; fi
   jq -e --arg id "$candidate_id" '.schemaVersion == 1 and .authority == "factory-candidate-v1" and .candidate.executionScope == "private" and .candidate.id == $id and (.candidate.ownedUniverseSha256 | type == "string") and (.candidate.inputLockSha256 | type == "string") and (.candidate.nativePlanSha256 | type == "string") and (.packages | type == "array" and length > 0)' "$lock" >/dev/null || die "candidate lock is not a reviewed private image lock"
   candidate_owned_universe=$(jq -er '.candidate.ownedUniverseSha256' "$lock"); candidate_input_lock=$(jq -er '.candidate.inputLockSha256' "$lock"); candidate_native_plan=$(jq -er '.candidate.nativePlanSha256' "$lock")
   hex64 "$candidate_owned_universe" || die "candidate owned-universe digest is invalid"
   hex64 "$candidate_input_lock" || die "candidate input-lock digest is invalid"
   hex64 "$candidate_native_plan" || die "candidate native-plan digest is invalid"
   [[ "$(canonical_sha "$native_plan")" == "$candidate_native_plan" ]] || die "native plan bytes do not match candidate lock"
-  jq -e --arg id "$candidate_id" --arg arch "$(jq -er '.architecture' "$profile")" --arg owned "$candidate_owned_universe" --arg input "$candidate_input_lock" '.schemaVersion == 1 and .kind == "factory-image-native-plan" and .executionScope == "private" and .candidateId == $id and .architecture == $arch and .ownedUniverseSha256 == $owned and .inputLockSha256 == $input and .status == "reviewed"' "$native_plan" >/dev/null || die "native plan is not the exact reviewed private candidate plan"
+  jq -e --arg id "$candidate_id" --arg arch "$(jq -er '.architecture' "$profile")" --arg owned "$candidate_owned_universe" --arg input "$candidate_input_lock" '.schemaVersion == 1 and (.kind == "factory-image-native-plan" or .kind == "factory-image-construction-proof") and .candidateId == $id and .architecture == $arch and .inputLockSha256 == $input and .status == "reviewed" and ((.kind == "factory-image-native-plan" and .executionScope == "private" and .ownedUniverseSha256 == $owned) or (.kind == "factory-image-construction-proof" and (.runPolicySha256 | type == "string")))' "$native_plan" >/dev/null || die "native plan is not the exact reviewed private construction proof"
+  if [[ -n "$coordinator_binding" ]]; then jq -e --arg id "$candidate_id" --arg arch "$(jq -er '.architecture' "$profile")" --arg lock "$lock_sha256" --arg proof "$candidate_native_plan" --arg profile "$profile_sha256" '.schemaVersion == 1 and .kind == "factory-image-coordinator-binding" and .candidateId == $id and .architecture == $arch and .candidateLockSha256 == $lock and .constructionProofSha256 == $proof and .profileSha256 == $profile and (.policySha256 | test("^[a-f0-9]{64}$")) and (.inputSha256 | test("^[a-f0-9]{64}$"))' "$coordinator_binding" >/dev/null || die "coordinator construction binding is invalid"; fi
 else
   jq -e '.schemaVersion == 1 and .authority == "omarchy-manifest-client-v1" and (.packages | type == "array" and length > 0)' "$lock" >/dev/null || die "release lock is not a manifest-client image lock"
   candidate_owned_universe=
@@ -351,7 +352,7 @@ kernel_path=$(jq -er '.kernel.path' "$profile"); initramfs_path=$(jq -er '.kerne
 [[ -f "$root$kernel_path" && -f "$root$initramfs_path" ]] || die "profile kernel or initramfs was not installed"
 offline_exec arch-chroot "$root" grub-install --target="$boot_target" --efi-directory=/boot/efi --boot-directory=/boot --removable --no-nvram --recheck >/dev/null
 filesystem=$(jq -er '.disk.filesystem' "$profile")
-printf '%s\n' "UUID=$root_uuid / $filesystem defaults 0 1" "UUID=$esp_uuid /boot/efi vfat umask=0077 0 2" >"$root/etc/fstab"
+printf '%s\n' "UUID=$root_uuid / $filesystem defaults 0 1" "UUID=$(blkid -s UUID -o value "$esp_device") /boot/efi vfat umask=0077 0 2" >"$root/etc/fstab"
 kernel_args=$(jq -er '.boot.kernelArguments' "$profile" | sed "s/{rootUuid}/$root_uuid/g")
 printf '%s\n' "search --no-floppy --fs-uuid --set=root $root_uuid" "linux $kernel_path $kernel_args" "initrd $initramfs_path" >"$root/boot/grub/grub.cfg"
 find "$root" -xdev -print0 | xargs -0 touch -h -d "@$source_date_epoch"

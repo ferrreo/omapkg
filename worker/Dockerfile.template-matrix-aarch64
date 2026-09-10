@@ -7,6 +7,18 @@ RUN cp /etc/pacman.conf /tmp/opr-pacman.conf \
     && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
       arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools \
       cmake meson ninja rust python python-build python-installer python-setuptools npm go \
-      pnpm yarn electron43 xorg-server-xvfb \
-    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm \
-    && rm /tmp/opr-pacman.conf
+      pnpm yarn xorg-server-xvfb \
+    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm
+
+RUN install -d /tmp/electron-pkg \
+    && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      https://github.com/electron/electron/releases/download/v43.2.0/electron-v43.2.0-linux-arm64.zip \
+      --output /tmp/electron-pkg/electron.zip \
+    && printf '%s  %s\\n' '50e1cdefbf8590e0d89b0276314a99c7b98e8eed732204c6f1a1c2a38376ed87' /tmp/electron-pkg/electron.zip | sha256sum -c -
+COPY testdata/template-matrix/electron-arm64.PKGBUILD /tmp/electron-pkg/PKGBUILD
+RUN useradd --create-home matrix-builder \
+    && chown -R matrix-builder:matrix-builder /tmp/electron-pkg \
+    && runuser -u matrix-builder -- bash -ceu 'cd /tmp/electron-pkg && makepkg --nodeps --noconfirm' \
+    && pacman --config /tmp/opr-pacman.conf -U --noconfirm /tmp/electron-pkg/*.pkg.tar.zst \
+    && install -Dm644 /tmp/electron-pkg/*.pkg.tar.zst /opt/electron43-arm-runtime.pkg.tar.zst \
+    && rm -rf /tmp/electron-pkg /tmp/opr-pacman.conf

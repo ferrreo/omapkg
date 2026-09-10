@@ -343,13 +343,12 @@ jobs:
           builder_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$builder_tag")
           [[ "$builder_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-matrix-arm64@sha256:[0-9a-f]{64}$ ]]
 
-          cp worker/images/aarch64/runtime.Dockerfile "$RUNNER_TEMP/template-runtime-arm64.Dockerfile"
-          sed -i 's/-Syu --noconfirm/-Syu --noconfirm --needed bash glibc gcc-libs python nodejs electron43 xorg-server-xvfb/' \
-            "$RUNNER_TEMP/template-runtime-arm64.Dockerfile"
           runtime_tag="$FACTORY_REGISTRY_HOST/opr-template-runtime-arm64:ci"
-          docker build --pull=false --file "$RUNNER_TEMP/template-runtime-arm64.Dockerfile" --tag "$runtime_tag" \
-            "$RUNNER_TEMP/factory-arm-base/context"
-          docker push "$runtime_tag" >/dev/null
+          OPR_ARM_RUNTIME=docker \
+          OPR_ARM_TEMPLATE_BUILDER_IMAGE="$builder_ref" \
+          OPR_ARM_RUNTIME_ROOTFS_CONTEXT="$RUNNER_TEMP/factory-arm-base/context" \
+          OPR_ARM_TEMPLATE_RUNTIME_IMAGE="$runtime_tag" \
+            scripts/build-arm-template-runtime.sh 2>&1 | tee "$FACTORY_EVIDENCE/build-arm-template-runtime.log"
           runtime_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$runtime_tag")
           [[ "$runtime_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-runtime-arm64@sha256:[0-9a-f]{64}$ ]]
 
