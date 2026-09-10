@@ -483,11 +483,23 @@ func rpmFixtureBytes(t *testing.T, architecture string) []byte {
 	if err := os.WriteFile(filepath.Join(root, "SPECS", "demo.spec"), spec, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"run", "--rm", "-v", root + ":/root/rpmbuild:Z", image, "rpmbuild", "-bb", "/root/rpmbuild/SPECS/demo.spec"}
-	if output, err := exec.Command("podman", args...).CombinedOutput(); err != nil {
+	runtime := os.Getenv("OPR_WORKER_TEMPLATE_MATRIX_RUNTIME")
+	if runtime == "" {
+		runtime = "podman"
+	}
+	mount := root + ":/root/rpmbuild:Z"
+	if runtime == "docker" {
+		mount = root + ":/root/rpmbuild"
+	}
+	args := []string{"run", "--rm", "-v", mount, image, "rpmbuild", "-bb", "/root/rpmbuild/SPECS/demo.spec"}
+	if output, err := exec.Command(runtime, args...).CombinedOutput(); err != nil {
 		t.Skipf("incomplete: generate RPM fixture in pinned image: %v (%s)", err, output)
 	}
-	path := filepath.Join(root, "RPMS", "x86_64", "demo-1.0-1.x86_64.rpm")
+	packageArchitecture := "x86_64"
+	if architecture == "aarch64" {
+		packageArchitecture = "aarch64"
+	}
+	path := filepath.Join(root, "RPMS", packageArchitecture, "demo-1.0-1."+packageArchitecture+".rpm")
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Skipf("incomplete: generated RPM fixture missing: %v", err)

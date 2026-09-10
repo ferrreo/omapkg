@@ -217,6 +217,8 @@ func (r *Runner) cleanupJobDirectory(jobDir, imageRef string) {
 func (r *Runner) build(ctx context.Context, workdir, output, jobName string, sourceDateEpoch int64, imageRef string, preserved *materializedRecipe) (string, error) {
 	env := map[string]string{
 		"SOURCE_DATE_EPOCH": fmt.Sprintf("%d", sourceDateEpoch),
+		"HOME":              "/tmp",
+		"XDG_CACHE_HOME":    "/tmp/.cache",
 		"PKGDEST":           "/opr/output",
 		"SRCDEST":           "/opr/work",
 		"LOGDEST":           "/opr/output",

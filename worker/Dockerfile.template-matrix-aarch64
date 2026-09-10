@@ -2,8 +2,11 @@
 # approved AArch64 OCI runner with binfmt; never use this as a production image.
 FROM docker.io/library/omarpkg-arm-builder@sha256:e9cbff215a6022ff61f4542b9ab1325e742c89a6a3f736488b4359a373f76db8
 
-RUN pacman -Syu --noconfirm --needed \
-    arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools shellcheck \
-    cmake meson ninja rust python python-build python-installer python-setuptools npm go \
-    pnpm yarn electron43 xorg-server-xvfb \
-    && pacman -Scc --noconfirm
+RUN cp /etc/pacman.conf /tmp/opr-pacman.conf \
+    && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls\nDisableSandboxFilesystem' /tmp/opr-pacman.conf \
+    && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
+      arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools \
+      cmake meson ninja rust python python-build python-installer python-setuptools npm go \
+      pnpm yarn electron43 xorg-server-xvfb \
+    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm \
+    && rm /tmp/opr-pacman.conf
