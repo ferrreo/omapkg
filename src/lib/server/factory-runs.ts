@@ -279,6 +279,12 @@ export async function startFactoryIntervention(db: D1Database, input: { sourceRu
   return successor;
 }
 
+export async function reconcileExpiredFactoryBuilds(db: D1Database, at = now()): Promise<void> {
+  const rows = await db.prepare(`SELECT DISTINCT factory_run_id AS run_id FROM builds
+    WHERE private_candidate=1 AND status='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at<=? AND factory_run_id IS NOT NULL`).bind(at).all<{ run_id: string }>();
+  for (const row of rows.results) await stopFactoryRun(db, row.run_id, 'Private factory worker lease expired; execution is ambiguous and requires human intervention.');
+}
+
 export async function getFactoryRun(db: D1Database, runId: string): Promise<FactoryRun | null> {
   requireIdentifier(runId, 'run id');
   const row = await runRow(db, runId);

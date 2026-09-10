@@ -11,6 +11,7 @@ import type { Worker, Architecture, Build, Actor } from '../model';
 import { PolicyError, requireMaintainer } from './policy';
 import { type DependencyPlan, planDependencies, parseDependencyPlan } from './dependency-plan';
 import { reviewedRuntimeExceptions } from './runtime-evidence';
+import { reconcileExpiredFactoryBuilds } from './factory-runs';
 import {
   type EnrollmentResult,
   requireObject,
@@ -312,6 +313,7 @@ type RetryBuildRow = {
   latest_revision_id: string | null;
   area_approved: number;
   security_approved: number;
+  private_candidate: number;
 };
 
 export async function retryBuild(db: D1Database, actor: Actor | null, buildId: string, reason: string): Promise<void> {
@@ -330,7 +332,8 @@ export async function retryBuild(db: D1Database, actor: Actor | null, buildId: s
         q.id AS request_id, q.status AS request_status, q.area,
         (SELECT latest.id FROM revisions latest WHERE latest.request_id=r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1) AS latest_revision_id,
         EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=r.id AND a.kind='area' AND a.manifest_sha256=r.manifest_sha256 AND a.revoked_at IS NULL) AS area_approved,
-        EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=r.id AND a.kind='security' AND a.manifest_sha256=r.manifest_sha256 AND a.revoked_at IS NULL) AS security_approved
+        EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id=r.id AND a.kind='security' AND a.manifest_sha256=r.manifest_sha256 AND a.revoked_at IS NULL) AS security_approved,
+        b.private_candidate
       FROM builds b JOIN revisions r ON r.id=b.revision_id JOIN requests q ON q.id=r.request_id
       WHERE b.id=?`).bind(buildId).first<RetryBuildRow>();
   } catch (cause) {
@@ -339,6 +342,8 @@ export async function retryBuild(db: D1Database, actor: Actor | null, buildId: s
 
   if (!row) throw new PolicyError(404, 'Build not found.');
   requireMaintainer(caller, row.area);
+
+  if (row.private_candidate === 1) throw new PolicyError(409, 'Private factory attempts require an audited factory successor, not a manual build retry.');
 
   if (row.build_status !== 'failed' || !['queued', 'building', 'failed'].includes(row.request_status)) throw new PolicyError(409, 'Only a failed build on its current request can be retried.');
 
@@ -414,7 +419,7 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
             OR NOT EXISTS(SELECT 1 FROM cohort_members member WHERE member.cohort_id=cohort.id
               AND member.revision=cohort.current_revision AND member.recipe_revision_id=r.id)))
         AND r.pr_url IS NOT NULL AND r.commit_sha IS NOT NULL AND length(r.image_digest) > 0
-        AND (b.status = 'queued' OR (b.status = 'leased' AND b.lease_expires_at IS NOT NULL AND b.lease_expires_at < ?))
+        AND (b.status = 'queued' OR (b.private_candidate=0 AND b.status = 'leased' AND b.lease_expires_at IS NOT NULL AND b.lease_expires_at < ?))
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
         AND (b.private_candidate=1 AND EXISTS (SELECT 1 FROM factory_runs fr JOIN factory_run_attempts fa ON fa.run_id=fr.id AND fa.attempt=fr.current_attempt
           WHERE fr.id=b.factory_run_id AND fr.status='running' AND fr.current_attempt=b.factory_attempt AND fr.lease_expires_at>unixepoch() AND fa.status='running' AND fa.lease_expires_at>unixepoch() AND fa.candidate_revision_id=b.revision_id)
@@ -434,6 +439,7 @@ export async function claimJob(
   dependencyContext?: { ARTIFACTS: R2Bucket; PUBLIC_ORIGIN: string; PACKAGE_SIGNING_FINGERPRINT?: string; SIGNING_FINGERPRINT?: string },
 ): Promise<WorkerJob | null> {
   const timestamp = now();
+  await reconcileExpiredFactoryBuilds(db, timestamp);
   await refreshWorkerMetadata(db, worker, metadata, timestamp);
   const capabilities = metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]');
 

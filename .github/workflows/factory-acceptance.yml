@@ -82,15 +82,8 @@ jobs:
           builder_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$builder_tag")
           [[ "$builder_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-matrix-x86@sha256:[0-9a-f]{64}$ ]]
 
-          runtime_context="$RUNNER_TEMP/template-runtime-x86-context"
-          mkdir -p "$runtime_context"
-          cat >"$runtime_context/Dockerfile" <<EOF
-          FROM $FACTORY_X86_BASE_IMAGE
-          RUN pacman -Syu --noconfirm --needed electron43 xorg-server-xvfb \\
-              && pacman -Scc --noconfirm
-          EOF
           runtime_tag="$FACTORY_REGISTRY_HOST/opr-template-runtime-x86:ci"
-          docker build --pull=false --file "$runtime_context/Dockerfile" --tag "$runtime_tag" "$runtime_context"
+          docker build --pull=false --file worker/Dockerfile.template-matrix-runtime --tag "$runtime_tag" worker
           docker push "$runtime_tag" >/dev/null
           runtime_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$runtime_tag")
           [[ "$runtime_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-runtime-x86@sha256:[0-9a-f]{64}$ ]]
@@ -345,7 +338,7 @@ jobs:
           [[ "$builder_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-matrix-arm64@sha256:[0-9a-f]{64}$ ]]
 
           cp worker/images/aarch64/runtime.Dockerfile "$RUNNER_TEMP/template-runtime-arm64.Dockerfile"
-          sed -i 's/-Syu --noconfirm/-Syu --noconfirm --needed electron43 xorg-server-xvfb/' \
+          sed -i 's/-Syu --noconfirm/-Syu --noconfirm --needed bash glibc gcc-libs python nodejs electron43 xorg-server-xvfb/' \
             "$RUNNER_TEMP/template-runtime-arm64.Dockerfile"
           runtime_tag="$FACTORY_REGISTRY_HOST/opr-template-runtime-arm64:ci"
           docker build --pull=false --file "$RUNNER_TEMP/template-runtime-arm64.Dockerfile" --tag "$runtime_tag" \

@@ -18,6 +18,14 @@ podman build --pull=never \
   --file worker/Dockerfile.template-matrix worker
 ```
 
+Build separate clean runtime capacity from the pinned base:
+
+```sh
+podman build --pull=never \
+  --tag localhost/opr-template-matrix-runtime:local \
+  --file worker/Dockerfile.template-matrix-runtime worker
+```
+
 Build AArch64 capacity on native ARM or approved AArch64 binfmt using the
 separately pinned base and package recipe:
 
