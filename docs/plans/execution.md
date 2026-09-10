@@ -761,3 +761,27 @@ runtime acceptance remains separate. Complete system/OPR release implementation
 and qualification continue in subsequent batches; this is not release cutover.
 
 See [native analysis](../native-analysis.md) for protocol, limits and checks.
+
+
+## Production rollout: Go runtime batch
+
+Commit `b437336` was pushed to `main` and deployed on 10 September 2026.
+Remote migrations through `0045_build_abi_evidence.sql` were applied. Existing
+service secrets were retained. Cloudflare reports each service version at 100%:
+
+- Web: `39bbcb04-7489-487f-8be5-556066817101`.
+- Signer: `9f6585fd-82ff-4c4d-97e2-89e4b8cfec49`.
+- Pipeline: `4f10598f-eed0-4e07-99ef-5173261146f7`.
+
+The live x86 worker was drained while idle, atomically upgraded to
+`v0.1.0-b437336`, restarted, and observed by the coordinator with
+`abi-inventory-v1` capability. Job acceptance was restored. Public home, package,
+repository and security pages return 200; unauthenticated import/cohort API
+requests return 401. Imports remain stopped and distribution mode remains shadow.
+
+The pipeline runs the verified image
+`registry.cloudflare.com/02b05e9d2ce87ca2ccd30cbb50b6eaf3/omarpkg-pipeline-sandbox:go-runtime-20260910-b437336@sha256:6082c6a9cdb4241617b0abd2541fb36de720f89cd595698a2d215ef0660cd667`.
+The registry's manifest digest differed from Docker's local cached digest. The
+remote manifest was checked against the tested image configuration before the
+correct digest was activated. Release-engine, client and final-universe
+qualification integration continues in the next verified batch.
