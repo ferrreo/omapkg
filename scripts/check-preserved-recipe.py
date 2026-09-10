@@ -2,6 +2,7 @@
 """Native acceptance of pinned original asdcontrol; private bootstrap inputs only.
 
 Requires Go, Git and Podman, and a locally pulled, digest-pinned native helper.
+Docker preparation additionally requires that same helper in Docker's image store.
 Source/package downloads happen during preparation; worker builds stay offline.
 """
 import argparse
@@ -29,7 +30,7 @@ def command(*args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
 
 
-def capture(root, image, helper_analysis):
+def capture(root, image, helper_analysis, preparation_runtime):
     architecture = os.uname().machine
     assert architecture in ("x86_64", "aarch64"), "Native Linux host required"
     assert re.fullmatch(r"[a-z0-9./_:-]+@sha256:[a-f0-9]{64}", image), "Pinned helper required"
@@ -107,7 +108,7 @@ Server = {mirror}
 [extra]
 Server = {mirror}
 """)
-    preparation = ["podman", "run", "--rm", "--read-only", "--network=bridge",
+    preparation = [preparation_runtime, "run", "--rm", "--read-only", "--network=bridge",
             "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
             "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
             "--mount", f"type=bind,src={frozen},dst=/capture",
@@ -145,5 +146,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--helper-image", required=True)
     parser.add_argument("--helper-shell-analysis", action="store_true")
+    parser.add_argument("--preparation-runtime", choices=("podman", "docker"), default="podman")
     args = parser.parse_args()
-    capture(args.output.resolve(), args.helper_image, args.helper_shell_analysis)
+    capture(args.output.resolve(), args.helper_image, args.helper_shell_analysis, args.preparation_runtime)

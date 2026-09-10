@@ -121,9 +121,12 @@ jobs:
           [[ "$BUILDER_IMAGE" =~ ^registry\.cloudflare\.com/[a-f0-9]{32}/[a-z0-9._-]+@sha256:[a-f0-9]{64}$ ]]
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends podman
-          auth="$RUNNER_TEMP/preserved-registry.json"
+          auth_dir="$RUNNER_TEMP/preserved-registry"
+          mkdir -m 700 "$auth_dir"
+          auth="$auth_dir/config.json"
           cleanup() {
             rm -f "$auth"
+            rmdir "$auth_dir"
             if [[ -d "$RUNNER_TEMP/preserved-asdcontrol" ]]; then
               sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/preserved-asdcontrol"
             fi
@@ -133,9 +136,10 @@ jobs:
           chmod 600 "$auth"
           unset REGISTRY_NATIVE_TEST_AUTH
           sudo podman pull --authfile "$auth" "$BUILDER_IMAGE"
+          DOCKER_CONFIG="$auth_dir" docker pull "$BUILDER_IMAGE"
           test "$(sudo podman image inspect --format '{{.Architecture}}' "$BUILDER_IMAGE")" = arm64
           sudo env PATH="$PATH" python3 scripts/check-preserved-recipe.py \
-            --output "$RUNNER_TEMP/preserved-asdcontrol" --helper-image "$BUILDER_IMAGE" --helper-shell-analysis
+            --output "$RUNNER_TEMP/preserved-asdcontrol" --helper-image "$BUILDER_IMAGE" --helper-shell-analysis --preparation-runtime docker
       - name: Archive native source, bootstrap and build evidence
         if: ${{ inputs.preserved_recipe && always() }}
         shell: bash
