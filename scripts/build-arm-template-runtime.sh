@@ -16,12 +16,12 @@ test -d "$rootfs_context" || { echo "rootfs context is missing: $rootfs_context"
 mkdir -p "$work_dir"
 stage=$(mktemp -d "$work_dir/context.XXXXXX")
 container="opr-template-electron-package-$$"
-cleanup() { "$runtime" rm -f "$container" >/dev/null 2>&1 || true; rm -rf "$stage"; }
+cleanup() { "$runtime" rm -f "$container" >/dev/null 2>&1 || true; rm -rf "$stage" || true; }
 trap cleanup EXIT
 
-cp -al "$rootfs_context/." "$stage/"
+cp -a "$rootfs_context/." "$stage/"
 mkdir -p "$stage/opt"
-"$runtime" create --name "$container" "$builder_image" >/dev/null
+"$runtime" create --name "$container" "$builder_image" /bin/sh -c 'exit 0' >/dev/null
 "$runtime" cp "$container:/opt/electron43-arm-runtime.pkg.tar.zst" "$stage/opt/electron43-arm-runtime.pkg.tar.zst"
 
 if [[ "$runtime" == docker ]]; then
