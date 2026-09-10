@@ -19,7 +19,9 @@ container="opr-template-electron-package-$$"
 cleanup() { "$runtime" rm -f "$container" >/dev/null 2>&1 || true; rm -rf "$stage" || true; }
 trap cleanup EXIT
 
-cp -a "$rootfs_context/." "$stage/"
+"$runtime" run --rm --network none \
+  -v "$rootfs_context:/source:ro" -v "$stage:/stage:rw" "$builder_image" \
+  /bin/sh -ceu 'umask 022; tar --numeric-owner --xattrs --acls --sparse -cf /stage/rootfs.tar -C /source .'
 mkdir -p "$stage/opt"
 "$runtime" create --name "$container" "$builder_image" /bin/sh -c 'exit 0' >/dev/null
 "$runtime" cp "$container:/opt/electron43-arm-runtime.pkg.tar.zst" "$stage/opt/electron43-arm-runtime.pkg.tar.zst"

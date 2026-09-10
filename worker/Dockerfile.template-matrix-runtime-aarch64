@@ -2,7 +2,8 @@
 # signature-verified Arch Linux ARM rootfs plus the package archive retained by
 # Dockerfile.template-matrix-aarch64. This image never inherits the builder.
 FROM scratch
-COPY . /
+ADD rootfs.tar /
+COPY opt/electron43-arm-runtime.pkg.tar.zst /opt/electron43-arm-runtime.pkg.tar.zst
 
 RUN pacman-key --init && pacman-key --populate archlinuxarm \
     && cp /etc/pacman.conf /tmp/opr-pacman.conf \
