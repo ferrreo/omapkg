@@ -4,6 +4,7 @@
   import type { PageData } from './$types';
 
   export let data: PageData;
+
   $: user = data?.user || null;
   $: role = data?.role || 'public';
 </script>

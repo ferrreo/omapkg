@@ -1,4 +1,5 @@
-import { templateCommands } from './recipe-template';
+import { isVerifiedArtifactTemplate, templateCommands, typedTemplateOutputCommands, typedTemplateOutputs } from './recipe-template';
+import type { TemplateOutputSpec, TypedRecipeTemplate } from './recipe-template';
 import type { FactoryCandidate, RecipeLint, VendorKind } from './types';
 import type { Source } from '../../src/lib/model';
 import { offlineVendorExtractCommand } from './artifacts';
@@ -33,9 +34,14 @@ export interface RecipeRenderOptions {
 }
 
 function functionBody(recipe: string, name: 'build' | 'package'): string {
+  if (name === 'package') {
+    return [...recipe.matchAll(/package(?:_[A-Za-z0-9][A-Za-z0-9_-]*)?\(\) \{([\s\S]*?)\n\}/g)].map((match) => match[1]).join('\n');
+  }
   const start = recipe.indexOf(`${name}() {`);
+
   if (start < 0) return '';
   const end = recipe.indexOf('\n}', start);
+
   return recipe.slice(start, end < 0 ? recipe.length : end);
 }
 
@@ -55,18 +61,26 @@ function commandSegments(body: string): string[] {
 function commandName(segment: string): string {
   const withoutControl = segment.replace(/^(?:if|then|else|elif|while|until|do)\s+/, '');
   const withoutAssignments = withoutControl.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '');
+
   return withoutAssignments.split(/\s+/, 1)[0]?.replace(/^.*\//, '') ?? '';
 }
 
 function hasNetworkCommand(recipe: string): boolean {
   return [functionBody(recipe, 'build'), functionBody(recipe, 'package')].some((body) => commandSegments(body).some((segment) => {
     const name = commandName(segment);
+
     if (name === 'git') return /\bgit\s+(?:clone|pull|fetch)\b/i.test(segment);
-    if (name === 'npm') return /\bnpm\s+(?:install|ci|update)\b/i.test(segment);
-    if (name === 'pnpm') return /\bpnpm\s+(?:install|update|add|fetch)\b/i.test(segment);
-    if (name === 'yarn') return /\byarn\s+(?:install|upgrade|add)\b/i.test(segment);
+
+    if (name === 'npm') return /\bnpm\s+(?:install|ci|update)\b/i.test(segment) && !/\s--offline(?:\s|$)/i.test(segment);
+
+    if (name === 'pnpm') return /\bpnpm\s+(?:install|update|add|fetch)\b/i.test(segment) && !/\s--offline(?:\s|$)/i.test(segment);
+
+    if (name === 'yarn') return /\byarn\s+(?:install|upgrade|add)\b/i.test(segment) && !/\s--offline(?:\s|$)/i.test(segment);
+
     if (name === 'cargo') return /\bcargo\s+(?:fetch|add|install)\b/i.test(segment);
+
     if (name === 'go') return /\bgo\s+(?:get|install|mod\s+download)\b/i.test(segment);
+
     return ['curl', 'wget', 'fetch', 'pip'].includes(name);
   }));
 }
@@ -77,60 +91,93 @@ function hasDangerousCommand(recipe: string): boolean {
     .map((segment) => ({ raw: segment, parsed: unquoted(segment) }))
     .some(({ raw, parsed }) => {
     const name = commandName(parsed);
+
     if (/^(?:sudo|mkfs|eval)$/.test(name)) return true;
+
     if (name === 'rm' && /\brm\s+-rf\s+["']?\/["']?(?:\s|$)/i.test(raw)) return true;
+
     if (name === 'chmod' && /\bchmod\s+777\b/i.test(parsed)) return true;
+
     if (name === 'chown' && /\bchown\s+-R\s+["']?\/["']?(?:\s|$)/i.test(raw)) return true;
+
     return /\/dev\/tcp\//i.test(raw);
   }));
 }
 
 export function renderRecipe(candidate: FactoryCandidate, options: RecipeRenderOptions = {}): string {
+  let templateSplitOutputs: TemplateOutputSpec[] = [];
   if (candidate.recipeMode === 'template') {
-    if (!candidate.template || candidate.buildCommands.length || candidate.packageCommands.length || candidate.vendorArtifact) {
-      throw new Error('Template recipes cannot contain custom commands or vendor installers');
+    if (!candidate.template || candidate.buildCommands.length || candidate.packageCommands.length || (candidate.vendorArtifact && !isVerifiedArtifactTemplate(candidate.template))) {
+      throw new Error('Template recipes cannot contain custom commands or unverified vendor installers');
     }
+
     const commands = templateCommands(candidate.template);
-    candidate = { ...candidate, buildCommands: commands.build, packageCommands: commands.package };
+    if (candidate.template.id !== 'make-v1' && candidate.template.id !== 'go-v1') {
+      templateSplitOutputs = [...typedTemplateOutputs(candidate.template as TypedRecipeTemplate)];
+    }
+    candidate = {
+      ...candidate,
+      buildCommands: commands.build,
+      packageCommands: templateSplitOutputs.length > 1 ? typedTemplateOutputCommands([templateSplitOutputs[0]]) : commands.package,
+    };
   }
+
   const pkgname = assertPackageName(candidate.request.name);
+  const splitPackageNames = templateSplitOutputs.length > 1
+    ? [pkgname, ...templateSplitOutputs.slice(1).map((output) => assertPackageName(`${pkgname}-${output.name}`))]
+    : [pkgname];
   const pkgver = assertVersion(candidate.version);
   const pkgrel = candidate.pkgrel ?? 1;
+
   if (!Number.isSafeInteger(pkgrel) || pkgrel < 1 || pkgrel > 9_999) throw new Error('pkgrel must be an integer between 1 and 9999');
   assertImageDigest(candidate.imageDigest);
+
   if (!candidate.sources.length) throw new Error('at least one source is required');
+
   if (!candidate.buildCommands.length || !candidate.packageCommands.length) {
     throw new Error('build and package commands are required');
   }
+
   const sourceRoot = candidate.sourceRoot?.trim() || undefined;
+
   if (sourceRoot && (candidate.request.sourceKind !== 'archive' || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(sourceRoot))) {
     throw new Error('invalid archive source root');
   }
+
   if (sourceRoot && [...candidate.buildCommands, ...candidate.packageCommands].some((command) => /(?:^|[;&|])\s*cd\s+["']?\$\{?srcdir\}?["']?(?:\s|[;&|]|$)/.test(command))) {
     throw new Error('commands must remain relative to the verified source root');
   }
 
   const sources = options.sources ?? candidate.sources;
+
   const sourceUrls = sources.map((source) => {
     assertSha256(source.sha256);
+
     if (!source.name || /[\u0000\r\n/]/.test(source.name) || source.name === '.' || source.name === '..') {
       throw new Error('invalid source name');
     }
+
     return `${source.name}::${source.url}`;
   });
+
   const checksums = options.checksums ?? sources.map((source) => source.sha256);
+
   if (checksums.length !== sources.length || checksums.some((checksum) => checksum !== 'SKIP' && !/^[0-9a-f]{64}$/.test(checksum))) {
     throw new Error('source checksum list is invalid');
   }
+
   const arches = candidate.architectures.length ? candidate.architectures : ['x86_64'];
   const vendorSources = sources.filter((source) => /^opr-vendor-(?:go|rust|npm)\.tar$/.test(source.name));
   const vendorKind = options.vendorKind ?? vendorSources[0]?.name.match(/^opr-vendor-(go|rust|npm)\.tar$/)?.[1];
   const vendorDirectory = `$srcdir/${sourceRoot ? `${sourceRoot}/` : ''}vendor`;
   const vendorDestination = sourceRoot ? `$srcdir/${sourceRoot}` : '$srcdir';
+
   const artifactSource = candidate.vendorArtifact
     ? candidate.sources.find((source) => source.sha256 === candidate.vendorArtifact?.sourceSha256)
     : undefined;
+
   if (candidate.vendorArtifact && !artifactSource) throw new Error('vendor artifact source is missing from source manifest');
+
   const artifactExtraction = candidate.vendorArtifact && artifactSource
     ? offlineVendorExtractCommand(candidate.vendorArtifact.format, {
       sourcePath: `$srcdir/${artifactSource.name}`,
@@ -139,7 +186,9 @@ export function renderRecipe(candidate: FactoryCandidate, options: RecipeRenderO
       appimageOffset: candidate.vendorArtifact.appimageOffset ?? undefined,
     }).split('\n').map((line) => `  ${line}`)
     : [];
+
   const license = candidate.license.replace(/[\r\n]/g, ' ').trim();
+
   if (!license || license.length > 128) throw new Error('invalid license');
 
   for (const command of [...candidate.buildCommands, ...candidate.packageCommands]) {
@@ -147,9 +196,10 @@ export function renderRecipe(candidate: FactoryCandidate, options: RecipeRenderO
   }
 
   const description = candidate.description.replace(/[\r\n]/g, ' ').slice(0, 160);
+
   const recipe = [
     `# Generated by omapkg factory. Review before build.`,
-    `pkgname=${quote(pkgname)}`,
+    `pkgname=${templateSplitOutputs.length > 1 ? quoteArray(splitPackageNames) : quote(pkgname)}`,
     `pkgver=${quote(pkgver)}`,
     `pkgrel=${pkgrel}`,
     `pkgdesc=${quote(description)}`,
@@ -184,12 +234,20 @@ export function renderRecipe(candidate: FactoryCandidate, options: RecipeRenderO
     recipeCommands(candidate.buildCommands),
     '}',
     '',
-    'package() {',
+    ...(templateSplitOutputs.length > 1 ? [`package_${splitPackageNames[0]}() {`] : ['package() {']),
     `  cd "$srcdir${sourceRoot ? `/${sourceRoot}` : ''}"`,
     recipeCommands(candidate.packageCommands),
     '}',
+    ...templateSplitOutputs.slice(1).flatMap((output, index) => [
+      '',
+      `package_${splitPackageNames[index + 1]}() {`,
+      `  cd "$srcdir${sourceRoot ? `/${sourceRoot}` : ''}"`,
+      recipeCommands(typedTemplateOutputCommands([output])),
+      '}',
+    ]),
     '',
   ].join('\n');
+
   return assertRecipeLength(recipe);
 }
 
@@ -215,16 +273,20 @@ function isPrivateSourceCache(value: string): boolean {
 
 function publicVendorCommands(options: PublicRecipeOptions): string[] {
   if (!options.vendorKind && !options.vendorSha256) return [];
+
   if (!options.vendorKind || !options.vendorSha256 || !/^[0-9a-f]{64}$/.test(options.vendorSha256)) {
     throw new Error('public recipe vendor evidence is incomplete');
   }
+
   const root = options.sourceRoot ? sourcePath(options.sourceRoot) : '"$srcdir"';
   const vendorTar = sourcePath('.opr-vendor.tar');
   const vendorDirectory = `$srcdir/${options.sourceRoot ? `${options.sourceRoot}/` : ''}vendor`;
+
   const commands = [
     `cd ${root}`,
     'rm -rf vendor node_modules',
   ];
+
   if (options.vendorKind === 'go') {
     commands.push(
       'test -f go.mod',
@@ -261,24 +323,30 @@ function publicVendorCommands(options: PublicRecipeOptions): string[] {
       `tar --dereference --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --format=gnu -cf ${vendorTar} node_modules`,
     );
   }
+
   commands.push(
     `printf '%s  %s\\n' '${options.vendorSha256}' ${vendorTar} | sha256sum -c -`,
     'chmod -R u+w "$srcdir/.opr-go-home" "$srcdir/.opr-go-mod-cache" "$srcdir/.opr-cargo-home" "$srcdir/.opr-npm-cache" 2>/dev/null || true',
     'rm -rf "$srcdir/.opr-go-home" "$srcdir/.opr-go-mod-cache" "$srcdir/.opr-cargo-home" "$srcdir/.opr-npm-cache" "$srcdir/.opr-npmrc" "$srcdir/.opr-vendor-config" "$srcdir/.opr-vendor.tar"',
   );
+
   return commands;
 }
 
 export function renderPublicRecipe(candidate: FactoryCandidate, options: PublicRecipeOptions): string {
   if (candidate.surface !== 'recipe') throw new Error('public recipe is only available for Surface B');
   const sourceUrl = normalizeSourceUrl(options.sourceUrl).toString();
+
   if (options.sourceKind === 'git') {
     const commit = options.upstreamCommit?.toLowerCase() ?? '';
+
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit)) throw new Error('public Git recipe requires an immutable commit');
+
     if (!/^[0-9a-f]{64}$/.test(options.sourceSha256)) throw new Error('public Git recipe source hash is invalid');
     const checkoutName = `${candidate.request.name}-git`;
     const archiveName = options.sourceName;
     const sources: Source[] = [{ name: checkoutName, url: `git+${sourceUrl}#commit=${commit}`, sha256: options.sourceSha256 }];
+
     const prepareCommands = [
       `git -C ${sourcePath(checkoutName)} archive --format=tar HEAD > ${sourcePath(archiveName)}`,
       `printf '%s  %s\\n' '${options.sourceSha256}' ${sourcePath(archiveName)} | sha256sum -c -`,
@@ -287,22 +355,29 @@ export function renderPublicRecipe(candidate: FactoryCandidate, options: PublicR
       `rm -f ${sourcePath(archiveName)}`,
       ...publicVendorCommands(options),
     ];
+
     return renderRecipe(candidate, { sources, checksums: ['SKIP'], prepareCommands, vendorKind: options.vendorKind });
   }
+
   if (!/^[0-9a-f]{64}$/.test(options.sourceSha256)) throw new Error('public archive recipe source hash is invalid');
   const vendorNames = new Set(['opr-vendor-go.tar', 'opr-vendor-rust.tar', 'opr-vendor-npm.tar']);
   const sources = candidate.sources.filter((source) => !vendorNames.has(source.name));
+
   if (sources.length === candidate.sources.length) throw new Error('public archive recipe has no vendored source to recreate');
+
   if (sources.some((source) => isPrivateSourceCache(source.url))) throw new Error('public recipe source still references private sealed storage');
+
   if (!sources.some((source) => source.name === options.sourceName && source.sha256 === options.sourceSha256 && source.url === sourceUrl)) {
     throw new Error('public archive recipe source does not match reviewed evidence');
   }
+
   return renderRecipe(candidate, { sources, prepareCommands: publicVendorCommands(options), vendorKind: options.vendorKind });
 }
 
 export function lintRecipe(recipe: string, repairAttempts = 0): RecipeLint {
   const checks: RecipeLint['checks'] = [];
-  const required = ['pkgname=', 'pkgver=', 'pkgrel=', 'arch=', 'license=', 'source=', 'sha256sums=', 'build() {', 'package() {'];
+  const required = ['pkgname=', 'pkgver=', 'pkgrel=', 'arch=', 'license=', 'source=', 'sha256sums=', 'build() {'];
+
   for (const marker of required) {
     checks.push({
       name: `contains ${marker}`,
@@ -310,6 +385,8 @@ export function lintRecipe(recipe: string, repairAttempts = 0): RecipeLint {
       detail: recipe.includes(marker) ? 'present' : `missing ${marker}`,
     });
   }
+  const packageFunction = /package(?:_[A-Za-z0-9][A-Za-z0-9_-]*)?\(\) \{/.test(recipe);
+  checks.push({ name: 'contains package function', passed: packageFunction, detail: packageFunction ? 'present' : 'missing package function' });
 
   const network = hasNetworkCommand(recipe);
   checks.push({

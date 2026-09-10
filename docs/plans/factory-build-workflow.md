@@ -159,7 +159,7 @@ Provide one documented entry point, with a default read-only diagnostic mode and
 
 The diagnostic reports tool versions, native architecture, container isolation support, worker configuration validity, storage permissions, disk/memory capacity, and configured service connectivity. Separate required checks from optional services. Never print credential values. Return a failing exit status when required prerequisites are missing and give exact remediation steps.
 
-Deep mode creates a disposable namespace/work directory and runs small pinned fixtures through source verification, recipe rendering or preserved-recipe admission, isolated build, clean runtime checks, single-build reproducibility validation, and dossier export. Include system and OPR policy paths, a multi-member cohort, and explicit image-check profiles where native image tooling is available. Missing required profile prerequisites are reported as incomplete, never passed. Exercise signing verification with a dedicated local test identity. Do not publish to production repositories or use production signing keys. Test repair success and retry exhaustion with deterministic injected fixture failures, avoiding live model spend by default; an explicit live-agent option can exercise the configured model with a bounded budget.
+Deep mode creates a disposable namespace/work directory and runs small pinned fixtures through source verification, recipe rendering or preserved-recipe admission, isolated build, clean runtime checks, single-build reproducibility validation, and dossier export. Include system and OPR policy paths, a multi-member cohort, and explicit image-check profiles where native image tooling is available. Missing required profile prerequisites are reported as incomplete, never passed. Exercise signing verification with a dedicated local test identity. Do not publish to production repositories or use production signing keys. Test repair success and retry exhaustion with deterministic injected fixture failures, avoiding live model spend; the local CLI leaves live-agent execution unavailable until a bounded runner is configured.
 
 The command must work repeatedly, clean up only its own resources, preserve failure evidence on request, and distinguish skipped checks from passed checks. It must never install host dependencies, edit service configuration, or enroll a production worker as an implicit repair.
 
@@ -181,6 +181,12 @@ Require complete evidence of retained inputs, controlled execution, deterministi
 Prove the factory's reproducibility behavior in its test suite: build identical fixture inputs twice with a small wall-clock gap and assert byte-identical outputs. These deliberate duplicate builds belong to regression/acceptance testing, not to every normal package or image job.
 
 **Evidence boundary:** one execution can establish input identity, observed policy compliance, and signed output identity under the trusted-worker model. It cannot alone prove that arbitrary upstream code would produce identical bytes on another execution. Provenance, an SBOM, locked inputs, and container digests are not substitutes for that proof. Distinguish reproducibility-contract-verified from independently-reproduced. Normal release requires the former; the latter requires actual matching independent reproduction evidence.
+
+Use `reproducibility-contract-verified` for a newly observed single-build
+contract. Use `independently-reproduced` for a later retained two-build result;
+`verified-reproducible` remains a historical label and is not inferred for a
+new one-build record. A missing contract is unknown coverage and blocks new
+signing or publication even when an older v2 attestation remains verifiable.
 
 ### Implementation
 

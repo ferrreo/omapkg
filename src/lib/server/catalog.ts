@@ -1,3 +1,4 @@
+import * as v from 'valibot';
 import type { Architecture, Release } from '../model';
 import { query } from './db';
 import { finalDescription } from './descriptions';
@@ -16,18 +17,26 @@ export type CatalogRow = Release & {
 };
 
 export type CatalogChannel = 'stable' | 'dev' | 'withdrawn' | 'all';
+
 export type CatalogCursor = { name: string; architecture: Architecture; id: string; channel?: Exclude<CatalogChannel, 'all'> };
+
+const catalogCursorSchema = v.object({
+  name: v.string(),
+  architecture: v.picklist(['x86_64', 'aarch64']),
+  id: v.string(),
+  channel: v.optional(v.picklist(['stable', 'dev', 'withdrawn'])),
+});
+
+const publicSourceSchema = v.object({ name: v.string(), url: v.string(), sha256: v.string() });
 
 export function decodeCatalogCursor(value: string | null): CatalogCursor | null {
   if (!value) return null;
+
   try {
     const decoded = atob(value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4));
-    const parsed: unknown = JSON.parse(decoded);
-    if (!parsed || typeof parsed !== 'object') return null;
-    const item = parsed as Record<string, unknown>;
-    if (typeof item.name !== 'string' || !['x86_64', 'aarch64'].includes(String(item.architecture)) || typeof item.id !== 'string') return null;
-    if (item.channel !== undefined && !['stable', 'dev', 'withdrawn'].includes(String(item.channel))) return null;
-    return { name: item.name, architecture: item.architecture as Architecture, id: item.id, ...(item.channel ? { channel: item.channel as CatalogCursor['channel'] } : {}) };
+    const parsed = v.safeParse(catalogCursorSchema, JSON.parse(decoded));
+
+    return parsed.success ? parsed.output : null;
   } catch {
     return null;
   }
@@ -41,11 +50,13 @@ export function encodeCatalogCursor(row: Pick<CatalogRow, 'name' | 'architecture
 export function publicSources(value: string): Array<{ name: string; url: string; sha256: string }> {
   try {
     const parsed: unknown = JSON.parse(value);
+
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is { name: string; url: string; sha256: string } => {
-      if (!item || typeof item !== 'object') return false;
-      const row = item as Record<string, unknown>;
-      return typeof row.name === 'string' && typeof row.url === 'string' && typeof row.sha256 === 'string';
+
+    return parsed.flatMap((item) => {
+      const source = v.safeParse(publicSourceSchema, item);
+
+      return source.success ? [source.output] : [];
     });
   } catch { return []; }
 }
@@ -53,12 +64,20 @@ export function publicSources(value: string): Array<{ name: string; url: string;
 export function stringList(value: string): string[] {
   try {
     const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.flatMap((item) => {
+      const string = v.safeParse(v.string(), item);
+
+      return string.success ? [string.output] : [];
+    });
   } catch { return []; }
 }
 
 export function catalogRelease(row: CatalogRow, origin: string, includeDev = false) {
   const release = publicRelease(row, origin, includeDev);
+
   return release ? {
     ...release, description: finalDescription(row, row.name),
     source: { upstreamUrl: row.upstream_url, files: publicSources(row.source_json) }, license: row.license,
@@ -71,17 +90,25 @@ export async function catalogPage(db: D1Database, input: {
 }): Promise<CatalogRow[]> {
   const filters = [input.channel === 'all' ? "r.channel IN ('stable','dev','withdrawn')" : 'r.channel=?'];
   const values: unknown[] = input.channel === 'all' ? [] : [input.channel];
+
   if (input.search) { filters.push('lower(r.name) LIKE ?'); values.push(`%${input.search.toLowerCase()}%`); }
+
   if (input.surface) { filters.push('r.surface=?'); values.push(input.surface); }
+
   if (input.architecture) { filters.push('r.architecture=?'); values.push(input.architecture); }
+
   const after = input.after ? input.channel === 'all'
     ? 'AND (name COLLATE NOCASE>? OR (name=? COLLATE NOCASE AND (architecture>? OR (architecture=? AND CASE channel WHEN \'stable\' THEN 0 WHEN \'dev\' THEN 1 ELSE 2 END > CASE ? WHEN \'stable\' THEN 0 WHEN \'dev\' THEN 1 ELSE 2 END))))'
     : 'AND (name COLLATE NOCASE>? OR (name=? COLLATE NOCASE AND architecture>?))' : '';
+
   if (input.after) {
     values.push(input.after.name, input.after.name, input.after.architecture);
+
     if (input.channel === 'all') values.push(input.after.architecture, input.after.channel ?? 'stable');
   }
+
   values.push(input.limit, input.offset ?? 0);
+
   return query<CatalogRow>(db, `WITH ranked AS (
       SELECT r.id,r.name,r.architecture,r.channel,r.published_at,
         ROW_NUMBER() OVER (PARTITION BY r.name,r.architecture${input.channel === 'all' ? ',r.channel' : ''} ORDER BY r.published_at DESC,r.id DESC) AS position

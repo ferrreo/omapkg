@@ -6,7 +6,9 @@ import type { GitHubEnv } from '../../src/lib/server/github';
 import type { VendorArtifactManifest } from './artifacts';
 
 export type SourceKind = 'git' | 'archive';
+
 export type Surface = 'binary' | 'recipe';
+
 export type VendorKind = 'go' | 'rust' | 'npm';
 
 export interface VendorComponent {
@@ -145,6 +147,15 @@ export interface FactoryEnv extends GitHubEnv {
 export interface FactoryWorkflowParams {
   requestId: string;
   generationId?: string;
+  factoryRunId?: string;
+  targetKind?: string;
+  targetId?: string;
+  unitKey?: string;
+  attempt?: number;
+  buildIds?: string[];
+  revisionId?: string;
+  policy?: unknown;
+  repairReason?: string;
 }
 
 export interface FactoryWorkflowBinding {

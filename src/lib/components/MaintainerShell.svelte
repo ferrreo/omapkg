@@ -3,6 +3,7 @@
   import SignOutButton from './SignOutButton.svelte';
 
   export let active = 'queue';
+
   export let user: { id: string; name?: string; image?: string | null; githubUsername?: string | null } | null = null;
 
   const links: Array<{ href: string; label: string; key: string; icon: IconName }> = [
@@ -13,6 +14,7 @@
     { href: '/maintain/workers', label: 'Operations', key: 'operations', icon: 'server' },
     { href: '/maintain/audit', label: 'Audit', key: 'audit', icon: 'log' },
   ];
+
   const sections: Record<string, Array<{ href: string; label: string; key: string }>> = {
     queue: [{ href: '/maintain', label: 'Review queue', key: 'queue' }, { href: '/maintain/dependencies', label: 'Dependency proposals', key: 'dependencies' }],
     catalog: [{ href: '/maintain/catalog', label: 'Ownership policies', key: 'catalog' }, { href: '/maintain/imports', label: 'Imports and matching', key: 'imports' }, { href: '/maintain/inputs', label: 'Frozen build inputs', key: 'inputs' }],

@@ -1,0 +1,51 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    ".agent/**",
+    ".agents/**",
+    ".claude/**",
+    ".codex/**",
+    ".continue/**",
+    ".cursor/**",
+    ".gemini/**",
+    ".local/**",
+    ".opencode/**",
+    ".pi/**",
+    ".roo/**",
+    ".svelte-kit/**",
+    ".windsurf/**",
+    ".wrangler/**",
+    "services/pipeline/dist/**",
+    "tools/oxlint/anti-slop/**"
+  ],
+  "jsPlugins": [
+    {
+      "name": "anti-slop",
+      "specifier": "./tools/oxlint/anti-slop/index.ts"
+    }
+  ],
+  "rules": {
+    "oxc/no-accumulating-spread": "error",
+    "anti-slop/no-array-filter-map": "error",
+    "anti-slop/no-reduce-accumulator-copy": "error",
+    "anti-slop/no-chained-type-assertions": "error",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-reflect-apply": "error",
+    "anti-slop/no-reflect-get": "error",
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-readable-spacing": "error",
+    "eslint/no-control-regex": "off"
+  },
+  "overrides": [
+    {
+      "files": [
+        "tests/**",
+        "signer/test/**",
+        "signer/tests/**"
+      ],
+      "rules": {
+        "anti-slop/no-chained-type-assertions": "off"
+      }
+    }
+  ]
+}

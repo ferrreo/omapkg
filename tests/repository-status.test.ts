@@ -9,8 +9,10 @@ test('public repository status reads publication records only and reports each t
     INSERT INTO repository_snapshots VALUES('published-x86','x86_64','stable',1,'db/x86','db/x86.sig',1),('unreachable-arm','aarch64','stable',2,'db/arm','db/arm.sig',1);
     INSERT INTO releases VALUES('one','example','1.0-1','x86_64','stable','binary',1),('two','example','1.1-1','x86_64','stable','binary',2),
       ('three','recipe','2.0-1','aarch64','stable','recipe',2),('withdrawn','removed','1.0-1','aarch64','withdrawn','binary',2);`);
+
   const bucket = new MemoryR2(); bucket.objects.set('db/x86', new Uint8Array([1])); bucket.objects.set('db/x86.sig', new Uint8Array([2]));
   const service = env(db); service.ARTIFACTS = bucket as unknown as R2Bucket;
+
   try {
     const result = await repositoryStatus(service);
     expect(result.repositories).toHaveLength(4);

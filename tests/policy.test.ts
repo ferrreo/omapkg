@@ -7,9 +7,11 @@ describe('request trust boundary', () => {
   test('accepts git and archive URLs but never shell or private network locators', () => {
     expect(parseRequest({ name: 'hello', description: 'A command-line greeting.', upstream_url: 'https://github.com/example/hello', source_kind: 'git', area: 'development', declared_license: 'unknown' }).name).toBe('hello');
     expect(publicSourceURL('https://ftp.gnu.org/gnu/hello/hello-2.12.2.tar.gz')).toContain('hello-2.12.2');
+
     for (const url of ['file:///etc/passwd', 'http://github.com/x/y', 'https://127.0.0.1/x', 'https://2130706433/x', 'https://[::1]/x', 'https://user:password@github.com/x', 'https://git.local/x', 'https://metadata.internal/x', 'https://example.com:4433/x', 'https://github.com/x#branch']) {
       expect(() => publicSourceURL(url)).toThrow();
     }
+
     expect(() => parseRequest({ name: 'hello;curl bad', description: 'A package.', upstream_url: 'https://github.com/x/y', source_kind: 'git', area: 'system', declared_license: 'unknown' })).toThrow();
   });
   test('public users cannot approve; area reviewers cannot sign for security', () => {
@@ -27,8 +29,10 @@ describe('request trust boundary', () => {
       license: 'MIT', surface: 'binary', explanation: '', sbom_json: '{}', lint_json: '{"passed":true}',
       upstream_commit: null, pr_url: 'https://github.com/example-owner/recipes/pull/1', commit_sha: 'c'.repeat(40), created_at: 1
     };
+
     revision.manifest_sha256 = await manifestDigest(revision);
     await validateRevision(revision);
+
     for (const change of [
       { recipe: 'pkgname=evil' }, { sources_json: '[]' }, { smoke_commands_json: '[]' },
       { dependencies_json: '["curl"]' }, { surface: 'recipe' as const }, { image_digest: 'archlinux:latest' }

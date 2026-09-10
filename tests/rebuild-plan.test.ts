@@ -11,6 +11,7 @@ test('rebuild scope follows old and candidate providers, split outputs, check/st
     pkg('builder', [], { makeDependencies: ['virtual>=2'], checkDependencies: ['test-tool'] }), pkg('test-tool', ['builder']),
     pkg('static-app'), pkg('unrelated'), pkg('arm-only', ['library'], { target: 'aarch64' }),
   ];
+
   const candidate = old.map((entry) => entry.name === 'library' ? { ...entry, version: '2-1', provides: ['lib:libdemo.so.2', 'virtual=2'] } : entry);
   const rules = [{ pkgbase: 'static-app', rebuildOn: ['library'] }];
   const plan = planRebuilds(old, candidate, 'x86_64', ['library'], rules);
@@ -36,6 +37,7 @@ test('rebuild scope follows old and candidate providers, split outputs, check/st
 test('versioned virtual provider alternatives stay explicit and all affected consumers are retained', () => {
   const entries = [pkg('one', [], { provides: ['virtual=2'] }), pkg('two', [], { provides: ['virtual=3'] }),
     pkg('unversioned', [], { provides: ['virtual'] }), pkg('consumer', ['virtual>=2'])];
+
   const plan = planRebuilds(entries, entries, 'x86_64', ['two']);
   expect(plan.members.map((item) => item.pkgbase)).toEqual(['consumer', 'two']);
   expect(plan.ambiguousCandidateRelations).toBe(1);
@@ -46,6 +48,7 @@ test('versioned virtual provider alternatives stay explicit and all affected con
 test('full catalog dependency chains produce complete ordered scope without recursive stack or 512-member truncation', () => {
   const entries = Array.from({ length: 15_000 }, (_, index) => pkg(`pkg-${String(index).padStart(5, '0')}`,
     index ? [`pkg-${String(index - 1).padStart(5, '0')}`] : []));
+
   const plan = planRebuilds(entries, entries, 'x86_64', [entries[0].name]);
   expect(plan.members.length).toBe(entries.length);
   expect(plan.buildGroups.length).toBe(entries.length);

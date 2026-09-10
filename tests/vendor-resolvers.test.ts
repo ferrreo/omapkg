@@ -16,6 +16,7 @@ function resolverEnv() {
 function hasExecutable(name: string): boolean {
   try {
     execFileSync('sh', ['-c', `command -v ${name}`], { env: resolverEnv(), stdio: 'ignore' });
+
     return true;
   } catch {
     return false;
@@ -38,31 +39,39 @@ function evidence(files: string[]): SourceEvidence {
 function runResolver(kind: 'go' | 'rust' | 'npm', files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), 'omapkg-vendor-resolver-'));
   const source = join(root, 'source');
+
   for (const [path, body] of Object.entries(files)) {
     const target = join(source, path);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, body);
   }
+
   const command = vendorCommand(kind, 'archive').replaceAll('/workspace', root);
   execFileSync('bash', ['-c', command], { env: resolverEnv(), stdio: 'pipe' });
+
   return root;
 }
 
 function resolverStatus(kind: 'go' | 'rust' | 'npm', files: Record<string, string>): number {
   const root = mkdtempSync(join(tmpdir(), 'omapkg-vendor-resolver-fail-'));
   const source = join(root, 'source');
+
   try {
     for (const [path, body] of Object.entries(files)) {
       const target = join(source, path);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, body);
     }
+
     const command = vendorCommand(kind, 'archive').replaceAll('/workspace', root);
+
     try {
       execFileSync('bash', ['-c', command], { env: resolverEnv(), stdio: 'pipe' });
+
       return 0;
     } catch (cause) {
       const status = (cause as { status?: unknown }).status;
+
       return typeof status === 'number' ? status : -1;
     }
   } finally {
@@ -79,9 +88,11 @@ describe('dependency vendor resolvers', () => {
 
   test('skips Go vendoring for a module with no requirements', () => {
     if (!hasExecutable('go')) return;
+
     const root = runResolver('go', {
       'go.mod': 'module example.com/stdonly\n\ngo 1.22\n',
     });
+
     try {
       expect(existsSync(join(root, 'vendor-empty'))).toBe(true);
       expect(existsSync(join(root, 'vendor.tar'))).toBe(false);
@@ -94,6 +105,7 @@ describe('dependency vendor resolvers', () => {
     if (!hasExecutable('cargo') || !hasExecutable('rustc')) return;
     const root = mkdtempSync(join(tmpdir(), 'omapkg-vendor-rust-canary-'));
     const marker = join(root, 'hook-ran');
+
     try {
       const source = join(root, 'source');
       const wrapper = join(root, 'evil-wrapper');
@@ -130,10 +142,12 @@ describe('dependency vendor resolvers', () => {
   test('skips npm vendoring when package has no dependency fields or lockfile', () => {
     if (!hasExecutable('node')) return;
     const markerName = 'should-not-run';
+
     const root = runResolver('npm', {
       'package.json': JSON.stringify({ name: 'stdonly', version: '1.0.0', scripts: { preinstall: `touch ${markerName}` } }),
       '.npmrc': 'registry=https://evil.invalid/\nignore-scripts=false\n',
     });
+
     try {
       expect(existsSync(join(root, 'vendor-empty'))).toBe(true);
       expect(existsSync(join(root, markerName))).toBe(false);
@@ -152,7 +166,7 @@ describe('dependency vendor resolvers', () => {
     expect(rust).toContain('Cargo.lock');
     expect(rust).toContain('index.crates.io');
     expect(rust).toContain('global-credential-providers=[]');
-    expect(rust).toContain('rustc-wrapper=\"\"');
+    expect(rust).toContain('rustc-wrapper=""');
     expect(npm).toContain('npm lockfile is required');
     expect(npm).toContain('registry.npmjs.org');
     expect(npm).toContain('--ignore-scripts');
@@ -164,11 +178,13 @@ describe('dependency vendor resolvers', () => {
         'go.mod': 'module example.com/needsdep\n\ngo 1.22\nrequire example.com/dep v1.0.0\n',
       })).toBe(64);
     }
+
     if (hasExecutable('node')) {
       expect(resolverStatus('npm', {
         'package.json': JSON.stringify({ name: 'needsdep', version: '1.0.0', dependencies: { 'left-pad': '1.3.0' } }),
       })).toBe(64);
     }
+
     if (hasExecutable('cargo') && hasExecutable('rustc')) {
       expect(resolverStatus('rust', {
         'Cargo.toml': '[package]\nname="needsdep"\nversion="0.1.0"\nedition="2021"\n',

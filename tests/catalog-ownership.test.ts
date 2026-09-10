@@ -8,8 +8,11 @@ import { parseFactoryRequest } from '../services/pipeline/tools';
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
   .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
+
 const owner = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
+
 const security = { id: 'github:2', role: 'security' as const, areas: ['system'] };
+
 export const catalogFixture = (pkgbase = 'example'): CatalogManifest => ({
   schemaVersion: 1, pkgbase, outputs: [pkgbase], collection: 'core', lane: 'system', role: 'base-system', origin: 'arch',
   upstreamUrl: 'https://example.org/source.git', sourceKind: 'git', description: 'Example system library', license: 'MIT', ownerArea: 'system',
@@ -21,6 +24,7 @@ test('catalog pins identity, requires both targets and keeps external packaging 
   expect(parseSystemVersion('4.0.3')).toEqual({ version: '4.0.3', candidate: 'final', sequence: 0 });
   expect(parseSystemVersion('4.0.3-rc2')?.candidate).toBe('rc');
   expect(parseSystemVersion('4.0.4-edge.1')?.candidate).toBe('edge');
+
   for (const version of ['v4.0.3', '4.00.3', '4.0.3-rc0', '4.0.3-rc2suffix', '4.0.3+changed']) expect(parseSystemVersion(version)).toBeNull();
   expect(packagePath('example', 'core')).toBe('packages/core/example');
   expect(() => packagePath('../secret', 'core')).toThrow();
@@ -34,6 +38,7 @@ test('catalog pins identity, requires both targets and keeps external packaging 
   expect(() => parseCatalogManifest({ ...catalogFixture('vim'), outputs, runtimeGroups: [['vim', 'vim-runtime']] })).toThrow('every output');
   expect(() => parseCatalogManifest({ ...catalogFixture('vim'), outputs, portableOutputs: ['unknown'] })).toThrow('Portable outputs');
   expect(parseCatalogManifest({ ...catalogFixture('languages'), outputs: Array.from({ length: 129 }, (_, i) => `language-${i}`) }).outputs).toHaveLength(129);
+
   for (const upstream_url of ['https://aur.archlinux.org/example.git', 'https://mirror.archlinuxarm.org/aarch64/core/example.pkg.tar.xz']) {
     expect(() => parseFactoryRequest({ id: 'example', name: 'example', upstream_url, source_kind: 'git', area: 'system', declared_license: 'MIT' })).toThrow('authoritative upstream');
   }
@@ -41,6 +46,7 @@ test('catalog pins identity, requires both targets and keeps external packaging 
 
 test('catalog admission is immutable, independently reviewed, collision-safe and fenced against stale decisions', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
+
   try {
     await expect(proposeCatalogPackage(d1, { ...owner, role: 'public' }, catalogFixture(), null, 'Import baseline')).rejects.toMatchObject({ status: 403 });
     const proposed = await proposeCatalogPackage(d1, owner, catalogFixture(), null, 'Import baseline');

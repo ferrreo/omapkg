@@ -17,9 +17,11 @@ import {
 function scriptResult(script: string): { status: number; stderr: string } {
   try {
     execFileSync('bash', ['-c', script], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
     return { status: 0, stderr: '' };
   } catch (cause) {
     const error = cause as { status?: number; stderr?: Buffer | string };
+
     return { status: error.status ?? 1, stderr: String(error.stderr ?? '') };
   }
 }
@@ -28,6 +30,7 @@ function workspaceFor(archive: string, root: string, name = 'workspace'): string
   const workspace = join(root, name);
   mkdirSync(workspace);
   writeFileSync(join(workspace, 'source.bundle'), readFileSync(archive));
+
   return workspace;
 }
 
@@ -41,22 +44,26 @@ function tarArchive(root: string, name = 'source.tar'): string {
   linkSync(join(input, 'src', 'bin', 'tool'), join(input, 'src', 'bin', 'copy'));
   const archive = join(root, name);
   execFileSync('tar', ['-cf', archive, '-C', input, 'src']);
+
   return archive;
 }
 
 describe('source archive boundary', () => {
   test('can inspect without materializing the archive', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-source-inspect-'));
+
     try {
       const workspace = workspaceFor(tarArchive(root), root);
       expect(scriptResult(inspectSourceArchiveCommand({ workspaceRoot: workspace })).status).toBe(0);
       expect(scriptResult(sourceArchiveManifestSizeCheckCommand({ workspaceRoot: workspace })).status).toBe(0);
       expect(existsSync(join(workspace, 'source'))).toBe(false);
+
       const manifest = parseSourceArchiveManifest(
         readFileSync(join(workspace, 'source-archive.meta'), 'utf8'),
         readFileSync(join(workspace, 'source-archive.entries'), 'utf8'),
         workspace,
       );
+
       expect(manifest.entries.length).toBeGreaterThan(0);
       writeFileSync(join(workspace, 'source-archive.entries'), Buffer.alloc(MAX_SOURCE_ARCHIVE_MANIFEST_BYTES + 1));
       expect(scriptResult(sourceArchiveManifestSizeCheckCommand({ workspaceRoot: workspace })).status).not.toBe(0);
@@ -67,15 +74,18 @@ describe('source archive boundary', () => {
 
   test('validates and materializes tar members, including safe links', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-source-tar-'));
+
     try {
       const workspace = workspaceFor(tarArchive(root), root);
       const result = scriptResult(materializeSourceArchiveCommand({ workspaceRoot: workspace, maxExpandedBytes: 10_000 }));
       expect(result.status).toBe(0);
+
       const manifest = parseSourceArchiveManifest(
         readFileSync(join(workspace, 'source-archive.meta'), 'utf8'),
         readFileSync(join(workspace, 'source-archive.entries'), 'utf8'),
         workspace,
       );
+
       expect(manifest.format).toBe('tar');
       expect(manifest.entries.some((entry) => entry.kind === 'symlink' && entry.target === 'tool')).toBe(true);
       expect(manifest.entries.some((entry) => entry.kind === 'hardlink')).toBe(true);
@@ -92,6 +102,7 @@ describe('source archive boundary', () => {
 
   test('validates and materializes zip members', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-source-zip-'));
+
     try {
       const input = join(root, 'input');
       mkdirSync(join(input, 'src'), { recursive: true });
@@ -101,11 +112,13 @@ describe('source archive boundary', () => {
       const workspace = workspaceFor(archive, root);
       const result = scriptResult(materializeSourceArchiveCommand({ workspaceRoot: workspace }));
       expect(result.status).toBe(0);
+
       const manifest = parseSourceArchiveManifest(
         readFileSync(join(workspace, 'source-archive.meta'), 'utf8'),
         readFileSync(join(workspace, 'source-archive.entries'), 'utf8'),
         workspace,
       );
+
       expect(manifest.format).toBe('zip');
       expect(readFileSync(join(workspace, 'source', 'src', 'README.md'), 'utf8')).toBe('zip source\n');
     } finally {
@@ -115,6 +128,7 @@ describe('source archive boundary', () => {
 
   test('rejects unsafe links, special files, duplicate members, and expansion overflow before extraction', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-source-reject-'));
+
     try {
       const unsafeInput = join(root, 'unsafe-input');
       mkdirSync(join(unsafeInput, 'src'), { recursive: true });
@@ -183,6 +197,7 @@ describe('source archive boundary', () => {
       { path: 'src/copy', kind: 'hardlink', size: 0, target: './src/file' },
       { path: 'src/link', kind: 'symlink', size: 0, target: '../file' },
     ]);
+
     expect(valid[0]?.path).toBe('src/file');
     expect(valid[1]?.target).toBe('src/file');
     expect(() => validateSourceArchiveEntries([{ path: '../escape', kind: 'file', size: 1, target: null }])).toThrow();
@@ -197,6 +212,7 @@ describe('source archive boundary', () => {
       'schemaVersion=1\nformat=tar\nsourcePath=/workspace/source.bundle\nsourceSize=10\nsourceSha256=' + 'a'.repeat(64) + '\nexpandedSize=2\n',
       'file\tsrc/file\t1\t\n',
     )).toThrow();
+
     const inventory = {
       schemaVersion: 1 as const,
       format: 'tar' as const,
@@ -210,6 +226,7 @@ describe('source archive boundary', () => {
         { path: 'README.md', kind: 'file' as const, size: 1, target: null },
       ],
     };
+
     expect(sourceArchiveInventory(inventory)).toEqual(['src/PKGBUILD', 'docs/LICENSE', 'README.md']);
     expect(sourceArchiveInventory(inventory, 2)).toHaveLength(2);
   });

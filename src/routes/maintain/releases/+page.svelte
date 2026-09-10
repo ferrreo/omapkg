@@ -10,34 +10,47 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
+
   let candidateDraft = '';
+
   let preparedOutput = '';
+
   let candidateBusy = false;
 
   $: releases = (Array.isArray(data?.releases) ? data.releases : []) as Release[];
   $: builds = (Array.isArray(data?.builds) ? data.builds : []) as Array<Build & { cohort_id?: string | null }>;
+
   type CrashQuarantine = { release_id: string; name: string; version: string; status: string; attempts: number; last_error: string | null };
+
   $: crashQuarantines = (Array.isArray(data?.crashQuarantines) ? data.crashQuarantines : []) as CrashQuarantine[];
   $: user = data?.user || null;
   $: isAdmin = data?.role === 'admin';
   $: devReleases = releases.filter((release) => release.channel === 'dev');
   $: stableReleases = releases.filter((release) => release.channel === 'stable');
+
   type Candidate = { id: string; phase: string; condition: string; current_revision: number; updated_at: number; title: string; lane: 'system' | 'opr'; manifest_json: string; manifest_sha256: string; systemVersion: string | null; compatibleSystems: string[] };
+
   $: candidates = (Array.isArray(data?.candidates) ? data.candidates : []) as Candidate[];
   $: systemCandidates = candidates.filter((candidate) => candidate.lane === 'system');
   $: oprCandidates = candidates.filter((candidate) => candidate.lane === 'opr');
   $: releaseTeam = data?.releaseTeam === true;
   $: distributionCandidates = (Array.isArray(data?.distributionCandidates) ? data.distributionCandidates : []) as ReleaseView[];
+
   let selectedReleaseIds: string[] = [];
+
   let promotionReason = '';
+
   $: selectedReleaseIdList = selectedReleaseIds.join(',');
   $: canPromote = releaseTeam && selectedReleaseIds.length > 0 && promotionReason.trim().length > 0;
   $: result = form && typeof form === 'object' ? form as { success?: boolean; error?: string; preparation?: unknown; repositories?: unknown } : {};
+
   $: if (result.preparation) preparedOutput = JSON.stringify({ preparation: result.preparation, repositories: result.repositories }, null, 2);
 
   const candidateEnhance = () => {
     candidateBusy = true;
+
     return async ({ update }: { update: (options?: { reset?: boolean }) => Promise<void> }) => {
       await update({ reset: false });
       candidateBusy = false;

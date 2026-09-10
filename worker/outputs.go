@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -107,7 +108,7 @@ func validateOutputContract(job Job) error {
 	return nil
 }
 
-func (r *Runner) collectOutputs(ctx context.Context, outputDir, jobName, image, pkgbase string, contract *outputContract) ([]buildOutput, error) {
+func (r *Runner) collectOutputs(ctx context.Context, outputDir, jobName, image, pkgbase string, contract *outputContract, sourceDateEpoch ...int64) ([]buildOutput, error) {
 	entries, err := os.ReadDir(outputDir)
 	if err != nil {
 		return nil, err
@@ -143,6 +144,9 @@ func (r *Runner) collectOutputs(ctx context.Context, outputDir, jobName, image, 
 		if err != nil {
 			return nil, err
 		}
+		if err := r.inspectPackageArchive(ctx, artifact, jobName+identity.Name, image, sourceDateEpoch...); err != nil {
+			return nil, err
+		}
 		outputs = append(outputs, buildOutput{PackageBase: metadata.PackageBase, Path: artifact, Filename: entry.Name(), ArtifactSHA256: digest, PackageMetadata: metadata})
 	}
 	if len(outputs) != len(expected) {
@@ -164,6 +168,12 @@ func provenanceForOutputs(job Job, workerID string, result BuildResult, started,
 		"workerId": workerID, "recipeSha256": job.RecipeSHA256, "architecture": job.Architecture, "imageDigest": job.ImageDigest,
 		"sourceDateEpoch": job.SourceDateEpoch, "sources": append([]Source{}, job.Sources...), "network": "disabled", "startedAt": started, "finishedAt": finished,
 		"buildEnvironment": result.BuildEnvironment, "runtimeTests": result.RuntimeTests, "outputs": result.Outputs,
+		"reproducibility": singleBuildContract(job, reproducibilityOutputs(result.Outputs), result.Reproducibility),
+	}
+	if job.FactoryRunID != "" {
+		report["factoryRunId"] = job.FactoryRunID
+		report["factoryAttempt"] = job.FactoryAttempt
+		report["factoryInputSha256"] = job.FactoryInputSHA256
 	}
 	if job.DependencyPlan != nil {
 		report["dependencyPlan"] = job.DependencyPlan
@@ -185,6 +195,70 @@ func provenanceForOutputs(job Job, workerID string, result BuildResult, started,
 		return "", errors.New("multi-output evidence exceeds 512 KiB")
 	}
 	return string(data), err
+}
+
+func reproducibilityOutputs(outputs []buildOutput) []ReproducibilityOutput {
+	result := make([]ReproducibilityOutput, 0, len(outputs))
+	for _, output := range outputs {
+		_, size, err := hashFile(output.Path)
+		if err != nil {
+			continue
+		}
+		result = append(result, ReproducibilityOutput{Filename: output.Filename, Size: size, SHA256: output.ArtifactSHA256, Path: output.Path})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Filename < result[j].Filename })
+	return result
+}
+
+func (r *Runner) inspectPackageArchive(ctx context.Context, artifact, name, image string, sourceDateEpoch ...int64) error {
+	args := r.baseContainerArgsForImage(containerName(name, "archive-inspection"), "none", "", []mount{{Source: artifact, Target: "/package.pkg.tar.zst", ReadOnly: true}}, nil, "65534:65534", image)
+	args = append(args, "/usr/bin/bsdtar", "-tf", "/package.pkg.tar.zst")
+	listing, err := r.runContainer(ctx, containerName(name, "archive-inspection"), args...)
+	if err != nil {
+		return fmt.Errorf("inspect package archive paths: %w", err)
+	}
+	if len(listing) > 4<<20 {
+		return errors.New("package archive path listing exceeds its limit")
+	}
+	previous := ""
+	for _, item := range strings.Split(strings.TrimSpace(listing), "\n") {
+		if item == "" {
+			continue
+		}
+		if previous != "" && item < previous {
+			return fmt.Errorf("package archive member order is not stable at %q", item)
+		}
+		previous = item
+		clean := path.Clean(item)
+		if strings.HasPrefix(item, "/") || clean == ".." || strings.HasPrefix(clean, "../") || strings.ContainsRune(item, '\x00') {
+			return fmt.Errorf("package archive contains unsafe path %q", item)
+		}
+	}
+	if len(sourceDateEpoch) > 0 && sourceDateEpoch[0] > 0 {
+		buildInfoArgs := r.baseContainerArgsForImage(containerName(name, "archive-buildinfo"), "none", "", []mount{{Source: artifact, Target: "/package.pkg.tar.zst", ReadOnly: true}}, nil, "65534:65534", image)
+		buildInfoArgs = append(buildInfoArgs, "/usr/bin/bsdtar", "-xOf", "/package.pkg.tar.zst", ".BUILDINFO")
+		buildInfo, err := r.runContainer(ctx, containerName(name, "archive-buildinfo"), buildInfoArgs...)
+		if err != nil || !strings.Contains(buildInfo, fmt.Sprintf("builddate = %d", sourceDateEpoch[0])) {
+			return errors.New("package build metadata does not bind SOURCE_DATE_EPOCH")
+		}
+		for _, field := range []string{"builddir = /opr/work/build", "startdir = /opr/work"} {
+			if !strings.Contains(buildInfo, field) {
+				return fmt.Errorf("package build metadata has an uncontrolled path (missing %s)", field)
+			}
+		}
+		for _, marker := range []string{"/home/", "/workspace/", "/build/", "C:\\Users\\"} {
+			if strings.Contains(buildInfo, marker) {
+				return fmt.Errorf("package build metadata leaks host path %q", marker)
+			}
+		}
+		mtreeArgs := r.baseContainerArgsForImage(containerName(name, "archive-mtree"), "none", "", []mount{{Source: artifact, Target: "/package.pkg.tar.zst", ReadOnly: true}}, nil, "65534:65534", image)
+		mtreeArgs = append(mtreeArgs, "/bin/sh", "-ceu", "bsdtar -xOf /package.pkg.tar.zst .MTREE | gzip -dc")
+		mtree, err := r.runContainer(ctx, containerName(name, "archive-mtree"), mtreeArgs...)
+		if err != nil || !strings.Contains(mtree, "time=") || !strings.Contains(mtree, "uid=") || !strings.Contains(mtree, "gid=") {
+			return errors.New("package archive metadata lacks timestamp and ownership observations")
+		}
+	}
+	return nil
 }
 
 func withoutOutputDependencies(dependencies []string, outputs []buildOutput) []string {
@@ -213,11 +287,15 @@ func withoutOutputDependencies(dependencies []string, outputs []buildOutput) []s
 
 func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, jobName, buildImage, dependencyDir string, buildEnvironment environmentEvidence, frozen *materializedInputs) (BuildResult, error) {
 	result := BuildResult{BuildEnvironment: &buildEnvironment}
-	outputs, err := r.collectOutputs(ctx, outputDir, jobName, buildImage, job.PackageName, job.OutputContract)
+	outputs, err := r.collectOutputs(ctx, outputDir, jobName, buildImage, job.PackageName, job.OutputContract, job.SourceDateEpoch)
 	if err != nil {
 		return result, err
 	}
+	if unexpected := unexpectedOutputFiles(outputDir, expectedOutputFiles(job.OutputContract)); len(unexpected) > 0 {
+		return result, fmt.Errorf("unexpected build outputs: %s", strings.Join(unexpected, ", "))
+	}
 	result.Outputs = outputs
+	result.Reproducibility = &singleBuildObservation{ArchivePathsInspected: true, ArchiveMetadataInspected: true, TimestampOwnershipOrderChecked: true}
 	for _, output := range outputs {
 		result.InstalledSize += output.PackageMetadata.InstalledSize
 		if result.InstalledSize > 1<<53-1 {
@@ -251,6 +329,32 @@ func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, 
 	}
 	result.SmokePassed = true
 	return result, nil
+}
+
+func expectedOutputFiles(contract *outputContract) map[string]bool {
+	allowed := map[string]bool{".PKGINFO": true}
+	if contract == nil {
+		return allowed
+	}
+	for _, output := range contract.Outputs {
+		allowed[outputFilename(output)] = true
+	}
+	return allowed
+}
+
+func unexpectedOutputFiles(directory string, allowed map[string]bool) []string {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return []string{"<unreadable>"}
+	}
+	result := []string{}
+	for _, entry := range entries {
+		if !allowed[entry.Name()] && !strings.HasSuffix(entry.Name(), ".log") {
+			result = append(result, entry.Name())
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (r *Runner) testOutputGroup(ctx context.Context, job Job, outputs []buildOutput, group []string, name, buildImage, runtimeDir string, plan *DependencyPlan, frozen *materializedInputs, environmentName string) (outputRuntimeTest, string, error) {

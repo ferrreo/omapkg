@@ -70,7 +70,7 @@ func newClient(cfg Config) (*Client, error) {
 	if !idPattern.MatchString(cfg.WorkerID) {
 		return nil, errors.New("invalid worker ID")
 	}
-	metadata, err := daemonMetadata(cfg.Runtime)
+	metadata, err := daemonMetadataForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

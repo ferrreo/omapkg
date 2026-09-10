@@ -88,6 +88,39 @@ set and package digests, profile and recipe digests, source date, kernel,
 bootloader, firmware, image digest, and native target. It is emitted only
 after the disk has been detached and hashed.
 
+Before hashing, the builder stages the ESP and normalizes its FAT timestamps
+with `SOURCE_DATE_EPOCH`. It runs `e2fsck -D`, rewrites ext4 inode and
+superblock timestamps through numeric inode IDs, rebuilds the ESP with
+`mcopy -p`, and checks filesystem UUIDs, ownership against package-declared
+owners, timestamps, archive metadata, and package member order. Machine ID,
+random seed, and host SSH keys are removed; first boot creates machine identity
+and host secrets.
+
+Private factory image candidates use a separate authority path. The candidate
+lock must have `authority: "factory-candidate-v1"` and bind an exact private
+candidate ID, owned-universe digest, selected input-lock digest, and reviewed
+native-plan digest. Pass detached signatures for both the lock and native plan;
+the builder verifies them with the trusted key before creating a loop device or
+mounting a filesystem:
+
+```sh
+sudo scripts/build-system-image.sh \
+  --candidate-lock /var/lib/opr/candidate-lock.json \
+  --candidate-lock-signature /var/lib/opr/candidate-lock.json.sig \
+  --candidate-id RUN_ID \
+  --native-plan /var/lib/opr/native-plan.json \
+  --native-plan-signature /var/lib/opr/native-plan.json.sig \
+  --key /etc/omarchy/omapkg-release-key.asc \
+  --fingerprint "$OMARCHY_RELEASE_FINGERPRINT" \
+  --profile system-images/profiles/x86_64-uefi.json \
+  --output /var/lib/opr/candidate.raw \
+  --provenance /var/lib/opr/candidate.provenance.json
+```
+
+This path does not resolve a live manifest or create a distributable release
+record. The later release action binds the exact private candidate bytes and
+contract evidence after review.
+
 ## Native UEFI qualification
 
 Run boot qualification only on a matching native machine. `boot-system-image.sh`

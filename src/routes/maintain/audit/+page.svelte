@@ -9,6 +9,7 @@
   export let data: PageData;
 
   type AuditRange = 'all' | '24h' | '7d' | '30d' | '90d';
+
   const rangeOptions: Array<{ value: AuditRange; label: string }> = [
     { value: 'all', label: 'All time' },
     { value: '24h', label: 'Last 24 hours' },
@@ -21,8 +22,11 @@
   $: actorNames = ((data as unknown as { actorNames?: Record<string, string> })?.actorNames || {}) as Record<string, string>;
   $: user = data?.user || null;
   $: requestId = ((data as unknown as { requestId?: string })?.requestId || '').trim();
+
   let query = data?.query || '';
+
   let range = (data?.range || 'all') as AuditRange;
+
   $: nextBefore = data?.nextBefore ?? null;
   $: exportScope = makeScopeParams(query, range, requestId, data?.range, data?.from, data?.to);
   $: csvHref = `/api/admin/audit/export?${new URLSearchParams([...exportScope, ['format', 'csv']]).toString()}`;
@@ -37,11 +41,15 @@
 
   function makeScopeParams(currentQuery: string, currentRange: AuditRange, currentRequestId: string, loadedRange: AuditRange | undefined, from: number | null | undefined, to: number | null | undefined) {
     const params = new URLSearchParams({ q: currentQuery.trim(), range: currentRange });
+
     if (currentRequestId) params.set('request', currentRequestId);
+
     if (loadedRange === currentRange) {
       if (from !== null && from !== undefined) params.set('from', String(from));
+
       if (to !== null && to !== undefined) params.set('to', String(to));
     }
+
     return params;
   }
 </script>

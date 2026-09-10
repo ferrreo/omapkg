@@ -10,10 +10,13 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
 
   type LabelledRequest = PackageRequest & Record<string, unknown>;
+
   type DescribedRevision = Revision & { preserved?: import('$lib/preserved-recipe').PreservedRecipe | null; fullVersion?: string; recipeUrl?: string | null; description?: string | null; recipePolicy?: { mode: string; recorded: boolean }; runtimeExceptions?: Array<{ findingSha256: string; reason: string }> };
+
   $: request = data?.request as LabelledRequest | null;
   $: revisions = (Array.isArray(data?.revisions) ? data.revisions : []) as DescribedRevision[];
   $: approvals = (Array.isArray(data?.approvals) ? data.approvals : []) as Approval[];
@@ -34,6 +37,7 @@
 
   function parseJSON(value: string | null | undefined): unknown {
     if (!value) return null;
+
     try {
       return JSON.parse(value);
     } catch {
@@ -43,12 +47,15 @@
 
   function pretty(value: string | null | undefined) {
     const parsed = parseJSON(value);
+
     return parsed === null ? '—' : JSON.stringify(parsed, null, 2);
   }
 
   function imageEntries(value: string | null | undefined): Array<[string, string]> {
     const parsed = parseJSON(value);
+
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+
     return Object.entries(parsed).filter((entry): entry is [string, string] => (entry[0] === 'x86_64' || entry[0] === 'aarch64') && typeof entry[1] === 'string');
   }
 
@@ -66,18 +73,26 @@
 
   function declaredLicenseLabel(value: unknown) {
     if (value === 'proprietary') return 'Proprietary';
+
     if (value === 'unknown' || !value) return 'Not sure';
+
     return String(value);
   }
 
   function actorLabel(value: string | undefined, record?: Record<string, unknown>) {
     if (value && actorNames[value]) return actorNames[value];
+
     const display = ['actor_name', 'actor_login', 'github_login', 'github_username', 'display_name', 'username']
       .map((key) => record?.[key]).find((item): item is string => typeof item === 'string' && item.trim().length > 0);
+
     if (display) return display;
+
     if (!value) return 'System';
+
     if (value.startsWith('github:')) return 'GitHub user';
+
     if (value.startsWith('user:')) return 'Signed-in user';
+
     return value;
   }
 
@@ -106,6 +121,18 @@
       </header>
 
       {#if result.error}<div class="form-notice form-notice--danger" role="alert">{result.error}</div>{:else if result.success}<div class="notice-bar" role="status"><p>Review action recorded. Current state is shown below.</p><a href={auditHref(request.id)}>Open audit<Icon name="arrow" size={14} /></a></div>{/if}
+
+      {#if revisions.length}
+        <section class="workbench-panel" aria-labelledby="dossiers-title">
+          <div class="workbench-panel__head"><h2 id="dossiers-title">Package dossiers</h2><span>Immutable evidence snapshots</span></div>
+          <form class="review-form" method="POST" action="?/createDossier">
+            <label for="dossier-revision">Recipe revision</label>
+            <select id="dossier-revision" name="revision_id">{#each revisions as revision}<option value={revision.id}>{revision.fullVersion ?? revision.version} · {revision.id}</option>{/each}</select>
+            <button class="button" type="submit">Save dossier snapshot</button>
+          </form>
+          <ul>{#each data.dossiers as dossier}<li><a href={`/maintain/dossiers/${encodeURIComponent(dossier.id)}`}>{dossier.revision_id} · {formatDate(dossier.created_at)}</a></li>{:else}<li>No snapshots saved. Current evidence remains on this request.</li>{/each}</ul>
+        </section>
+      {/if}
 
       {#if data.imported}<p class="notice-bar">Original recipe import. <a href={`/maintain/recipes/${data.imported.capture_sha256}`}>Review captured files, source bundles and upload status</a>.</p>{/if}
       {#if data.imported && ['review', 'queued', 'building', 'failed', 'blocked'].includes(request.status)}

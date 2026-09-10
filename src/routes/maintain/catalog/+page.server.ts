@@ -9,8 +9,10 @@ export const load: PageServerLoad = async (event) => {
   const collection = event.url.searchParams.get('collection') ?? '';
   const after = event.url.searchParams.get('after') ?? '';
   const packages = await listCatalogPackages(environment(event).DB, { search, collection, after });
+
   return { packages, search, collection, after };
 };
+
 export const actions: Actions = {
   propose: (event) => formAction(event, async (form) => {
     const result = await proposeCatalogPackage(environment(event).DB, event.locals.actor, catalogManifestFromForm(form), null, field(form, 'reason'));

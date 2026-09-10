@@ -314,7 +314,7 @@ func (r *Runner) containerArgsForImage(name, network, workdir string, mounts []m
 	if user != "" {
 		args = append(args, "--user", user)
 	}
-	for _, value := range []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb"} {
+	for _, value := range []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "TZ=UTC"} {
 		args = append(args, "--env", value)
 	}
 	keys := make([]string, 0, len(env))

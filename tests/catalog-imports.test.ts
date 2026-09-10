@@ -11,30 +11,39 @@ import type { Env } from '../src/lib/server/env';
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
   .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
+
 const owner = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
+
 const entry = (name: string, target: 'x86_64' | 'aarch64' = 'x86_64', version = '1.0-1'): ImportEntry => ({
   sourceId: `core-${target}`, name, pkgbase: name, version, architecture: 'any', target, collection: 'core', filename: `${name}-${version}-any.pkg.tar.zst`,
   sha256: 'a'.repeat(64), size: 10, installedSize: 20, description: 'Fixture package', upstreamUrl: 'https://example.org/project', licenses: ['MIT'],
   dependencies: [], makeDependencies: [], checkDependencies: [], provides: [], conflicts: [], replaces: [], packageSignature: null,
 });
+
 async function manifest(entries: ImportEntry[], options: { channel?: 'stable' | 'upstream'; missingArm?: boolean } = {}): Promise<ImportManifest> {
   const sources: ImportSource[] = ['x86_64', 'aarch64'].map((target) => ({ id: `core-${target}`, url: `https://example.org/${target}/core.db`,
     collection: 'core', target: target as 'x86_64' | 'aarch64', status: target === 'aarch64' && options.missingArm ? 'unavailable' : 'captured',
     sha256: target === 'aarch64' && options.missingArm ? null : 'b'.repeat(64), entries: entries.filter((entry) => entry.target === target).length,
     signature: 'missing', signatureSha256: null, error: target === 'aarch64' && options.missingArm ? 'HTTP 404' : null }));
+
   const index = await Promise.all([...entries].sort((a, b) => `${a.sourceId}/${a.name}`.localeCompare(`${b.sourceId}/${b.name}`))
     .map(async (entry) => [entry.sourceId, entry.name, await sha256(canonicalJson(entry))]));
+
   return { schemaVersion: 1, kind: options.channel === 'upstream' ? 'arch' : 'omarchy', channel: options.channel ?? 'stable', sources, entriesSha256: await sha256(canonicalJson(index)) };
 }
+
 async function capture(db: D1Database, entries: ImportEntry[], options?: Parameters<typeof manifest>[1]) {
   const { importId } = await beginCatalogImport(db, owner, await manifest(entries, options));
+
   if (entries.length) await appendCatalogImport(db, owner, importId, entries);
   await sealCatalogImport(db, owner, importId);
+
   return importId;
 }
 
 test('capture is resumable and sealed only after exact source counts and index match; any keeps both target records', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
+
   try {
     const entries = [entry('shared'), entry('shared', 'aarch64')];
     const input = await manifest(entries); const { importId } = await beginCatalogImport(d1, owner, input);
@@ -67,18 +76,24 @@ test('import build progress includes registered split outputs and preserves lega
     INSERT INTO revisions VALUES('revision','request','reviewed');
     INSERT INTO approvals VALUES('revision','area',NULL,'reviewed'),('revision','security',NULL,'reviewed');
   `);
+
   const db = asD1(holder);
+
   try {
     for (const name of ['legacy', 'split', 'split-docs', 'missing-output']) {
       holder.prepare('INSERT INTO catalog_outputs VALUES(?,?)').bind(name, 'base').run();
       holder.prepare('INSERT INTO catalog_import_entries VALUES(?,?,?,?)').bind('capture', name, 'x86_64', JSON.stringify({ version: '2:1.0-1' })).run();
     }
+
     holder.prepare("INSERT INTO builds VALUES('legacy-build','revision','x86_64','succeeded',1,'signed',?,NULL,1)")
       .bind(JSON.stringify({ packageMetadata: { name: 'legacy', fullVersion: '2:1.0-1' } })).run();
+
     const outputs = ['split', 'split-docs', 'missing-output'].map((name) => ({ filename: `${name}.pkg.tar.zst`, artifactSha256: name,
       packageMetadata: { name, fullVersion: '2:1.0-1' } }));
+
     holder.prepare("INSERT INTO builds VALUES('split-build','revision','x86_64','succeeded',1,'signed',?,'contract',2)")
       .bind(JSON.stringify({ schemaVersion: 2, outputs })).run();
+
     for (const output of outputs.slice(0, 2)) holder.prepare("INSERT INTO build_artifacts VALUES('split-build',2,?,?)").bind(output.filename, output.artifactSha256).run();
     expect(await importBuildCoverage(db, 'capture')).toEqual({ captured: 4, admitted: 4, built: 3 });
     holder.exec("UPDATE build_artifacts SET attempt=1 WHERE filename='split-docs.pkg.tar.zst'");
@@ -90,6 +105,7 @@ test('import build progress includes registered split outputs and preserves lega
 
 test('reconciliation retains missing packages and target gaps when an ARM baseline exists', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
+
   try {
     const baseline = await capture(d1, [entry('present'), entry('missing'), entry('present', 'aarch64')]);
     const candidate = await capture(d1, [entry('present', 'x86_64', '2.0-1'), entry('extra')], { channel: 'upstream', missingArm: true });
@@ -116,7 +132,11 @@ test('existing OPR recipe-only packages remain recipes and cannot masquerade as 
 
 test('capture jobs are authorized and deduplicated; OPR capture is distinct from Omarchy system channels', async () => {
   const db = new TestD1(schema); const d1 = asD1(db); let dispatched = 0;
-  const env = { DB: d1, PUBLIC_ORIGIN: 'https://omapkg.example', PIPELINE: { fetch: async () => { dispatched++; return Response.json({}, { status: 202 }); } } } as unknown as Env;
+
+  const env = { DB: d1, PUBLIC_ORIGIN: 'https://omapkg.example', PIPELINE: { fetch: async () => { dispatched++;
+
+ return Response.json({}, { status: 202 }); } } } as unknown as Env;
+
   try {
     await expect(startCatalogCapture(env, { ...owner, role: 'public' }, 'arch', 'upstream', 'omapkg')).rejects.toMatchObject({ status: 403 });
     const first = await startCatalogCapture(env, owner, 'arch', 'upstream', 'omapkg');
@@ -130,6 +150,7 @@ test('capture jobs are authorized and deduplicated; OPR capture is distinct from
 
 test('absent Omarchy ARM baseline is a new qualification target, not a comparison blocker', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
+
   try {
     const baseline = await capture(d1, [entry('present')], { missingArm: true });
     const candidate = await capture(d1, [entry('present'), entry('arm-reference', 'aarch64')], { channel: 'upstream' });

@@ -31,11 +31,13 @@ class MemoryR2 {
 
   async head(key: string) {
     const object = this.objects.get(key);
+
     return object ? { size: object.body.byteLength, customMetadata: object.customMetadata } : null;
   }
 
   async get(key: string) {
     const object = this.objects.get(key);
+
     return object ? { size: object.body.byteLength, customMetadata: object.customMetadata, arrayBuffer: async () => object.body.slice().buffer } : null;
   }
 }
@@ -56,10 +58,12 @@ async function insertPackage(db: TestD1, bucket: MemoryR2, value: PackageInput):
   const signatureSha256 = await sha256(signature);
   bucket.objects.set(artifactKey, { body: artifact, customMetadata: { sha256: value.artifactTampered ? 'f'.repeat(64) : artifactSha256 } });
   bucket.objects.set(`${artifactKey}.sig`, { body: signature, customMetadata: { sha256: signatureSha256 } });
+
   const metadata = {
     name: value.name, fullVersion: version, architecture: 'x86_64', installedSize: 10,
     depends: value.depends ?? [], provides: value.provides ?? [], conflicts: value.conflicts ?? [], replaces: [],
   };
+
   const revisionId = `revision-${value.releaseId}`;
   db.prepare('INSERT INTO revisions(id,manifest_sha256) VALUES(?,?)').bind(revisionId, 'm'.repeat(64)).run();
   db.prepare('INSERT INTO approvals(id,revision_id,kind,manifest_sha256,revoked_at) VALUES(?,?,?,?,NULL),(?,?,?,?,NULL)')
@@ -73,7 +77,9 @@ async function insertPackage(db: TestD1, bucket: MemoryR2, value: PackageInput):
 async function planner(packages: PackageInput[], dependencies: string[], makeDependencies: string[] = []) {
   const db = new TestD1(schema);
   const bucket = new MemoryR2();
+
   for (const value of packages) await insertPackage(db, bucket, value);
+
   try {
     return await planDependencies({
       DB: asD1(db), ARTIFACTS: bucket as unknown as R2Bucket, PUBLIC_ORIGIN: 'https://opr.example',
@@ -90,6 +96,7 @@ test('dependency planner prefers signed stable packages and includes transitive 
     { releaseId: 'mid-stable', name: 'mid', version: '1.0-1', depends: ['base>=1.0'] },
     { releaseId: 'mid-dev', name: 'mid', version: '9.0-1', channel: 'dev', depends: ['base>=1.0'] },
   ], ['mid']);
+
   expect(result.plan?.channel).toBe('stable');
   expect(result.plan?.packages.map((item) => item.releaseId)).toEqual(['mid-stable', 'base-stable']);
   expect(result.plan?.packages.every((item) => item.url.startsWith('https://opr.example/repo/x86_64/'))).toBe(true);
@@ -108,6 +115,7 @@ test('dependency planner keeps stable roots and uses dev only for a missing stab
     { releaseId: 'base-stable-old', name: 'base', version: '1.0-1' },
     { releaseId: 'base-dev-new', name: 'base', version: '2.0-1', channel: 'dev' },
   ], ['root']);
+
   expect(result.plan?.channel).toBe('dev');
   expect(result.plan?.packages.find((item) => item.releaseId === 'root-stable')?.url).toContain('/repo/x86_64/');
   expect(result.plan?.packages.find((item) => item.releaseId === 'base-dev-new')?.url).toContain('/repo/dev/x86_64/');
@@ -128,10 +136,12 @@ test('dependency planner rejects unsatisfied versions and conflicts, while allow
     { releaseId: 'parent', name: 'parent', depends: ['child'], conflicts: ['child'] },
     { releaseId: 'child', name: 'child' },
   ], ['parent'])).rejects.toThrow('conflict');
+
   const cycle = await planner([
     { releaseId: 'cycle-a', name: 'cycle-a', depends: ['cycle-b'] },
     { releaseId: 'cycle-b', name: 'cycle-b', depends: ['cycle-a'] },
   ], ['cycle-a']);
+
   expect(cycle.plan?.packages.map((item) => item.releaseId)).toEqual(['cycle-a', 'cycle-b']);
 });
 

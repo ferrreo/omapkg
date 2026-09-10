@@ -4,12 +4,17 @@
   import type { Architecture } from '$lib/model';
 
   export let architectures: Architecture[] = ['x86_64', 'aarch64'];
+
   export let repositories: ReleaseRepository[] = [];
+
   export let checks: ReleaseCheck[] = [];
+
   export let heading = 'Target evidence';
+
   export let matrixId = 'release-matrix-title';
 
   const repositoryFor = (architecture: Architecture) => repositories.find((item) => item.architecture === architecture);
+
   const checkFor = (architecture: Architecture) => checks.find((item) => item.architecture === architecture);
 </script>
 

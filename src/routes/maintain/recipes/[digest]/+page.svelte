@@ -7,13 +7,28 @@
   import { onMount } from 'svelte';
   import { startVisibleRefresh } from '$lib/visible-refresh';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
+
   let busy = false;
-  const pending = () => { busy = true; return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
+  const pending = () => { busy = true;
+
+ return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
   onMount(() => startVisibleRefresh(() => data.inspections.some((inspection) => inspection.status === 'queued' || inspection.status === 'leased'), () => { void invalidateAll(); }));
+
   $: hasInspection = data.inspections.some((inspection) => inspection.current && inspection.metadata);
-  const modeLabel = (mode: string) => mode === '100755' ? 'Executable' : mode === '120000' ? 'Symbolic link' : 'File';
+
+  const modeLabel = (mode: string) => {
+    if (mode === '100755') return 'Executable';
+
+    if (mode === '120000') return 'Symbolic link';
+
+    return 'File';
+  };
 </script>
 <svelte:head><title>{data.manifest.pkgbase} · original recipe · omapkg</title></svelte:head>
 <MaintainerShell active="imports" user={data.user}>

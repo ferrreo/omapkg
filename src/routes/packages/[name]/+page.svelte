@@ -12,6 +12,7 @@
   export let data: PageData;
 
   type DetailRelease = PageData['releases'][number];
+
   $: releases = data.releases;
   $: revisions = data.revisions;
   $: request = data.request;
@@ -25,7 +26,9 @@
   $: user = data.user || null;
   $: role = data.role || 'public';
   $: packages = latest ? [latest] : [];
+
   type FeedbackEntry = { works: number; comment: string; created_at: number };
+
   type CrashReport = {
     id?: string;
     release_id?: string;
@@ -40,31 +43,52 @@
     confirmed_by_name?: string | null;
     confirmed_by_username?: string | null;
   };
+
   $: feedback = (Array.isArray(data?.feedback) ? data.feedback : []) as FeedbackEntry[];
   $: crashReports = (Array.isArray(data?.crashes) ? data.crashes : []) as CrashReport[];
   $: publicCrashReports = crashReports.filter((report) => Boolean(report.confirmed_at));
   $: actorNames = role === 'public' ? {} : ((data as unknown as { actorNames?: Record<string, string> })?.actorNames || {}) as Record<string, string>;
 
   let feedbackWorks = '1';
+
   let feedbackComment = '';
+
   let feedbackBusy = false;
+
   let feedbackError = '';
+
   let feedbackSuccess = '';
+
   let crashSummary = '';
+
   let crashConsent = false;
+
   let crashBusy = false;
+
   let crashError = '';
+
   let crashSuccess = '';
+
   let resolutionReasons: Record<string, string> = {};
+
   let resolvingReport = '';
+
   let triageActions: Record<string, 'confirm' | 'resolve'> = {};
+
   let resolutionError = '';
+
   let resolutionSuccess = '';
+
   let confirmedReports = new Set<string>();
+
   let confirmedAt: Record<string, number> = {};
+
   let confirmedBy: Record<string, string> = {};
+
   let resolvedReports = new Set<string>();
+
   let resolvedAt: Record<string, number> = {};
+
   let resolvedBy: Record<string, string> = {};
 
   function formatDate(value: number | null | undefined) {
@@ -73,8 +97,10 @@
 
   function parseList(value: string | null | undefined): string[] {
     if (!value) return [];
+
     try {
       const parsed = JSON.parse(value);
+
       return Array.isArray(parsed) ? parsed.map(String) : [];
     } catch {
       return [];
@@ -83,6 +109,7 @@
 
   function artifactHref(release: DetailRelease) {
     if (!release.artifact_filename || release.surface !== 'binary') return '';
+
     return `/repo/${release.channel === 'dev' ? 'dev/' : ''}${release.architecture}/${encodeURIComponent(release.artifact_filename)}`;
   }
 
@@ -125,13 +152,16 @@
     feedbackBusy = true;
     feedbackError = '';
     feedbackSuccess = '';
+
     try {
       const response = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ releaseId: latest.id, works: feedbackWorks === '1' ? 1 : 0, comment: feedbackComment.trim() })
       });
+
       const body = await responseBody(response);
+
       if (!response.ok) throw new Error(body.error || 'Feedback could not be recorded.');
       feedbackSuccess = 'Feedback recorded for this release.';
       feedbackComment = '';
@@ -148,13 +178,16 @@
     crashBusy = true;
     crashError = '';
     crashSuccess = '';
+
     try {
       const response = await fetch('/api/crashes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ releaseId: latest.id, summary: crashSummary.trim(), consent: crashConsent, consentVersion: CRASH_CONSENT_VERSION })
       });
+
       const body = await responseBody(response);
+
       if (!response.ok) throw new Error(body.error || 'Crash report could not be recorded.');
       crashSuccess = 'Crash report recorded for this release.';
       crashSummary = '';
@@ -168,56 +201,75 @@
   }
 
   function setResolutionReason(reportId: string, value: string) {
-    resolutionReasons = { ...resolutionReasons, [reportId]: value };
+    resolutionReasons[reportId] = value;
   }
 
   function setTriageAction(reportId: string, action: 'confirm' | 'resolve') {
-    triageActions = { ...triageActions, [reportId]: action };
+    triageActions[reportId] = action;
   }
 
   function reportActorLabel(report: CrashReport, action: 'confirmed' | 'resolved') {
     const record = report as unknown as Record<string, unknown>;
+
     const explicitKeys = action === 'confirmed'
       ? ['confirmed_by_username', 'confirmed_by_name']
       : ['resolved_by_username', 'resolved_by_name'];
+
     const explicit = explicitKeys.map((key) => record[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+
     if (explicit) return explicit;
+
     const actor = action === 'confirmed'
       ? report.confirmed_by || (report.id ? confirmedBy[report.id] : '')
       : report.resolved_by || (report.id ? resolvedBy[report.id] : '');
+
     if (actor && actorNames[actor]) return actorNames[actor];
+
     if (actor && !actor.includes(':')) return actor.startsWith('@') ? actor : `@${actor}`;
+
     return actor ? 'Maintainer' : '';
   }
 
   async function triageCrash(report: CrashReport, action: 'confirm' | 'resolve') {
     if (!report.id || resolvingReport) return;
     const reason = resolutionReasons[report.id]?.trim() || '';
+
     if (!reason) return;
     resolvingReport = report.id;
     resolutionError = '';
     resolutionSuccess = '';
+
     try {
       const response = await fetch('/api/crashes', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reportId: report.id, reason, action })
       });
+
       const body = await responseBody(response);
+
       if (!response.ok) throw new Error(body.error || `Crash report could not be ${action === 'confirm' ? 'confirmed' : 'resolved'}.`);
       const timestamp = action === 'confirm' ? body.confirmedAt || body.reviewedAt : body.resolvedAt || body.reviewedAt;
       const actor = action === 'confirm' ? body.confirmedBy || user?.githubUsername : body.resolvedBy || user?.githubUsername;
       const fallbackTimestamp = Math.floor(Date.now() / 1000);
+
       if (action === 'confirm') {
         confirmedReports = new Set([...confirmedReports, report.id]);
-        confirmedAt = { ...confirmedAt, [report.id]: timestamp || fallbackTimestamp };
-        if (actor) confirmedBy = { ...confirmedBy, [report.id]: actor };
+        confirmedAt[report.id] = timestamp || fallbackTimestamp;
+
+        if (actor) {
+          confirmedBy[report.id] = actor;
+        }
       } else {
         resolvedReports = new Set([...resolvedReports, report.id]);
-        resolvedAt = { ...resolvedAt, [report.id]: timestamp || fallbackTimestamp };
-        if (actor) resolvedBy = { ...resolvedBy, [report.id]: actor };
+        resolvedAt[report.id] = timestamp || fallbackTimestamp;
+
+        if (actor) {
+          resolvedBy[report.id] = actor;
+        }
       }
-      resolutionReasons = { ...resolutionReasons, [report.id]: '' };
+
+      resolutionReasons[report.id] = '';
       resolutionSuccess = action === 'confirm' ? `Crash report ${report.id} marked reviewed.` : `Crash report ${report.id} marked resolved.`;
     } catch (cause) {
       resolutionError = cause instanceof Error ? cause.message : `Crash report could not be ${action === 'confirm' ? 'confirmed' : 'resolved'}.`;

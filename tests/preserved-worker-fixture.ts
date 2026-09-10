@@ -28,25 +28,29 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
   const security = { id: 'github:2', role: 'security' as const, areas: ['system'] };
   const timestamp = Math.floor(Date.now() / 1000);
+
   for (const [kind, reviewer] of [['area', actor], ['security', security]] as const) {
     await env.DB.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
       .bind(crypto.randomUUID(), revision.id, reviewer.id, kind, revision.manifest_sha256, timestamp).run();
     await env.DB.prepare("INSERT INTO audit_events(actor,action,target,detail,created_at) VALUES(?,'revision.approved',?,?,?)")
       .bind(reviewer.id, revision.request_id, JSON.stringify({ revisionId: revision.id, kind, manifestSha256: revision.manifest_sha256, customShellAcknowledged: true }), timestamp).run();
   }
+
   let cohort = await proposeCohort(env.DB, actor, 'preserved-protocol-cohort', null, { title: 'Preserved protocol fixture', lane: 'opr', systemVersion: null,
     parentSnapshot: null, compatibleSystems: [], members: [{ pkgbase: 'demo', catalogRevision: 1, recipeRevisionId: revision.id, cause: 'new-package', reason: 'INERT import.' }] }, 'INERT source scope.');
+
   for (let index = 0; index < 2; index++) {
     await changeCohortPhase(env as Env, actor, cohort.id, { revision: cohort.current_revision, sequence: cohort.event_sequence, manifestSha256: cohort.manifest_sha256, action: 'advance', reason: 'INERT reviewed phase.' });
     cohort = await getCohort(env.DB, cohort.id);
   }
+
   await env.DB.prepare("UPDATE requests SET status='queued' WHERE id=?").bind(revision.request_id).run();
   await env.DB.prepare("INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES('preserved-build',?,'x86_64','queued',?)").bind(revision.id, timestamp).run();
   const keys = generateKeyPairSync('ed25519');
   const publicKey = Buffer.from(keys.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)).toString('base64');
   await env.DB.prepare("INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,accepting_jobs) VALUES('preserved-builder','Protocol fixture','x86_64',?,'active',?,1)").bind(publicKey, timestamp).run();
   const worker = (await env.DB.prepare("SELECT * FROM workers WHERE id='preserved-builder'").first<Worker>())!;
-  const metadata: WorkerMetadata = { version: 'preserved-test', runtime: 'podman', capabilities: ['preserved-recipe-v1', 'multi-output-v2', 'runtime-analysis-v1', 'frozen-inputs-v1', 'helper-shell-analysis-v1'] };
+  const metadata: WorkerMetadata = { version: 'preserved-test', runtime: 'podman', capabilities: ['preserved-recipe-v1', 'multi-output-v2', 'runtime-analysis-v1', 'frozen-inputs-v1', 'helper-shell-analysis-v1', 'single-build-reproducibility-v1'] };
   expect(await claimJob(env.DB, worker, metadata, env)).toBeNull();
   const contract = (await cohortOutputContract(env.DB, { ...revision, pkgrel: revision.pkgrel ?? 1 }, 'x86_64'))!;
   const frozen = await frozenFixture(env, revision, contract);
@@ -69,21 +73,28 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const build = (await getBuildForWorker(env.DB, job.id, worker.id))!;
   expect(parseRevisionForJob({ ...build, architecture: 'aarch64' }).makeDependencies).toEqual(['arm-tool', 'cc']);
   expect(() => holder.prepare('UPDATE builds SET preserved_inputs_json=NULL WHERE id=?').bind(job.id).run()).toThrow();
+
   const download = async (digest: string, token = job.leaseToken) => {
     const path = `/api/worker/jobs/${job.id}/inputs/${digest}`, body = JSON.stringify({ leaseToken: token });
     const timestamp = String(Math.floor(Date.now() / 1000)), nonce = crypto.randomUUID().replaceAll('-', '');
     const signature = Buffer.from(sign(null, Buffer.from(`POST\n${path}\n${timestamp}\n${nonce}\n${await sha256(body)}`), keys.privateKey)).toString('base64');
+
     const request = new Request(env.PUBLIC_ORIGIN + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-OPR-Worker': worker.id,
       'X-OPR-Timestamp': timestamp, 'X-OPR-Nonce': nonce, 'X-OPR-Signature': signature }, body });
+
     return downloadInput({ request, url: new URL(request.url), params: { id: job.id, digest }, platform: { env } } as never);
   };
+
   const capture = JSON.parse((await env.DB.prepare('SELECT manifest_json FROM recipe_captures WHERE sha256=?').bind(inputs.capture.sha256).first<{ manifest_json: string }>())!.manifest_json) as RecipeCapture;
+
   for (const ref of [inputs.capture, inputs.sourceBundle, frozen.lock, capture.git.commit, ...capture.git.trees, ...capture.files.map((file) => file.object)].filter((ref) => ref.size)) {
     expect(await sha256(new Uint8Array(await (await download(ref.sha256)).arrayBuffer()))).toBe(ref.sha256);
   }
+
   await expect(download(preservedBuildInputs(revision, 'aarch64')!.sourceBundle.sha256)).rejects.toMatchObject({ status: 403 });
   await expect(download('f'.repeat(64))).rejects.toMatchObject({ status: 403 });
   const image = (await env.DB.prepare("SELECT image_id FROM recipe_inspections WHERE architecture='x86_64' AND status='succeeded'").first<{ image_id: string }>())!;
+
   for (const [revoke, restore] of [
     ["UPDATE workers SET status='revoked' WHERE id='inspection-worker'", "UPDATE workers SET status='active' WHERE id='inspection-worker'"],
     [`UPDATE build_images SET enabled=0 WHERE id='${image.image_id}'`, `UPDATE build_images SET enabled=1 WHERE id='${image.image_id}'`],
@@ -99,20 +110,33 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
     job = (await claimJob(env.DB, worker, metadata, env))!;
     expect(job.attempt).toBe(attempt + 1); expect(job.leaseToken).not.toBe(token);
   }
+
   const artifacts = await Promise.all(job.outputContract!.outputs.map((output) => uploadArtifact(env.DB, env.ARTIFACTS, worker, job.id, job.leaseToken,
     packageFilename(output), new TextEncoder().encode('INERT output ' + output.name))));
+
   const environment = { baseImage: job.imageRef, preparedImage: `sha256:${'d'.repeat(64)}`, packages: [`${frozen.pkg.name} ${frozen.pkg.version}`] };
+  const reproducibilityFiles = artifacts.map((artifact) => ({ filename: artifact.filename, size: artifact.size, sha256: artifact.sha256 })).sort((left, right) => left.filename.localeCompare(right.filename));
+
   const report = { schemaVersion: 2, attempt: job.attempt, outputContract: job.outputContract, buildId: job.id, revisionId: job.revisionId, workerId: worker.id,
     recipeSha256: job.recipeSha256, architecture: job.architecture, imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch, sources: [], preservedRecipe: inputs,
     network: 'disabled', startedAt: '2026-09-09T00:00:00Z', finishedAt: '2026-09-09T00:01:00Z', buildEnvironment: environment,
+    reproducibility: { schemaVersion: 1, status: 'reproducibility-contract-verified', mode: 'single-build', target: job.architecture,
+      inputs: { recipeSha256: job.recipeSha256, sourceManifestSha256: await sha256(canonicalJson([])), inputLockSha256: frozen.lock.sha256, dependencyPlanSha256: '', imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch },
+      controls: { network: 'disabled', locale: 'C', timezone: 'UTC', umask: '022', hostSecrets: 'excluded', writableCaches: 'excluded', nativeTarget: job.architecture, archivePathsChecked: true, archiveMetadataChecked: true, timestampOwnershipOrderChecked: true },
+      outputs: { setSha256: await sha256(canonicalJson(reproducibilityFiles)), files: reproducibilityFiles, unexpected: [], prohibitedPaths: [] },
+      limitations: ['single execution does not establish independent byte reproduction'] },
     frozenInputs: { lock: frozen.lock, manifest: frozen.manifest, host: { architecture: 'x86_64', kernel: 'INERT kernel', cpuInfoSha256: 'a'.repeat(64), cpuModel: 'INERT CPU', runtime: 'podman', runtimeVersion: 'INERT', goVersion: 'INERT' } },
     outputs: job.outputContract!.outputs.map((output) => ({ pkgbase: job.packageName, filename: packageFilename(output), artifactSha256: artifacts.find((artifact) => artifact.filename === packageFilename(output))!.sha256,
       packageMetadata: { ...output, installedSize: 10, depends: output.name === 'demo' ? ['glibc', 'demo-docs=2:1.4-3.2'] : [], provides: [], conflicts: [], replaces: [] } })),
     runtimeTests: job.outputContract!.runtimeGroups.map((outputs) => ({ outputs, environment, smokePassed: true,
       analyses: outputs.map((name) => ({ name, runtimeAnalysis: { ...runtimeEvidence(job.imageDigest).runtimeAnalysis, nativeCode: [], payloadSha256: 'e'.repeat(64) } })) })),
   };
-  const complete = (value: unknown) => { const provenance = JSON.stringify(value); return { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20, smokePassed: true,
+
+  const complete = (value: unknown) => { const provenance = JSON.stringify(value);
+
+ return { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20, smokePassed: true,
     artifacts, provenance, provenanceSignature: Buffer.from(sign(null, Buffer.from(provenance), keys.privateKey)).toString('base64') }; };
+
   await expect(completeJob(env.DB, env.ARTIFACTS, worker, job.id, complete({ ...report, preservedRecipe: undefined }))).rejects.toThrow('Preserved source inputs');
   await expect(completeJob(env.DB, env.ARTIFACTS, worker, job.id, complete({ ...report, preservedRecipe: { ...inputs, sourceBundle: preservedBuildInputs(revision, 'aarch64')!.sourceBundle } }))).rejects.toThrow('Preserved source inputs');
   expect(await completeJob(env.DB, env.ARTIFACTS, worker, job.id, complete(report))).toEqual({ status: 'succeeded', idempotent: false });

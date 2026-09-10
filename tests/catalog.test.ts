@@ -25,12 +25,15 @@ async function page(db: TestD1, search = '') {
   const response = await GET({
     url: new URL(`https://omapkg.example/api/catalog?${search}`), platform: { env: { DB: asD1(db) } },
   } as Parameters<typeof GET>[0]);
+
   expect(response.status).toBe(200);
+
   return response.json() as Promise<{ items: Array<{ id: string; name: string; architecture: string; }>; nextCursor: string | null; }>;
 }
 
 test('catalog bounds latest rows in SQL and preserves cursor order across releases', async () => {
   const db = new TestD1(schema);
+
   try {
     seed(db, 'alpha-1', 'alpha');
     seed(db, 'alpha-2', 'alpha');

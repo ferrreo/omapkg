@@ -9,6 +9,7 @@ const MAX_ATTEMPTS = 5;
 
 function threshold(env: Env): number {
   const value = Number(env.CRASH_THRESHOLD ?? 3);
+
   return Number.isSafeInteger(value) && value > 0 ? value : 3;
 }
 
@@ -19,6 +20,7 @@ export async function crashRateKeys(env: Env, request: Request, releaseId: strin
   const address = request.headers.get('CF-Connecting-IP') ?? 'unavailable';
   const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`crash:${day}:${address}`));
   const digest = Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, '0')).join('');
+
   return [`crash:${digest}`, `crash:${digest}:${releaseId}`];
 }
 
@@ -39,15 +41,21 @@ function enqueue(env: Env, releaseId: string, timestamp: number) {
 
 export async function reviewCrash(env: Env, actor: Actor | null, input: { reportId: string; reason: string; action: 'confirm' | 'resolve' }) {
   const reviewer = requireMaintainer(actor);
+
   if (reviewer.role !== 'admin') throw new PolicyError(403, 'Administrator access is required to review crash reports.');
+
   const report = await env.DB.prepare('SELECT release_id,resolved_at FROM crash_reports WHERE id=?')
     .bind(input.reportId).first<{ release_id: string; resolved_at: number | null }>();
+
   if (!report) throw new PolicyError(404, 'Crash report not found.');
+
   if (report.resolved_at !== null) throw new PolicyError(409, 'Crash report is already resolved.');
   const timestamp = now();
+
   const update = input.action === 'confirm'
     ? env.DB.prepare('UPDATE crash_reports SET confirmed_at=?,confirmed_by=? WHERE id=? AND confirmed_at IS NULL AND resolved_at IS NULL')
     : env.DB.prepare('UPDATE crash_reports SET resolved_at=?,resolved_by=? WHERE id=? AND resolved_at IS NULL');
+
   const result = await env.DB.batch([
     update.bind(timestamp, reviewer.id, input.reportId),
     env.DB.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,?,?,?,? WHERE changes()=1`)
@@ -55,38 +63,50 @@ export async function reviewCrash(env: Env, actor: Actor | null, input: { report
         JSON.stringify({ crashReportId: input.reportId, reason: input.reason }), timestamp),
     enqueue(env, report.release_id, timestamp),
   ]);
+
   if (!result[0]?.meta.changes) throw new PolicyError(409, 'Crash report changed. Refresh and retry.');
+
   return { reportId: input.reportId, action: input.action, reviewedAt: timestamp };
 }
 
 export async function retryCrashQuarantine(env: Env, actor: Actor | null, releaseId: string) {
   const reviewer = requireMaintainer(actor);
+
   if (reviewer.role !== 'admin') throw new PolicyError(403, 'Administrator access is required to retry quarantine.');
   const timestamp = now();
+
   const results = await env.DB.batch([
     env.DB.prepare("UPDATE crash_quarantines SET status='queued',attempts=0,next_attempt_at=?,last_error=NULL,updated_at=? WHERE release_id=? AND status='failed'")
       .bind(timestamp, timestamp, releaseId),
     env.DB.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,'crash.quarantine_retried',?,'{}',? WHERE changes()=1`)
       .bind(reviewer.id, releaseId, timestamp),
   ]);
+
   if (!results[0]?.meta.changes) throw new PolicyError(409, 'No failed quarantine job is waiting for retry.');
 }
 
 export async function processCrashQuarantines(env: Env, publish = quarantineRelease): Promise<void> {
   const timestamp = now();
+
   const jobs = await env.DB.prepare(`SELECT release_id FROM crash_quarantines
     WHERE (status='queued' AND next_attempt_at<=?) OR (status='processing' AND lease_expires_at<=?)
     ORDER BY next_attempt_at LIMIT 10`).bind(timestamp, timestamp).all<{ release_id: string }>();
+
   for (const { release_id: releaseId } of jobs.results) {
     const lease = now() + 300;
+
     const claimed = await env.DB.prepare(`UPDATE crash_quarantines SET status='processing',attempts=attempts+1,lease_expires_at=?,updated_at=?
       WHERE release_id=? AND ((status='queued' AND next_attempt_at<=?) OR (status='processing' AND lease_expires_at<=?))`)
       .bind(lease, now(), releaseId, now(), now()).run();
+
     if (!claimed.meta.changes) continue;
+
     try {
       const count = await env.DB.prepare('SELECT COUNT(*) AS count FROM crash_reports WHERE release_id=? AND confirmed_at IS NOT NULL AND resolved_at IS NULL')
         .bind(releaseId).first<{ count: number }>();
+
       const warranted = (count?.count ?? 0) >= threshold(env);
+
       if (warranted) await publish(env, releaseId, `Confirmed unresolved crash reports reached threshold (${count!.count}).`, threshold(env));
       await env.DB.batch([
         env.DB.prepare("UPDATE crash_quarantines SET status='completed',lease_expires_at=NULL,last_error=NULL,updated_at=? WHERE release_id=? AND status='processing' AND lease_expires_at=?")

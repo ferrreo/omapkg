@@ -10,7 +10,9 @@ export const POST: RequestHandler = async (event) => {
   try {
     sameOrigin(event.request, event.url.origin); const env = environment(event); await inputAuthority(env.DB, event.locals.actor);
     const input = await jsonBody(event.request) as Record<string, unknown>;
+
     if (!input || typeof input !== 'object' || Object.keys(input).sort().join(',') !== 'bundle,reason' || typeof input.reason !== 'string') throw new PolicyError(400, 'Choose a source bundle and preparation reason.');
+
     return json(await retainRecipeSources(env, event.locals.actor, event.params.digest, input.bundle as InputObject, input.reason), { headers: { 'Cache-Control': 'no-store' } });
   } catch (cause) {
     if (cause instanceof PolicyError) return json({ error: cause.message }, { status: cause.status, headers: { 'Cache-Control': 'no-store' } });

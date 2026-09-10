@@ -73,6 +73,7 @@ export interface SourceTruthCheckResult {
 
 function repositoryPath(value: string): string {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) throw new Error('GITHUB_REPOSITORY must be owner/repository');
+
   return value;
 }
 
@@ -82,12 +83,14 @@ function pathForApi(path: string): string {
 
 async function github<T>(env: FactoryEnv, url: string, init: RequestInit = {}): Promise<T> {
   const response = await githubFetch(env, url, init);
+
   if (!response.ok) {
     // Keep upstream response bodies out of audit events. They can contain
     // repository content or URLs that are not safe to retain verbatim.
     const detail = redactText((await response.text()).slice(0, 160));
     throw new Error(`source-of-truth GitHub request failed (${response.status})${detail ? `: ${detail}` : ''}`);
   }
+
   return await response.json() as T;
 }
 
@@ -103,12 +106,16 @@ async function readFile(
     `${api}/repos/${repository}/contents/${pathForApi(path)}?ref=${encodeURIComponent(ref)}`,
     { method: 'GET' },
   );
+
   if (response.status === 404) return null;
+
   if (!response.ok) throw new Error(`source-of-truth file request failed (${response.status})`);
   const file = await response.json() as ContentsFile;
+
   if (file.type !== 'file' || file.encoding !== 'base64' || !file.content) return null;
   const binary = atob(file.content.replaceAll(/\s/g, ''));
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+
   return new TextDecoder().decode(bytes);
 }
 
@@ -120,7 +127,7 @@ function parseJson(value: string, field: string): unknown {
   }
 }
 
-function expectedManifest(revision: CanonicalRevision): Record<string, unknown> & { packageName: string } {
+function expectedManifest(revision: CanonicalRevision) {
   const manifest = {
     requestId: revision.request_id,
     packageName: revision.name,
@@ -137,22 +144,25 @@ function expectedManifest(revision: CanonicalRevision): Record<string, unknown> 
     imageDigest: revision.image_digest,
     license: revision.license,
     surface: revision.surface,
-    ...(revision.description != null ? { description: revision.description } : {}),
     publicRecipeSha256: revision.public_recipe_sha256,
   };
-  return manifest;
+
+  return revision.description == null ? manifest : { ...manifest, description: revision.description };
 }
 
-function expectedFiles(revision: CanonicalRevision): Record<string, string> {
+function expectedFiles(revision: CanonicalRevision) {
   const packagePath = revisionPackagePath(revision.name, revision.sbom_json);
-  const files: Record<string, string> = {
+
+  const files = {
     [`${packagePath}/PKGBUILD`]: revision.public_recipe ?? revision.recipe,
     [`${packagePath}/opr-manifest.json`]: `${JSON.stringify(expectedManifest(revision), null, 2)}\n`,
     [`${packagePath}/opr-lint.json`]: `${revision.lint_json}\n`,
     [`${packagePath}/opr-sbom.json`]: `${revision.sbom_json}\n`,
   };
-  if (revision.public_recipe !== null && revision.public_recipe !== revision.recipe) files[`${packagePath}/opr-build.PKGBUILD`] = revision.recipe;
-  return files;
+
+  return revision.public_recipe !== null && revision.public_recipe !== revision.recipe
+    ? { ...files, [`${packagePath}/opr-build.PKGBUILD`]: revision.recipe }
+    : files;
 }
 
 async function checkRevision(
@@ -164,19 +174,29 @@ async function checkRevision(
 ): Promise<{ paths: string[]; reason: string }> {
   if (preservedRecipe(revision)) {
     const expected = await revisionRecipeFiles(env, { revision, manifest: expectedManifest(revision) });
+
     return checkRecipeTree(env, repository, revisionPackagePath(revision.name, revision.sbom_json), headSha, expected);
   }
+
   const expected = expectedFiles(revision);
+
   const entries = await Promise.all(Object.entries(expected).map(async ([path, content]) => {
     const actual = await readFile(api, repository, path, headSha, env);
+
     if (actual === null) return [path, 'missing'] as const;
     const [actualDigest, expectedDigest] = await Promise.all([sha256(actual), sha256(content)]);
+
     if (actualDigest !== expectedDigest) return [path, 'hash mismatch'] as const;
+
     return null;
   }));
+
   const mismatches: Array<readonly [string, string]> = [];
+
   for (const entry of entries) if (entry !== null) mismatches.push(entry);
+
   if (!mismatches.length) return { paths: [], reason: '' };
+
   return {
     paths: mismatches.map(([path]) => path),
     reason: mismatches.map(([path, reason]) => `${path}: ${reason}`).join('; '),
@@ -186,63 +206,91 @@ async function checkRevision(
 /** Resolve the package subtree first; a large repository's recursive listing may be truncated. */
 export async function checkRecipeTree(env: FactoryEnv, repository: string, root: string, commit: string, expected: RecipeTreeFile[]): Promise<{ paths: string[]; reason: string }> {
   const api = `https://api.github.com/repos/${repositoryPath(repository)}/git`;
+
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid canonical commit');
   const head = await github<{ tree: { sha: string } }>(env, `${api}/commits/${commit}`);
+
   type Entry = { path: string; mode: string; type: string; sha: string; size?: number };
+
   type Tree = { sha: string; truncated?: boolean; tree: Entry[] };
+
   const tree = async (sha: string, recursive = false) => {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid canonical tree identity');
     const result = await github<Tree>(env, `${api}/trees/${sha}${recursive ? '?recursive=1' : ''}`);
+
     if (result.sha !== sha || result.truncated || !Array.isArray(result.tree)) throw new Error('Canonical recipe tree listing is incomplete');
+
     return result.tree;
   };
+
   let sha = head.tree.sha;
+
   for (const part of root.split('/')) {
     const entries = (await tree(sha)).filter((entry) => entry.path === part && entry.type === 'tree' && entry.mode === '040000');
+
     if (entries.length !== 1) return { paths: [root], reason: `${root}: missing recipe directory` };
     sha = entries[0].sha;
   }
+
   const subtree = await tree(sha, true);
   const entries = subtree.filter((entry) => entry.type !== 'tree');
+
   if (entries.length > 4096 || new Set(entries.map((entry) => entry.path)).size !== entries.length) throw new Error('Canonical recipe inventory exceeds its file budget');
   const wanted = new Map(expected.map((file) => [file.path.slice(root.length + 1), file]));
   const actual = new Map(entries.map((entry) => [entry.path, entry]));
   const mismatches: Array<[string, string]> = [];
   const directories = new Set<string>();
+
   for (const path of wanted.keys()) {
     const parts = path.split('/'); parts.pop();
+
     while (parts.length) { directories.add(parts.join('/')); parts.pop(); }
   }
+
   for (const entry of subtree.filter((entry) => entry.type === 'tree')) {
     if (!directories.has(entry.path) || entry.mode !== '040000') mismatches.push([`${root}/${entry.path}`, 'unexpected directory or mode']);
   }
+
   for (const [path, file] of wanted) {
     const entry = actual.get(path);
+
     if (!entry) { mismatches.push([`${root}/${path}`, 'missing']); continue; }
+
     if (entry.type !== 'blob' || entry.mode !== (file.mode ?? '100644') || entry.size !== file.bytes.length) {
       mismatches.push([`${root}/${path}`, 'type, mode or size mismatch']); continue;
     }
+
     if (!/^[a-f0-9]{40}$/.test(entry.sha)) throw new Error('Invalid canonical blob identity');
     const blob = await githubFetch(env, `${api}/blobs/${entry.sha}`, { headers: { Accept: 'application/vnd.github.raw+json' } });
+
     if (!blob.ok || !blob.body) throw new Error(`Canonical recipe blob request failed (${blob.status})`);
     const reader = blob.body.getReader(), digest = createHash('sha256'); let size = 0;
+
     try {
       for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
+        const { value, done } = await reader.read();
+
+ if (done) break;
         size += value.length;
+
         if (size > file.bytes.length) { await reader.cancel(); break; }
+
         digest.update(value);
       }
     } finally { reader.releaseLock(); }
+
     if (size !== file.bytes.length || digest.digest('hex') !== await sha256(file.bytes)) mismatches.push([`${root}/${path}`, 'hash mismatch']);
   }
+
   for (const path of actual.keys()) if (!wanted.has(path)) mismatches.push([`${root}/${path}`, 'unexpected file']);
+
   return { paths: mismatches.map(([path]) => path), reason: mismatches.map(([path, reason]) => `${path}: ${reason}`).join('; ') };
 }
 
 async function freezeRequest(env: Pick<FactoryEnv, 'DB'>, issue: Omit<IntegrityIssue, 'frozen'>): Promise<boolean> {
   const reason = `Source-of-truth integrity check failed: ${issue.reason}`.slice(0, 2_000);
   const timestamp = now();
+
   const result = await env.DB.batch([
     env.DB.prepare(`UPDATE requests SET status='failed', rejection_reason=?, updated_at=?
       WHERE id=? AND status IN ('review','queued','building')`).bind(reason, timestamp, issue.requestId),
@@ -263,6 +311,7 @@ async function freezeRequest(env: Pick<FactoryEnv, 'DB'>, issue: Omit<IntegrityI
       currentHeadSha: issue.currentHeadSha,
     }),
   ]);
+
   return result[0].meta.changes > 0;
 }
 
@@ -279,6 +328,7 @@ export async function checkSourceOfTruth(env: FactoryEnv): Promise<SourceTruthCh
   const branch = repo.default_branch;
   const branchInfo = await github<Branch>(env, `${api}/repos/${repository}/branches/${encodeURIComponent(branch)}`);
   const headSha = branchInfo.commit?.sha;
+
   if (!headSha || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error('source-of-truth branch did not return a commit SHA');
 
   const rows = await env.DB.prepare(`
@@ -306,9 +356,12 @@ export async function checkSourceOfTruth(env: FactoryEnv): Promise<SourceTruthCh
     ORDER BY r.created_at ASC,r.id ASC`).all<CanonicalRevision>();
 
   const issues: IntegrityIssue[] = [];
+
   for (const revision of rows.results) {
     const checked = await checkRevision(api, repository, revision, headSha, env);
+
     if (!checked.paths.length) continue;
+
     const issueBase = {
       revisionId: revision.id,
       requestId: revision.request_id,
@@ -318,6 +371,7 @@ export async function checkSourceOfTruth(env: FactoryEnv): Promise<SourceTruthCh
       approvedCommitSha: revision.commit_sha,
       currentHeadSha: headSha,
     };
+
     const frozen = await freezeRequest(env, issueBase);
     issues.push({ ...issueBase, frozen });
   }
@@ -329,6 +383,6 @@ export async function checkSourceOfTruth(env: FactoryEnv): Promise<SourceTruthCh
     checked: rows.results.length,
     passed: issues.length === 0,
     issues,
-    frozenRequestIds: [...new Set(issues.filter((issue) => issue.frozen).map((issue) => issue.requestId))],
+    frozenRequestIds: [...new Set(issues.flatMap((issue) => issue.frozen ? [issue.requestId] : []))],
   };
 }

@@ -344,7 +344,7 @@ func Run(args []string) error {
 		report.Reproducibility = buildReproReport(input.Plan, observedValue, *workerID)
 	}
 	if input.Plan.Operation == "reproducibility" {
-		if report.Reproducibility.Status == "verified-reproducible" && exitCode != 0 {
+		if report.Reproducibility.Status == "independently-reproduced" && exitCode != 0 {
 			report.Reproducibility.Status = "not-checked"
 		}
 	}
@@ -537,7 +537,7 @@ func buildReproReport(value plan, observations observed, workerID string) *repro
 	}
 	status := "mismatch"
 	if digestJSON(primary.Outputs) == digestJSON(secondary.Outputs) {
-		status = "verified-reproducible"
+		status = "independently-reproduced"
 	}
 	if expected, ok := value.Expected["reproducibilityStatus"].(string); ok && expected == "not-checked" {
 		status = expected

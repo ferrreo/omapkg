@@ -9,6 +9,7 @@ const digest = (letter: string) => letter.repeat(64);
 function manifest(kind: ReleaseManifest['kind'], releaseId: string, sequence: number, systemDigest: string | null, oprDigest: string | null): ReleaseManifest {
   const system = kind === 'system' || kind === 'resolved-transaction';
   const opr = kind === 'opr' || kind === 'resolved-transaction';
+
   return {
     schemaVersion: 1, kind, lane: kind === 'resolved-transaction' ? 'transaction' : kind, channel: kind === 'opr' ? 'stable' : 'stable',
     identity: { version: system ? '4.0.3' : null, generation: opr ? 'opr-20260910-1' : null }, releaseId,
@@ -32,12 +33,15 @@ test('release workbench preserves independent system and OPR identities with exa
     CREATE TABLE distribution_activation_pointers (lane TEXT,channel TEXT,release_id TEXT,manifest_sha256 TEXT,sequence INTEGER,system_manifest_sha256 TEXT,opr_manifest_sha256 TEXT,updated_at INTEGER,PRIMARY KEY(lane,channel));
     CREATE TABLE distribution_release_approvals (candidate_id TEXT,kind TEXT,area TEXT);
   `);
+
   const system = manifest('system', '4.0.3', 1, null, digest('o'));
   const opr = manifest('opr', 'opr-20260910-1', 1, digest('s'), null);
   const transaction = manifest('resolved-transaction', 'txn-4.0.3-opr-20260910-1', 1, digest('s'), digest('o'));
+
   const insert = (id: string, value: ReleaseManifest, status = 'active') => db.prepare(`INSERT INTO distribution_release_candidates
     (id,kind,lane,channel,release_id,sequence,parent_digest,parent_sequence,manifest_json,manifest_sha256,status,created_at,activated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .bind(id, value.kind, value.lane, value.channel, value.releaseId, value.sequence, null, null, JSON.stringify(value), digest(id[0]), status, value.createdAt, value.createdAt).run();
+
   insert('system-candidate', system); insert('opr-candidate', opr); insert('transaction-candidate', transaction);
   insert('rc-candidate', { ...system, channel: 'rc', sequence: 99 });
   insert('unsigned-superseded', { ...system, releaseId: '4.0.4', sequence: 100 }, 'superseded');
@@ -46,6 +50,7 @@ test('release workbench preserves independent system and OPR identities with exa
   db.prepare('INSERT INTO distribution_activation_pointers VALUES(?,?,?,?,?,?,?,?)').bind('system', 'stable', system.releaseId, digest('s'), 1, digest('s'), digest('o'), system.createdAt).run();
   db.prepare('INSERT INTO distribution_activation_pointers VALUES(?,?,?,?,?,?,?,?)').bind('opr', 'stable', opr.releaseId, digest('o'), 1, digest('s'), digest('o'), opr.createdAt).run();
   db.prepare('INSERT INTO distribution_activation_pointers VALUES(?,?,?,?,?,?,?,?)').bind('transaction', 'stable', transaction.releaseId, digest('t'), 1, digest('s'), digest('o'), transaction.createdAt).run();
+
   try {
     const view = await distributionReleaseWorkbench(env(db), null, null);
     expect(view.engine).toBe('published');

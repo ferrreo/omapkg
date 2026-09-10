@@ -7,11 +7,17 @@ import {
 import { resolveArchiveLinkTarget, resolveCanonicalArchivePath, validateArchivePath } from './archive-safety';
 
 export const MAX_GIT_SOURCE_ENTRIES = MAX_SOURCE_ARCHIVE_ENTRIES;
+
 export const MAX_GIT_SOURCE_PATH_BYTES = MAX_SOURCE_ARCHIVE_PATH_BYTES;
+
 export const MAX_GIT_SOURCE_EXPANDED_BYTES = MAX_SOURCE_ARCHIVE_EXPANDED_BYTES;
+
 export const MAX_GIT_SYMLINK_BYTES = MAX_SOURCE_ARCHIVE_PATH_BYTES;
+
 export const MAX_GIT_ATTRIBUTES_BYTES = 1 * 1024 * 1024;
+
 export const MAX_GIT_SOURCE_INVENTORY_ENTRIES = 200;
+
 export const GIT_SOURCE_POLICY_TIMEOUT_SECONDS = 180;
 
 export type GitSourceEntryKind = 'file' | 'symlink';
@@ -37,6 +43,7 @@ export interface GitSourcePolicyOptions {
 }
 
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
 const entryKinds: readonly GitSourceEntryKind[] = ['file', 'symlink'];
 
 function workspaceRoot(value = '/workspace'): string {
@@ -44,6 +51,7 @@ function workspaceRoot(value = '/workspace'): string {
     !/^[A-Za-z0-9._+@%/-]+$/.test(value) || value.split('/').includes('..') || value.endsWith('/')) {
     throw new Error('Git source workspace root is invalid');
   }
+
   return value;
 }
 
@@ -52,6 +60,7 @@ function sandboxPath(value: string, label: string, root: string): string {
     !/^[A-Za-z0-9._+@%/-]+$/.test(value) || value.endsWith('/') || value.includes('//') || value.split('/').includes('..')) {
     throw new Error(`${label} must be an absolute workspace path`);
   }
+
   return value;
 }
 
@@ -73,59 +82,79 @@ export function validateGitSourceEntries(
 ): GitSourceTreeEntry[] {
   const maxEntries = limits.maxEntries ?? MAX_GIT_SOURCE_ENTRIES;
   const maxExpandedBytes = limits.maxExpandedBytes ?? MAX_GIT_SOURCE_EXPANDED_BYTES;
+
   if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0 || maxEntries > MAX_GIT_SOURCE_ENTRIES) throw new Error('Git source entry limit is invalid');
+
   if (!Number.isSafeInteger(maxExpandedBytes) || maxExpandedBytes <= 0 || maxExpandedBytes > MAX_GIT_SOURCE_EXPANDED_BYTES) throw new Error('Git source expansion limit is invalid');
+
   if (rawEntries.length === 0) throw new Error('Git source tree is empty');
+
   if (rawEntries.length > maxEntries) throw new Error('Git source tree contains too many entries');
 
   const entries = rawEntries.map((entry) => {
     if (!entry || !entryKinds.includes(entry.kind) || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > maxExpandedBytes) {
       throw new Error('Git source tree entry is invalid');
     }
+
     if (entry.type === 'commit' || entry.mode === '160000') throw new Error('Git source submodules are unsupported');
+
     if (entry.type !== undefined && entry.type !== 'blob') throw new Error('Git source tree entry type is unsupported');
     const path = normalizePath(entry.path);
+
     if (isGitMetadataPath(path)) throw new Error('Git source metadata paths are unsupported');
     let target: string | null = null;
+
     if (entry.kind === 'symlink') {
       target = entry.target;
       resolveArchiveLinkTarget(path, target ?? '', MAX_GIT_SYMLINK_BYTES);
     } else if (entry.target !== null && entry.target !== undefined && entry.target !== '') {
       throw new Error('Git source regular entry has a symlink target');
     }
+
     if (entry.objectId !== undefined && !SHA.test(entry.objectId)) throw new Error('Git source object ID is invalid');
+
     return { ...entry, path, target };
   });
+
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
+
   if (byPath.size !== entries.length) throw new Error('Git source tree contains duplicate entries');
   let expandedSize = 0;
+
   for (const entry of entries) {
     if (expandedSize > maxExpandedBytes - entry.size) throw new Error('Git source tree exceeds the expansion limit');
     expandedSize += entry.size;
     let parent = entry.path;
+
     while (parent.includes('/')) {
       parent = parent.slice(0, parent.lastIndexOf('/'));
+
       if (byPath.has(parent)) throw new Error('Git source tree has a non-directory parent');
     }
   }
+
   for (const entry of entries) {
     if (entry.kind === 'symlink') {
       const parent = entry.path.includes('/') ? entry.path.slice(0, entry.path.lastIndexOf('/')) : '';
       resolveCanonicalArchivePath(parent, entry.target ?? '', byPath, () => false, (entry) => entry.kind === 'symlink');
     }
   }
+
   return entries;
 }
 
 export function parseGitSourceEntries(raw: string): GitSourceTreeEntry[] {
   if (typeof raw !== 'string' || raw.length > MAX_SOURCE_ARCHIVE_MANIFEST_BYTES) throw new Error('Git source entry manifest is too large');
   const entries: GitSourceTreeEntry[] = [];
+
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const fields = line.split('\t');
+
     if ((fields.length !== 4 && fields.length !== 5) || !entryKinds.includes(fields[0] as GitSourceEntryKind) || !/^\d+$/.test(fields[2] ?? '')) {
       throw new Error('Git source entry manifest is invalid');
     }
+
     entries.push({
       kind: fields[0] as GitSourceEntryKind,
       path: fields[1] ?? '',
@@ -135,13 +164,17 @@ export function parseGitSourceEntries(raw: string): GitSourceTreeEntry[] {
       type: 'blob',
     });
   }
+
   return validateGitSourceEntries(entries);
 }
 
 function inventoryPriority(path: string): number {
   const basename = path.slice(path.lastIndexOf('/') + 1);
+
   if (/^(?:PKGBUILD|Makefile|GNUmakefile|CMakeLists\.txt|meson\.build|configure|go\.mod|Cargo\.toml|package\.json)$/i.test(basename)) return 0;
+
   if (/^(?:license|copying|notice|readme)(?:[._ -].*)?$/i.test(basename)) return 1;
+
   return path.includes('/') ? 3 : 2;
 }
 
@@ -152,6 +185,7 @@ export function gitSourceInventory(
   if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_GIT_SOURCE_INVENTORY_ENTRIES) {
     throw new Error('Git source inventory limit is invalid');
   }
+
   return validateGitSourceEntries(entries)
     .map((entry) => entry.path)
     .sort((left, right) => inventoryPriority(left) - inventoryPriority(right) || left.localeCompare(right))
@@ -164,16 +198,21 @@ export function gitSourcePolicyCommand(options: GitSourcePolicyOptions = {}): st
   const entries = sandboxPath(options.entriesPath ?? `${root}/git-source.entries`, 'Git source entries path', root);
   const metadata = sandboxPath(options.metadataPath ?? `${root}/git-source.meta`, 'Git source metadata path', root);
   const scratch = `${entries}.scratch`;
+
   if (new Set([source, entries, metadata, scratch]).size !== 4) throw new Error('Git source paths must be distinct');
   const maxEntries = options.maxEntries ?? MAX_GIT_SOURCE_ENTRIES;
   const maxExpandedBytes = options.maxExpandedBytes ?? MAX_GIT_SOURCE_EXPANDED_BYTES;
   const timeoutSeconds = options.timeoutSeconds ?? GIT_SOURCE_POLICY_TIMEOUT_SECONDS;
+
   if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0 || maxEntries > MAX_GIT_SOURCE_ENTRIES) throw new Error('Git source entry limit is invalid');
+
   if (!Number.isSafeInteger(maxExpandedBytes) || maxExpandedBytes <= 0 || maxExpandedBytes > MAX_GIT_SOURCE_EXPANDED_BYTES) throw new Error('Git source expansion limit is invalid');
+
   if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > 900) throw new Error('Git source timeout is invalid');
   const q = shellQuote;
   const entriesTmp = `${entries}.tmp`;
   const rawEntries = `${entries}.raw`;
+
   const listingScript = String.raw`
 awk -v max_entries=${maxEntries} -v max_path=${MAX_GIT_SOURCE_PATH_BYTES} -v max_expanded=${maxExpandedBytes} '
 BEGIN { RS = "\0" }
@@ -209,6 +248,7 @@ function valid_path(value) {
 END { if (entry_count == 0) fail("Git source tree is empty") }
 '
 `;
+
   return String.raw`#!/usr/bin/env bash
 set -euo pipefail
 export LC_ALL=C

@@ -14,7 +14,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -43,17 +45,20 @@ var (
 )
 
 type Config struct {
-	Origin           string `json:"origin"`
-	WorkerID         string `json:"workerId"`
-	PrivateKey       string `json:"privateKey"`
-	Image            string `json:"image,omitempty"`
-	ImageDigest      string `json:"imageDigest"`
-	RuntimeImage     string `json:"runtimeImage,omitempty"`
-	Architecture     string `json:"architecture"`
-	Runtime          string `json:"containerRuntime"`
-	StateDir         string `json:"stateDir"`
-	MaxSourceBytes   int64  `json:"maxSourceBytes,omitempty"`
-	SourceTimeoutSec int    `json:"sourceTimeoutSeconds,omitempty"`
+	Origin                    string `json:"origin"`
+	WorkerID                  string `json:"workerId"`
+	PrivateKey                string `json:"privateKey"`
+	Image                     string `json:"image,omitempty"`
+	ImageDigest               string `json:"imageDigest"`
+	RuntimeImage              string `json:"runtimeImage,omitempty"`
+	Architecture              string `json:"architecture"`
+	Runtime                   string `json:"containerRuntime"`
+	StateDir                  string `json:"stateDir"`
+	FactoryImage              bool   `json:"factoryImage,omitempty"`
+	FactoryImageBuilderPath   string `json:"factoryImageBuilderPath,omitempty"`
+	FactoryImageBuilderSHA256 string `json:"factoryImageBuilderSha256,omitempty"`
+	MaxSourceBytes            int64  `json:"maxSourceBytes,omitempty"`
+	SourceTimeoutSec          int    `json:"sourceTimeoutSeconds,omitempty"`
 }
 
 type Enrollment struct {
@@ -85,6 +90,19 @@ var supportedWorkerCapabilities = [...]string{
 	"recipe-inspection-v1",
 	"preserved-recipe-v1",
 	"abi-inventory-v1",
+	"single-build-reproducibility-v1",
+}
+
+func factoryImageSupported(cfg Config) bool {
+	if !cfg.FactoryImage || cfg.FactoryImageBuilderPath == "" || !sha256Pattern.MatchString(cfg.FactoryImageBuilderSHA256) {
+		return false
+	}
+	for _, command := range []string{"gpg", cfg.Runtime} {
+		if _, err := exec.LookPath(command); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {
@@ -97,6 +115,17 @@ func daemonMetadata(runtime string) (WorkerMetadata, error) {
 	capabilities := make([]string, len(supportedWorkerCapabilities))
 	copy(capabilities, supportedWorkerCapabilities[:])
 	return WorkerMetadata{Version: workerVersion, Runtime: runtime, Capabilities: capabilities}, nil
+}
+
+func daemonMetadataForConfig(cfg Config) (WorkerMetadata, error) {
+	metadata, err := daemonMetadata(cfg.Runtime)
+	if err != nil {
+		return metadata, err
+	}
+	if factoryImageSupported(cfg) {
+		metadata.Capabilities = append(metadata.Capabilities, "factory-image-v1")
+	}
+	return metadata, nil
 }
 
 type EnrollmentResponse struct {
@@ -144,6 +173,9 @@ type Job struct {
 	InputLock           *inputObject          `json:"inputLock,omitempty"`
 	OutputContract      *outputContract       `json:"outputContract,omitempty"`
 	Attempt             int64                 `json:"attempt,omitempty"`
+	FactoryRunID        string                `json:"factoryRunId,omitempty"`
+	FactoryAttempt      int64                 `json:"factoryAttempt,omitempty"`
+	FactoryInputSHA256  string                `json:"factoryInputSha256,omitempty"`
 	ID                  string                `json:"id"`
 	LeaseToken          string                `json:"leaseToken"`
 	LeaseExpiresAt      string                `json:"leaseExpiresAt"`
@@ -235,6 +267,10 @@ type Provenance struct {
 	BuildEnvironment   *environmentEvidence `json:"buildEnvironment,omitempty"`
 	RuntimeEnvironment *environmentEvidence `json:"runtimeEnvironment,omitempty"`
 	RuntimeAnalysis    *runtimeAnalysis     `json:"runtimeAnalysis,omitempty"`
+	Reproducibility    map[string]any       `json:"reproducibility"`
+	FactoryRunID       string               `json:"factoryRunId,omitempty"`
+	FactoryAttempt     int64                `json:"factoryAttempt,omitempty"`
+	FactoryInputSHA256 string               `json:"factoryInputSha256,omitempty"`
 }
 
 type CompleteRequest struct {
@@ -337,6 +373,19 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.SourceTimeoutSec < 0 {
 		return errors.New("sourceTimeoutSeconds cannot be negative")
+	}
+	if cfg.FactoryImage {
+		if !factoryImageSupported(cfg) {
+			return errors.New("factoryImage requires gpg, the container runtime and a pinned builder")
+		}
+		info, err := os.Stat(cfg.FactoryImageBuilderPath)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o022 != 0 {
+			return errors.New("factory image builder must be a protected regular file")
+		}
+		digest, _, err := hashFile(cfg.FactoryImageBuilderPath)
+		if err != nil || digest != cfg.FactoryImageBuilderSHA256 {
+			return errors.New("factory image builder digest does not match config")
+		}
 	}
 	return nil
 }
@@ -650,6 +699,8 @@ func provenanceFor(job Job, workerID, artifactSHA string, result BuildResult, st
 		BuildEnvironment:   result.BuildEnvironment,
 		RuntimeEnvironment: result.RuntimeEnvironment,
 		RuntimeAnalysis:    result.RuntimeAnalysis,
+		Reproducibility:    singleBuildContract(job, []ReproducibilityOutput{{Filename: filepath.Base(result.ArtifactPath), Size: reproducibilityArtifactSize(result.ArtifactPath), SHA256: artifactSHA, Path: result.ArtifactPath}}, result.Reproducibility),
+		FactoryRunID:       job.FactoryRunID, FactoryAttempt: job.FactoryAttempt, FactoryInputSHA256: job.FactoryInputSHA256,
 	}
 	b, err := encodeJSON(value)
 	if err != nil {

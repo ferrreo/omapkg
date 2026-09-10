@@ -2,6 +2,7 @@
   import MaintainerShell from '$lib/components/MaintainerShell.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import type { PageData } from './$types';
+
   export let data: PageData;
 </script>
 <svelte:head><title>Dependency admission · omapkg</title></svelte:head>

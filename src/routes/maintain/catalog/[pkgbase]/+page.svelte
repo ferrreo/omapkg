@@ -3,9 +3,13 @@
   import MaintainerShell from '$lib/components/MaintainerShell.svelte';
   import CatalogPolicyForm from '$lib/components/CatalogPolicyForm.svelte';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
+
   let busy = false;
+
   $: canReview = data.actor.role !== 'maintainer' || data.actor.areas.includes(data.manifest.ownerArea);
 </script>
 <svelte:head><title>{data.record.pkgbase} · catalog ownership · omapkg</title></svelte:head>

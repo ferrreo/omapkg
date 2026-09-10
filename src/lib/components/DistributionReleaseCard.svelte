@@ -5,6 +5,7 @@
   import { architectureLabel, releaseCompatibility, releaseDate, releaseKindLabel, releaseStatusLabel, releaseVersion, type ReleaseView } from '$lib/release-workbench';
 
   export let release: ReleaseView;
+
   export let compact = false;
 
   $: title = releaseVersion(release);

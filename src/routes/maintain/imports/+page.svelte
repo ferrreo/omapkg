@@ -8,13 +8,27 @@
   import { startVisibleRefresh } from '$lib/visible-refresh';
   import type { ImportSource } from '$lib/imports';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
-  let kind = 'arch'; let channel = 'upstream'; let oprLayout = 'omapkg'; let busy = false;
+
+  let kind = 'arch';
+
+ let channel = 'upstream';
+
+ let oprLayout = 'omapkg';
+
+ let busy = false;
+
   $: channels = kind === 'arch' ? ['upstream'] : kind === 'opr' && oprLayout === 'omapkg' ? ['stable', 'dev'] : ['stable', 'rc', 'edge'];
+
   $: if (!channels.includes(channel)) channel = channels[0];
+
   const sources = (json: string) => JSON.parse(json) as ImportSource[];
+
   const captureName = (kind: string) => ({ arch: 'Arch upstream', omarchy: 'Omarchy baseline', opr: 'Existing OPR' }[kind] ?? kind);
+
   onMount(() => startVisibleRefresh(() => data.jobs.some((job) => ['queued', 'capturing', 'uploading'].includes(job.status)), () => { void invalidateAll(); }));
 </script>
 <svelte:head><title>Repository imports · omapkg</title></svelte:head>

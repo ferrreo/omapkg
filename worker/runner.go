@@ -44,6 +44,7 @@ type BuildResult struct {
 	BuildEnvironment   *environmentEvidence
 	RuntimeEnvironment *environmentEvidence
 	RuntimeAnalysis    *runtimeAnalysis
+	Reproducibility    *singleBuildObservation
 }
 
 func (r *Runner) createJobDirectory(jobID string) (string, error) {
@@ -248,7 +249,7 @@ func (r *Runner) build(ctx context.Context, workdir, output, jobName string, sou
 	if preserved != nil {
 		buildCommand = "makepkg --holdver --noconfirm --nodeps --check --log\n"
 	}
-	args = append(args, "/bin/sh", "-ceu", "mkdir -m 700 /opr/output/.opr-tmp\ntrap 'rm -rf /opr/output/.opr-tmp' EXIT\nexport TMPDIR=/opr/output/.opr-tmp\ncp /etc/makepkg.conf /opr/output/.opr-tmp/makepkg.conf\nprintf '\\nOPTIONS=(\"${OPTIONS[@]/#debug/!debug}\")\\nPKGEXT=.pkg.tar.zst\\n' >> /opr/output/.opr-tmp/makepkg.conf\nexport MAKEPKG_CONF=/opr/output/.opr-tmp/makepkg.conf\n"+verification+buildCommand+"found=0\nfor package in /opr/output/*.pkg.tar.zst; do\n  bsdtar -tf \"$package\" | grep -qx '.BUILDINFO'\n  bsdtar -xOf \"$package\" .PKGINFO > /opr/output/.PKGINFO\n  found=1\ndone\ntest \"$found\" -eq 1")
+	args = append(args, "/bin/sh", "-ceu", "umask 022\nmkdir -m 700 /opr/output/.opr-tmp\ntrap 'rm -rf /opr/output/.opr-tmp' EXIT\nexport TMPDIR=/opr/output/.opr-tmp\ncp /etc/makepkg.conf /opr/output/.opr-tmp/makepkg.conf\nprintf '\\nOPTIONS=(\"${OPTIONS[@]/#debug/!debug}\")\\nPKGEXT=.pkg.tar.zst\\n' >> /opr/output/.opr-tmp/makepkg.conf\nexport MAKEPKG_CONF=/opr/output/.opr-tmp/makepkg.conf\n"+verification+buildCommand+"found=0\nfor package in /opr/output/*.pkg.tar.zst; do\n  bsdtar -tf \"$package\" | grep -qx '.BUILDINFO'\n  bsdtar -xOf \"$package\" .PKGINFO > /opr/output/.PKGINFO\n  found=1\ndone\ntest \"$found\" -eq 1")
 	log, err := r.runContainer(ctx, containerName(jobName, "build"), args...)
 	if err != nil {
 		return log, fmt.Errorf("offline Arch build: %w", err)
@@ -572,6 +573,12 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		return BuildResult{ArtifactPath: artifact, Log: log}, err
 	}
 	_ = os.Remove(filepath.Join(output, ".PKGINFO"))
+	if err := r.inspectPackageArchive(ctx, artifact, jobName, prepared.ref, job.SourceDateEpoch); err != nil {
+		return BuildResult{ArtifactPath: artifact, Log: log}, err
+	}
+	if unexpected := unexpectedOutputFiles(output, map[string]bool{filepath.Base(artifact): true}); len(unexpected) > 0 {
+		return BuildResult{ArtifactPath: artifact, Log: log}, fmt.Errorf("unexpected build outputs: %s", strings.Join(unexpected, ", "))
+	}
 	analysis, err := r.analyzePackage(ctx, artifact, jobName, prepared.ref, job.RuntimeExceptions)
 	if analysis != nil {
 		evidence, _ := json.Marshal(analysis)
@@ -624,10 +631,11 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: false, RuntimeAnalysis: analysis, BuildEnvironment: &buildEnvironment, RuntimeEnvironment: &runtimeEnvironment}, smokeErr
 	}
 	keepDirectory = true
-	return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: true, RuntimeAnalysis: analysis, BuildEnvironment: &buildEnvironment, RuntimeEnvironment: &runtimeEnvironment, Cleanup: func() {
-		r.cleanupJobDirectory(jobDir, imageRef)
-		_ = os.RemoveAll(jobDir)
-	}}, nil
+	return BuildResult{ArtifactPath: artifact, InstalledSize: metadata.InstalledSize, PackageMetadata: metadata, Log: log, SmokePassed: true, RuntimeAnalysis: analysis, BuildEnvironment: &buildEnvironment, RuntimeEnvironment: &runtimeEnvironment,
+		Reproducibility: &singleBuildObservation{ArchivePathsInspected: true, ArchiveMetadataInspected: true, TimestampOwnershipOrderChecked: true}, Cleanup: func() {
+			r.cleanupJobDirectory(jobDir, imageRef)
+			_ = os.RemoveAll(jobDir)
+		}}, nil
 }
 
 func uniqueStrings(values []string) []string {

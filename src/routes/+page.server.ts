@@ -16,8 +16,10 @@ function channel(value: string | null): CatalogChannel {
 async function activeSystemVersion(db: D1Database): Promise<string | null> {
   try {
     const active = await getActiveDistributionRelease(db, 'system');
+
     if (!active || active.manifest.kind !== 'system' || await releaseManifestDigest(active.manifest) !== active.candidate.manifest_sha256) return null;
     const version = active.manifest.identity.version;
+
     return version && parseSystemVersion(version) ? version : null;
   } catch {
     return null;
@@ -26,6 +28,7 @@ async function activeSystemVersion(db: D1Database): Promise<string | null> {
 
 function publicCatalogRow(row: CatalogRow) {
   const { recipe: _recipe, explanation: _explanation, source_json: _source, license: _license, upstream_url: _upstream, ...release } = row;
+
   return { ...release, description: finalDescription(row, row.name) };
 }
 
@@ -33,17 +36,27 @@ export const load: PageServerLoad = async (event) => {
   const env = environment(event);
   const search = event.url.searchParams.get('q')?.trim().slice(0, 100) ?? '';
   const selectedChannel = channel(event.url.searchParams.get('channel'));
-  const surface = event.url.searchParams.get('surface') === 'binary' || event.url.searchParams.get('surface') === 'recipe' ? event.url.searchParams.get('surface')! : '';
-  const architecture = event.url.searchParams.get('architecture') === 'x86_64' || event.url.searchParams.get('architecture') === 'aarch64' ? event.url.searchParams.get('architecture')! : '';
+  const surfaceParam = event.url.searchParams.get('surface');
+  const surface = surfaceParam === 'binary' || surfaceParam === 'recipe' ? surfaceParam : '';
+  const architectureParam = event.url.searchParams.get('architecture');
+  const architecture = architectureParam === 'x86_64' || architectureParam === 'aarch64' ? architectureParam : '';
   const cursor = decodeCatalogCursor(event.url.searchParams.get('cursor'));
   const after = cursor && (selectedChannel === 'all' || !cursor.channel || cursor.channel === selectedChannel) ? cursor : null;
+  const options: Parameters<typeof catalogPage>[1] = { channel: selectedChannel, search, limit: PAGE_SIZE + 1, after };
+
+  if (surface) options.surface = surface;
+
+  if (architecture) options.architecture = architecture;
+
   const [rows, counts, pending, systemVersion] = await Promise.all([
-    catalogPage(env.DB, { channel: selectedChannel, search, limit: PAGE_SIZE + 1, after, ...(surface ? { surface: surface as 'binary' | 'recipe' } : {}), ...(architecture ? { architecture: architecture as 'x86_64' | 'aarch64' } : {}) }),
+    catalogPage(env.DB, options),
     query<{ channel: string; count: number }>(env.DB, "SELECT channel,count(DISTINCT name) as count FROM releases WHERE channel IN ('stable','dev') GROUP BY channel"),
     query<{ count: number }>(env.DB, "SELECT count(*) as count FROM requests WHERE status NOT IN ('built','rejected','failed')"),
     activeSystemVersion(env.DB),
   ]);
+
   const packages = rows.slice(0, PAGE_SIZE).map(publicCatalogRow);
+
   return {
     packages,
     nextCursor: rows.length > PAGE_SIZE ? encodeCatalogCursor(rows[PAGE_SIZE - 1]!) : null,

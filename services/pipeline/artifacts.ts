@@ -39,8 +39,10 @@ export function vendorArtifactReadCommand(
   const root = workspaceRoot(options.workspaceRoot);
   const rootPath = sandboxPath(options.rootPath ?? `${root}/vendor-artifact/payload-root`, 'vendor payload root', root);
   const maxBytes = options.maxBytes ?? MAX_VENDOR_READ_BYTES;
+
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_VENDOR_READ_BYTES) throw new Error('vendor read limit is invalid');
   const q = shellQuote;
+
   return `#!/usr/bin/env bash
 set -eu
 root=${q(rootPath)}
@@ -64,12 +66,14 @@ function shellQuote(value: string): string {
 }
 
 function shellRecipePath(value: string, label: string): string {
-  if (typeof value !== 'string' || value.length > 512 || /[\u0000\r\n]/.test(value) || value.split('/').some((part) => part === '..')) {
+  if (value.length > 512 || value.includes('\u0000') || value.includes('\r') || value.includes('\n') || value.split('/').some((part) => part === '..')) {
     throw new Error(`${label} is unsafe`);
   }
+
   if (/^(?:\/|\.\/|\$srcdir\/|\$\{srcdir\}\/)[A-Za-z0-9._+@%=-]+(?:\/[A-Za-z0-9._+@%=-]+)*$/.test(value)) {
     return value.startsWith('$srcdir') || value.startsWith('${srcdir}') ? `"${value}"` : shellQuote(value);
   }
+
   throw new Error(`${label} is unsafe`);
 }
 
@@ -80,9 +84,12 @@ async function readBoundedVendorFile(sandbox: Sandbox, path: string): Promise<st
     `size=$(stat -c '%s' ${shellQuote(path)})`,
     `test "$size" -ge 0 -a "$size" -le ${MAX_VENDOR_MANIFEST_BYTES}`,
   ].join('\n'), { timeoutMs: 60_000 });
+
   if (guard.exitCode !== 0) throw new Error('vendor manifest exceeds the bounded read limit');
   const bytes = await sandbox.readFileBuffer(path);
+
   if (bytes.byteLength > MAX_VENDOR_MANIFEST_BYTES) throw new Error('vendor manifest exceeds the bounded read limit');
+
   return new TextDecoder().decode(bytes);
 }
 
@@ -90,15 +97,19 @@ export async function inspectVendorArtifact(sandbox: Sandbox, options: VendorArt
   const root = workspaceRoot(options.workspaceRoot);
   const manifestPath = manifestPathValue(options.manifestPath, root);
   const result = await sandbox.exec(vendorArtifactCommand(options), { timeoutMs: 15 * 60 * 1_000 });
+
   if (result.exitCode !== 0) throw new Error(`vendor artifact inspection failed: ${result.stderr.slice(0, 1_000)}`);
   const raw = await readBoundedVendorFile(sandbox, manifestPath);
   const parsed = parseVendorArtifactManifest(raw, undefined, root);
+
   if (parsed.entriesPath) parsed.entries = parseVendorArtifactManifestEntries(await readBoundedVendorFile(sandbox, parsed.entriesPath));
+
   return parsed;
 }
 
 function manifestPathValue(value: string | undefined, root = '/workspace'): string {
   const base = workspaceRoot(root);
+
   return sandboxPath(value ?? `${base}/vendor-artifact.json`, 'vendor manifest path', base);
 }
 
@@ -111,11 +122,15 @@ export function vendorArtifactCommand(options: VendorArtifactCommandOptions = {}
   const entries = sandboxPath(options.entriesPath ?? `${work}/entries.tsv`, 'vendor entries path', root);
   const maxBytes = options.maxBytes ?? MAX_VENDOR_SOURCE_BYTES;
   const maxEntries = options.maxEntries ?? MAX_VENDOR_ENTRIES;
+
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_VENDOR_SOURCE_BYTES) throw new Error('vendor source limit is invalid');
+
   if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0 || maxEntries > MAX_VENDOR_ENTRIES) throw new Error('vendor entry limit is invalid');
+
   if (options.sourceName !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._+%=-]{0,254}$/.test(options.sourceName)) throw new Error('vendor source name hint is invalid');
   const sourceName = options.sourceName ?? '';
   const q = shellQuote;
+
   return `#!/usr/bin/env bash
 set -euo pipefail
 source=${q(source)}
@@ -442,13 +457,21 @@ export function offlineVendorExtractCommand(format: VendorArtifactFormat, option
   const checksum = shellQuote(options.sha256);
   const common = `set -eu\nsource=${source}\ndestination=${destination}\nprintf '%s  %s\\n' ${checksum} "$source" | sha256sum -c -\nrm -rf "$destination"`;
   const prepared = format === 'run' ? common : `${common}\nmkdir -p "$destination"`;
+
   if (format === 'deb') return `${prepared}\ndata_member=$(ar t "$source" | awk '/^data[.]tar([.]|$)/ { print; exit }')\ntest -n "$data_member"\nar p "$source" "$data_member" | bsdtar -xmf - -C "$destination"`;
+
   if (format === 'rpm') return `${prepared}\nrpm2cpio "$source" | bsdtar -xmf - -C "$destination"`;
+
   if (format === 'appimage1') return `${prepared}\nbsdtar -xmf "$source" -C "$destination"`;
+
   if (format === 'appimage2') {
-    if (!Number.isSafeInteger(options.appimageOffset) || (options.appimageOffset as number) < 0 || (options.appimageOffset as number) > MAX_VENDOR_SOURCE_BYTES) throw new Error('AppImage filesystem offset is required');
-    return `${prepared}\nunsquashfs -no-progress -no-xattrs -offset ${options.appimageOffset} -d "$destination" "$source"`;
+    const appimageOffset = options.appimageOffset ?? -1;
+
+    if (!Number.isSafeInteger(appimageOffset) || appimageOffset < 0 || appimageOffset > MAX_VENDOR_SOURCE_BYTES) throw new Error('AppImage filesystem offset is required');
+
+    return `${prepared}\nunsquashfs -no-progress -no-xattrs -offset ${appimageOffset} -d "$destination" "$source"`;
   }
+
   return `${prepared}\nsh "$source" --extract-only --target "$destination"`;
 }
 

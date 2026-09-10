@@ -10,17 +10,20 @@ import { createHash } from 'node:crypto';
 test('pacman opr-dev database names resolve to the same signed dev snapshot as legacy opr names', async () => {
   const db = new TestD1(`CREATE TABLE repository_snapshots(architecture TEXT,channel TEXT,active INTEGER,created_at INTEGER,db_key TEXT,db_signature_key TEXT);
     INSERT INTO repository_snapshots VALUES('x86_64','dev',1,1,'dev/database','dev/signature');`);
+
   const event = (path: string) => ({
     params: { path },
     platform: { env: { DB: asD1(db), ARTIFACTS: {
       get: async (key: string) => ({ body: key, size: key.length, httpEtag: '"snapshot"' }),
     } } },
   }) as unknown as Parameters<typeof GET>[0];
+
   try {
     for (const name of ['opr-dev.db', 'opr.db', 'opr-dev.db.tar.gz']) {
       expect(await (await GET(event(`dev/x86_64/${name}`))).text()).toBe('dev/database');
       expect(await (await GET(event(`dev/x86_64/${name}.sig`))).text()).toBe('dev/signature');
     }
+
     await expect(GET(event('dev/x86_64/unlisted.db'))).rejects.toMatchObject({ status: 404 });
     await expect(GET(event('x86_64/opr-dev.db'))).rejects.toMatchObject({ status: 404 });
   } finally { db.close(); }
@@ -46,7 +49,11 @@ test('rollback parser needs no Python and rejects invalid origins and digests be
   command('python', ['echo "Python must not run" >&2; exit 97']);
   const env = { PATH: `${bin}:/usr/bin:/bin`, OPR_TEST_MANIFEST: fixture, OPR_TEST_CALLS: calls };
   const binary = { schemaVersion: 1, kind: 'opr-downgrade', artifact: { url: 'https://packages.example.org/repo/fixture-1-1-x86_64.pkg.tar.zst', sha256: sha('artifact') } };
-  const run = (manifest: unknown) => { writeFileSync(fixture, JSON.stringify(manifest)); writeFileSync(calls, ''); return spawnSync('bash', [script, 'https://packages.example.org/manifest.json'], { env, encoding: 'utf8' }); };
+
+  const run = (manifest: unknown) => { writeFileSync(fixture, JSON.stringify(manifest)); writeFileSync(calls, '');
+
+ return spawnSync('bash', [script, 'https://packages.example.org/manifest.json'], { env, encoding: 'utf8' }); };
+
   try {
     const valid = run(binary);
     expect({ status: valid.status, error: valid.stderr }).toEqual({ status: 0, error: '' });
@@ -54,6 +61,7 @@ test('rollback parser needs no Python and rejects invalid origins and digests be
     const recipe = run({ schemaVersion: 1, kind: 'opr-downgrade', recipe: { url: 'https://packages.example.org/recipe/PKGBUILD', sha256: sha('pkgname=fixture\n') } });
     expect({ status: recipe.status, error: recipe.stderr }).toEqual({ status: 0, error: '' });
     expect(readFileSync(calls, 'utf8')).toContain('recipe-built');
+
     for (const manifest of [
       { ...binary, schemaVersion: 2 }, { ...binary, artifact: { ...binary.artifact, sha256: 'wrong' } },
       { ...binary, artifact: { ...binary.artifact, url: binary.artifact.url.replace('packages.example.org', 'different.example.org') } },
@@ -69,10 +77,12 @@ test('rollback parser needs no Python and rejects invalid origins and digests be
 
 test('rollback client leaves package signature beside package for pacman trust checks', async () => {
   const db = new TestD1('CREATE TABLE repository_snapshots(architecture TEXT,channel TEXT,active INTEGER,created_at INTEGER,db_key TEXT,db_signature_key TEXT);');
+
   const event = {
     params: { path: 'rollback/client.sh' },
     platform: { env: { DB: asD1(db), ARTIFACTS: { head: async () => null, get: async () => null } } },
   } as unknown as Parameters<typeof GET>[0];
+
   try {
     const script = await (await GET(event)).text();
     expect(script).toContain('--output "$tmp/$filename.sig" "$signature_url"');

@@ -1,0 +1,8 @@
+# Private AArch64 matrix acceptance image. Build only on native ARM64 or an
+# approved AArch64 OCI runner with binfmt; never use this as a production image.
+FROM docker.io/library/omarpkg-arm-builder@sha256:e9cbff215a6022ff61f4542b9ab1325e742c89a6a3f736488b4359a373f76db8
+
+RUN pacman -Syu --noconfirm --needed \
+    cmake meson ninja rust python python-build python-installer python-setuptools npm go \
+    pnpm yarn electron43 xorg-server-xvfb \
+    && pacman -Scc --noconfirm

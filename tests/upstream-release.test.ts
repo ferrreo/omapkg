@@ -33,6 +33,7 @@ describe('upstream release tracking', () => {
 
   test('tracks only requests with a published build and preserves its ref', async () => {
     const db = new TestD1(schema);
+
     try {
       db.prepare(`INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(
         'request-pending', 'pending', 'https://example.test/pending.git', 'git', 'system', 'unknown', null, 'system', 'pending', 1, 1,
@@ -55,6 +56,7 @@ describe('upstream release tracking', () => {
 
   test('tracks one latest published request per package name', async () => {
     const db = new TestD1(schema);
+
     try {
       const upstreamUrl = 'https://example.test/project.git';
       const refA = 'a'.repeat(40);
@@ -76,12 +78,14 @@ describe('upstream release tracking', () => {
       db.prepare('INSERT INTO upstream_checks VALUES(?,?,?,?)').bind(
         'request-new', `git:${upstreamUrl}:v2.0.0:${refB}`, 5, null,
       ).run();
+
       const result = await recordUpstreamRelease(
         { DB: asD1(db) },
         { id: 'request-new', name: 'hello', upstreamUrl, sourceKind: 'git', area: 'system', declaredLicense: 'unknown', upstreamRef: refB },
         { sourceKind: 'git', version: 'v2.0.0', commit: refB, signal: `git:${upstreamUrl}:v2.0.0:${refB}` },
         '2.0.0',
       );
+
       expect(result.pendingRequestId).toBeNull();
       expect(db.prepare("SELECT count(*) AS count FROM requests WHERE name='hello'").first<{ count: number }>()?.count).toBe(2);
     } finally {
@@ -91,6 +95,7 @@ describe('upstream release tracking', () => {
 
   test('creates pending release request pinned to discovered commit', async () => {
     const db = new TestD1(schema);
+
     try {
       const upstreamUrl = 'https://example.test/project.git';
       db.prepare(`INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(
@@ -99,12 +104,14 @@ describe('upstream release tracking', () => {
       db.prepare('INSERT INTO upstream_checks VALUES(?,?,?,?)').bind(
         'request-current', `git:${upstreamUrl}:v1.0.0:${'a'.repeat(40)}`, 1, null,
       ).run();
+
       const result = await recordUpstreamRelease(
         { DB: asD1(db) },
         { id: 'request-current', name: 'hello', upstreamUrl, sourceKind: 'git', area: 'development', declaredLicense: 'unknown' },
         { sourceKind: 'git', version: 'v2.0.0', commit: 'b'.repeat(40), signal: `git:${upstreamUrl}:v2.0.0:${'b'.repeat(40)}` },
         '1.0.0',
       );
+
       expect(result.pendingRequestId).toBeString();
       expect(db.prepare('SELECT status,upstream_ref FROM requests WHERE id=?').bind(result.pendingRequestId).first<{ status: string; upstream_ref: string }>() ?? undefined)
         .toEqual({ status: 'pending', upstream_ref: 'b'.repeat(40) });
@@ -115,6 +122,7 @@ describe('upstream release tracking', () => {
 
   test('does not miss a newer release on the first scheduled observation', async () => {
     const db = new TestD1(schema);
+
     try {
       const upstreamUrl = 'https://example.test/hello/hello-1.0.tar.gz';
       db.prepare(`INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(
@@ -123,12 +131,14 @@ describe('upstream release tracking', () => {
       db.prepare('INSERT INTO revisions VALUES(?,?,?,?,?)').bind('revision-current', 'request-current', '1.0', null, 2).run();
       db.prepare('INSERT INTO builds VALUES(?,?,?)').bind('build-current', 'revision-current', 'succeeded').run();
       db.prepare('INSERT INTO releases VALUES(?,?,?)').bind('release-current', 'build-current', 'stable').run();
+
       const result = await recordUpstreamRelease(
         { DB: asD1(db) },
         { id: 'request-current', name: 'hello', upstreamUrl, sourceKind: 'archive', area: 'development', declaredLicense: 'unknown' },
         { sourceKind: 'archive', version: '2.0', commit: null, upstreamUrl: 'https://example.test/hello/hello-2.0.tar.gz', signal: 'archive:v2' },
         '1.0',
       );
+
       expect(result.pendingRequestId).toBeString();
       expect(db.prepare('SELECT upstream_url FROM requests WHERE id=?').bind(result.pendingRequestId).first<{ upstream_url: string }>()?.upstream_url)
         .toBe('https://example.test/hello/hello-2.0.tar.gz');
@@ -141,6 +151,7 @@ describe('upstream release tracking', () => {
     const db = new TestD1(`${schema}
       ALTER TABLE requests ADD COLUMN factory_run_id TEXT;
       CREATE TABLE approvals(id TEXT PRIMARY KEY,revision_id TEXT,kind TEXT);`);
+
     try {
       const upstreamUrl = 'https://example.test/project.git';
       const oldCommit = 'a'.repeat(40);
@@ -163,17 +174,22 @@ describe('upstream release tracking', () => {
         { sourceKind: 'git', version: 'v2.0.0', commit: newCommit, signal: `git:${upstreamUrl}:v2.0.0:${newCommit}` },
         '1.0.0',
       );
+
       expect(result.pendingRequestId).toBeString();
       const requestId = result.pendingRequestId;
+
       if (!requestId) throw new Error('expected detected release request');
 
       const creates: Array<{ id: string; params: { requestId: string; generationId?: string } }> = [];
+
       const factory: FactoryWorkflowBinding = {
         create: async (input) => { creates.push(input); },
         get: async () => ({ status: async () => ({ status: 'running' }) }),
       };
+
       const generationId = await dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, requestId);
       expect(generationId).toBeString();
+
       if (!generationId) throw new Error('expected workflow generation');
       expect(creates).toHaveLength(1);
       expect(creates[0]?.params.requestId).toBe(requestId);
@@ -192,6 +208,7 @@ describe('upstream release tracking', () => {
     const db = new TestD1(`${schema}
       ALTER TABLE requests ADD COLUMN factory_run_id TEXT;
       CREATE TABLE approvals(id TEXT PRIMARY KEY,revision_id TEXT,kind TEXT);`);
+
     try {
       const upstreamUrl = 'https://example.test/project.git';
       const oldCommit = 'a'.repeat(40);
@@ -224,6 +241,7 @@ describe('upstream release tracking', () => {
       }));
       const { checkUpstreams } = await import('../services/pipeline/schedule');
       const creates: Array<{ id: string; params: { requestId: string; generationId?: string } }> = [];
+
       const result = await checkUpstreams({
         DB: asD1(db),
         Sandbox: {} as DurableObjectNamespace,
@@ -232,6 +250,7 @@ describe('upstream release tracking', () => {
           get: async () => ({ status: async () => ({ status: 'running' }) }),
         },
       });
+
       expect(result.checked).toBe(1);
       expect(result.failed).toBe(0);
       expect(result.pendingRequestIds).toHaveLength(1);
@@ -248,6 +267,7 @@ describe('upstream release tracking', () => {
   test('retries a lost workflow dispatch without losing the detected release', async () => {
     const db = new TestD1(`${schema}
       ALTER TABLE requests ADD COLUMN factory_run_id TEXT;`);
+
     try {
       const upstreamUrl = 'https://example.test/project.git';
       const oldCommit = 'a'.repeat(40);
@@ -263,23 +283,28 @@ describe('upstream release tracking', () => {
       db.prepare('INSERT INTO upstream_checks VALUES(?,?,?,?)').bind(
         'request-current', `git:${upstreamUrl}:v1.0.0:${oldCommit}`, 2, null,
       ).run();
+
       const detected = await recordUpstreamRelease(
         { DB: asD1(db) },
         { id: 'request-current', name: 'hello', upstreamUrl, sourceKind: 'git', area: 'development', declaredLicense: 'unknown' },
         { sourceKind: 'git', version: 'v2.0.0', commit: newCommit, signal: `git:${upstreamUrl}:v2.0.0:${newCommit}` },
         '1.0.0',
       );
+
       const requestId = detected.pendingRequestId!;
       let attempt = 0;
       const generationIds: string[] = [];
+
       const factory: FactoryWorkflowBinding = {
         create: async ({ id: workflowId }) => {
           attempt += 1;
           generationIds.push(workflowId);
+
           if (attempt === 1) throw new Error('connection lost after create');
         },
         get: async () => { throw new Error('workflow lookup unavailable'); },
       };
+
       await expect(dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, requestId)).rejects.toThrow('factory workflow could not be queued');
       expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(requestId).first<{ status: string }>()?.status).toBe('failed');
       const second = await dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, requestId);
@@ -296,6 +321,7 @@ describe('upstream release tracking', () => {
   test('stops automatic generations after three failed attempts', async () => {
     const db = new TestD1(`${schema}
       ALTER TABLE requests ADD COLUMN factory_run_id TEXT;`);
+
     try {
       const upstreamUrl = 'https://example.test/project.git';
       const oldCommit = 'a'.repeat(40);
@@ -311,15 +337,19 @@ describe('upstream release tracking', () => {
       db.prepare('INSERT INTO upstream_checks VALUES(?,?,?,?)').bind(
         'request-current', `git:${upstreamUrl}:v1.0.0:${oldCommit}`, 2, null,
       ).run();
+
       const detected = await recordUpstreamRelease(
         { DB: asD1(db) },
         { id: 'request-current', name: 'hello', upstreamUrl, sourceKind: 'git', area: 'development', declaredLicense: 'unknown' },
         { sourceKind: 'git', version: 'v2.0.0', commit: newCommit, signal: `git:${upstreamUrl}:v2.0.0:${newCommit}` },
         '1.0.0',
       );
+
       const requestId = detected.pendingRequestId;
+
       if (!requestId) throw new Error('expected detected release request');
       const generationIds: string[] = [];
+
       const factory: FactoryWorkflowBinding = {
         create: async ({ id: workflowId }) => {
           generationIds.push(workflowId);
@@ -327,9 +357,11 @@ describe('upstream release tracking', () => {
         },
         get: async () => { throw new Error('workflow lookup unavailable'); },
       };
+
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await expect(dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, requestId)).rejects.toThrow('factory workflow could not be queued');
       }
+
       expect(generationIds).toHaveLength(3);
       expect(await dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, requestId)).toBeNull();
       expect(await dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, requestId)).toBeNull();
@@ -344,8 +376,11 @@ describe('upstream release tracking', () => {
         { sourceKind: 'git', version: 'v3.0.0', commit: 'c'.repeat(40), signal: `git:${upstreamUrl}:v3.0.0:${'c'.repeat(40)}` },
         '1.0.0',
       );
+
       expect(nextDetected.pendingRequestId).not.toBe(requestId);
+
       if (!nextDetected.pendingRequestId) throw new Error('expected a new detected release request');
+
       const nextGeneration = await dispatchUpstreamFactory({
         DB: asD1(db),
         FACTORY: {
@@ -353,6 +388,7 @@ describe('upstream release tracking', () => {
           get: async () => ({ status: async () => ({ status: 'running' }) }),
         },
       }, nextDetected.pendingRequestId);
+
       expect(nextGeneration).toBeString();
     } finally {
       db.close();
@@ -362,6 +398,7 @@ describe('upstream release tracking', () => {
   test('reuses a live workflow identity after a lost create response', async () => {
     const db = new TestD1(`${schema}
       ALTER TABLE requests ADD COLUMN factory_run_id TEXT;`);
+
     try {
       db.prepare(`INSERT INTO requests(
         id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at,factory_run_id
@@ -369,10 +406,12 @@ describe('upstream release tracking', () => {
         'request-auto', 'hello', 'https://example.test/project.git', 'git', 'development', 'unknown', 'system:upstream-check', 1, 1, 'generation-existing',
       ).run();
       const workflowIds: string[] = [];
+
       const factory: FactoryWorkflowBinding = {
         create: async ({ id: workflowId }) => { workflowIds.push(workflowId); throw new Error('response lost'); },
         get: async () => ({ status: async () => ({ status: 'running' }) }),
       };
+
       const first = await dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, 'request-auto');
       const second = await dispatchUpstreamFactory({ DB: asD1(db), FACTORY: factory }, 'request-auto');
       expect(first).toBe('generation-existing');
@@ -387,6 +426,7 @@ describe('upstream release tracking', () => {
   test('does not dispatch an initial user request', async () => {
     const db = new TestD1(`${schema}
       ALTER TABLE requests ADD COLUMN factory_run_id TEXT;`);
+
     try {
       db.prepare(`INSERT INTO requests(
         id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at,factory_run_id
@@ -394,6 +434,7 @@ describe('upstream release tracking', () => {
         'request-user', 'hello', 'https://example.test/project.git', 'git', 'development', 'unknown', 'github:1', 1, 1,
       ).run();
       let created = false;
+
       const result = await dispatchUpstreamFactory({
         DB: asD1(db),
         FACTORY: {
@@ -401,6 +442,7 @@ describe('upstream release tracking', () => {
           get: async () => ({ status: async () => ({ status: 'running' }) }),
         },
       }, 'request-user');
+
       expect(result).toBeNull();
       expect(created).toBe(false);
       expect(db.prepare('SELECT status FROM requests WHERE id=?').bind('request-user').first<{ status: string }>()?.status).toBe('pending');
@@ -424,6 +466,7 @@ describe('upstream release tracking', () => {
     let rangeCancelled = false;
     globalThis.fetch = (async (_input, init) => {
       calls.push(init ?? {});
+
       return calls.length === 1
         ? new Response(null, { status: 403 })
         : new Response(new ReadableStream({
@@ -431,11 +474,13 @@ describe('upstream release tracking', () => {
           cancel() { rangeCancelled = true; },
         }), { status: 206, headers: { etag: '"release-2"', 'content-length': '1', 'content-range': 'bytes 0-0/4242' } });
     }) as typeof globalThis.fetch;
+
     try {
       const result = await inspectArchiveRelease({
         id: 'request-archive', name: 'archive', upstreamUrl: 'https://example.test/archive-v2.0.0.tar.gz',
         sourceKind: 'archive', area: 'development', declaredLicense: 'unknown',
       });
+
       expect(result.version).toBe('2.0.0');
       const fallback = calls.find((call) => new Headers(call.headers).get('Range') === 'bytes=0-0');
       expect(fallback).toBeDefined();
@@ -456,9 +501,11 @@ describe('upstream release tracking', () => {
       hadAbortSignal = init.signal instanceof AbortSignal;
       throw new DOMException('upstream timed out', 'AbortError');
     }) as typeof globalThis.fetch;
+
     const sandbox = {
       exec: async (command: string) => {
         commands.push(command);
+
         if (commands.length === 1) {
           return {
             exitCode: 0,
@@ -466,14 +513,17 @@ describe('upstream release tracking', () => {
             stderr: '',
           };
         }
+
         throw new Error('unexpected metadata command');
       },
     } as unknown as Sandbox;
+
     try {
       const result = await inspectArchiveRelease({
         id: 'request-archive-timeout', name: 'archive', upstreamUrl: 'https://example.test/archive-v2.0.0.tar.gz',
         sourceKind: 'archive', area: 'development', declaredLicense: 'unknown',
       }, sandbox, async (host) => { allowed.push(host); });
+
       expect(result.version).toBe('2.0.0');
       expect(result.upstreamUrl).toBe('https://example.test/archive-v2.0.0.tar.gz');
       expect(result.signal).toContain('etag="sandbox-release"');
@@ -497,6 +547,7 @@ describe('upstream release tracking', () => {
       if (!init?.method) return new Response(null, { status: 404 });
       throw new DOMException('upstream timed out', 'AbortError');
     }) as typeof globalThis.fetch;
+
     const sandbox = {
       exec: async () => ({
         exitCode: 0,
@@ -504,6 +555,7 @@ describe('upstream release tracking', () => {
         stderr: '',
       }),
     } as unknown as Sandbox;
+
     try {
       await expect(inspectArchiveRelease({
         id: 'request-archive-redirect', name: 'archive', upstreamUrl: 'https://example.test/archive-v2.0.0.tar.gz',
@@ -521,16 +573,20 @@ describe('upstream release tracking', () => {
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
       calls.push({ url, init: init ?? {} });
+
       if (calls.length === 1) {
         return new Response('<a href="hello-2.12.tar.gz">old</a><a href="hello-2.13.tar.gz">new</a><a href="hello-v2.14.tar.gz">newest</a><a href="other-9.0.tar.gz">other</a><a href="https://other.test/hello-99.0.tar.gz">external</a><a href="https://user:pass@example.test/gnu/hello/hello-100.0.tar.gz">credentialed</a>', { status: 200 });
       }
+
       return new Response(null, { status: 200, headers: { etag: '"release-3"', 'content-length': '1' } });
     }) as typeof globalThis.fetch;
+
     try {
       const result = await inspectArchiveRelease({
         id: 'request-archive', name: 'hello', upstreamUrl: 'https://example.test/gnu/hello/hello-2.12.tar.gz',
         sourceKind: 'archive', area: 'development', declaredLicense: 'unknown',
       });
+
       expect(result.version).toBe('2.14');
       expect(result.upstreamUrl).toBe('https://example.test/gnu/hello/hello-v2.14.tar.gz');
       expect(calls[0]?.url).toBe('https://example.test/gnu/hello/');

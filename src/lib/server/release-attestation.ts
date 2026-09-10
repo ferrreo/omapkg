@@ -24,7 +24,9 @@ export interface ReleaseAttestationInput {
 
 function base64(text: string): string {
   let binary = '';
+
   for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+
   return btoa(binary);
 }
 
@@ -33,11 +35,29 @@ function base64(text: string): string {
 export async function releaseAttestation(input: ReleaseAttestationInput): Promise<string> {
   const provenance = JSON.parse(input.provenance);
   const outputs = provenance.schemaVersion === 2 ? await assertOutputEvidence(provenance, reviewedRuntimeExceptions(input.sbom)) : null;
+
   if (outputs && input.surface !== 'binary') throw new Error('V2 output attestation requires a binary build');
   const publishedRecipeSha256 = await sha256(input.recipe);
+
   if (input.surface === 'binary' && !outputs && (!input.artifactFilename || !input.artifactSha256)) {
     throw new Error('Binary attestation requires an artifact subject');
   }
+
+  const externalParameters = { revisionId: input.revisionId };
+
+  if (outputs) Object.assign(externalParameters, { attempt: outputs.attempt, outputContract: outputs.outputContract, inputPolicy: outputs.frozenInputs?.manifest.purpose ?? 'shadow' });
+
+  if (outputs?.preservedRecipe) Object.assign(externalParameters, { preservedRecipe: outputs.preservedRecipe });
+
+  Object.assign(externalParameters, {
+    surface: input.surface,
+    manifestSha256: input.manifestSha256,
+    recipeSha256: input.recipeSha256,
+    publishedRecipeSha256,
+    runtimeExceptions: reviewedRuntimeExceptions(input.sbom),
+    recipePolicy: readOprEvidence(JSON.parse(input.sbom))?.recipePolicy ?? { mode: 'custom-shell', recorded: false },
+  });
+
   return JSON.stringify({
     _type: 'https://in-toto.io/Statement/v1',
     subject: outputs ? [...outputs.outputs].sort((a, b) => a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0).map((output) => ({ name: output.filename, digest: { sha256: output.artifactSha256 } })) : [{
@@ -48,17 +68,7 @@ export async function releaseAttestation(input: ReleaseAttestationInput): Promis
     predicate: {
       buildDefinition: {
         buildType: outputs ? OUTPUT_BUILD_TYPE : RELEASE_BUILD_TYPE,
-        externalParameters: {
-          revisionId: input.revisionId,
-          ...(outputs ? { attempt: outputs.attempt, outputContract: outputs.outputContract, inputPolicy: outputs.frozenInputs?.manifest.purpose ?? 'shadow' } : {}),
-          ...(outputs?.preservedRecipe ? { preservedRecipe: outputs.preservedRecipe } : {}),
-          surface: input.surface,
-          manifestSha256: input.manifestSha256,
-          recipeSha256: input.recipeSha256,
-          publishedRecipeSha256,
-          runtimeExceptions: reviewedRuntimeExceptions(input.sbom),
-          recipePolicy: readOprEvidence(JSON.parse(input.sbom))?.recipePolicy ?? { mode: 'custom-shell', recorded: false },
-        },
+        externalParameters,
         resolvedDependencies: outputs ? outputResolvedDependencies(outputs) : [
           ...provenance.sources.map((source: { name: string; url: string; sha256: string }) => ({
             name: source.name, uri: source.url, digest: { sha256: source.sha256 },

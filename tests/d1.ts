@@ -9,6 +9,7 @@ class Prepared {
 
   run(): { success: true; meta: { changes: number; last_row_id: number } } {
     const result = this.database.query(this.sql).run(...(this.values as any[]));
+
     return { success: true, meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } };
   }
 
@@ -26,6 +27,7 @@ export class TestD1 {
 
   constructor(schema?: string) {
     this.database = new Database(':memory:');
+
     if (schema) this.database.exec(schema);
   }
 
@@ -39,6 +41,7 @@ export class TestD1 {
 
   batch(statements: Prepared[]): unknown[] {
     const execute = this.database.transaction(() => statements.map((statement) => statement.run()));
+
     return execute();
   }
 

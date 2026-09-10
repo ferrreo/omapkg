@@ -9,12 +9,18 @@
   export let data: PageData;
 
   type LabelledRequest = PackageRequest & Record<string, unknown>;
+
   $: requests = (Array.isArray(data?.requests) ? data.requests : []) as LabelledRequest[];
+
   let query = '';
+
   let status = '';
+
   let area = '';
+
   $: filtered = requests.filter((request) => {
     const text = `${request.name} ${request.id} ${request.upstream_url} ${requesterLabel(request)}`.toLowerCase();
+
     return (!query || text.includes(query.toLowerCase())) && (!status || request.status === status) && (!area || request.area === area);
   });
   $: actorNames = ((data as unknown as { actorNames?: Record<string, string> })?.actorNames || {}) as Record<string, string>;
@@ -26,12 +32,18 @@
 
   function requesterLabel(request: LabelledRequest) {
     const record = request as Record<string, unknown>;
+
     const display = ['requested_by_name', 'requested_by_login', 'requester_name', 'requester_login']
       .map((key) => record[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+
     if (display) return display;
+
     if (actorNames[request.requested_by]) return actorNames[request.requested_by];
+
     if (request.requested_by.startsWith('github:')) return 'GitHub user';
+
     if (request.requested_by.startsWith('user:')) return 'Signed-in user';
+
     return request.requested_by;
   }
 </script>

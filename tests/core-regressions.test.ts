@@ -33,18 +33,24 @@ const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] }
 
 test('revision persistence rolls back when generation changes between read and write', async () => {
   const db = new TestD1(readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n'));
+
   try {
     db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at,factory_run_id)
       VALUES('request-1','hello','https://example.org/hello.tar.gz','archive','system','MIT','github:1','generating',1,1,'old-generation')`).run();
+
     const draft: FactoryRevisionDraft = { revision: revision(), manifest: { requestId: 'request-1', packageName: 'hello', version: '1.0.0',
       sourceKind: 'archive', sources: [], dependencies: [], makeDependencies: [], smokeCommands: ['hello --version'], architectures: ['x86_64'],
       buildImages: {}, pkgrel: 1, sourceDateEpoch: 1700000000, imageDigest: revision().image_digest, license: 'MIT', surface: 'binary', description: 'Hello', publicRecipeSha256: null },
       lint: { passed: true, checks: [], repairAttempts: 0 } };
+
     const database = asD1(db);
+
     const raced = { ...env(db), DB: { prepare: database.prepare.bind(database), async batch(statements: D1PreparedStatement[]) {
       db.prepare("UPDATE requests SET factory_run_id='new-generation' WHERE id='request-1'").run();
+
       return database.batch(statements);
     } } as D1Database };
+
     await expect(persistFactoryRevision(raced, draft, 'factory', 'old-generation')).rejects.toThrow('CHECK constraint');
     expect(db.prepare('SELECT COUNT(*) AS n FROM revisions').first<{ n: number }>()).toEqual({ n: 0 });
     expect(db.prepare('SELECT status,factory_run_id FROM requests').first<{ status: string; factory_run_id: string }>()).toEqual({ status: 'generating', factory_run_id: 'new-generation' });
@@ -65,6 +71,7 @@ function revision(overrides: Partial<Revision> = {}): Revision {
 describe('core security regressions', () => {
   test('a failed factory run can restart without a revision and records the reason', async () => {
     const db = new TestD1(requestSchema + 'ALTER TABLE requests ADD COLUMN factory_run_id TEXT;');
+
     try {
       const service = env(db);
       service.PIPELINE = { fetch: async () => new Response('{}') } as unknown as Fetcher;
@@ -105,6 +112,7 @@ describe('core security regressions', () => {
 
   test('source URLs reject credential query parameters while allowing ordinary queries', () => {
     expect(publicSourceURL('https://example.com/source.tar.gz?download=1')).toContain('download=1');
+
     for (const parameter of ['token', 'api_key', 'client_secret', 'private_key', 'password', 'signature', 'x-amz-credential']) {
       expect(() => publicSourceURL(`https://example.com/source.tar.gz?${parameter}=secret`)).toThrow();
     }
@@ -132,6 +140,7 @@ describe('core security regressions', () => {
         aarch64: `ghcr.io/opr/builder-aarch64@sha256:${'d'.repeat(64)}`,
       }),
     });
+
     multi.manifest_sha256 = await manifestDigest(multi);
     await validateRevision(multi);
     expect(revisionImage(multi, 'aarch64')).toContain('builder-aarch64');
@@ -145,6 +154,7 @@ describe('core security regressions', () => {
 
   test('factory revisions emit a standard SPDX document with runtime and build dependencies', async () => {
     const image = `ghcr.io/opr/builder@sha256:${'b'.repeat(64)}`;
+
     const draft = await createFactoryRevision({
       request: { id: 'request-spdx', name: 'hello', upstreamUrl: 'https://example.org/hello.tar.gz', sourceKind: 'archive', area: 'system', declaredLicense: 'unknown' },
       version: '2.12', sources: [{ name: 'hello.tar.gz', url: 'https://example.org/hello.tar.gz', sha256: 'a'.repeat(64) }],
@@ -153,6 +163,7 @@ describe('core security regressions', () => {
       imageDigest: image, license: 'GPL-3.0-or-later', surface: 'binary', buildCommands: ['make'],
       packageCommands: ['install -Dm755 hello "$pkgdir/usr/bin/hello"'], description: 'GNU Hello prints a friendly greeting.', explanation: 'test',
     });
+
     const sbom = JSON.parse(draft.revision.sbom_json) as Record<string, any>;
     expect(sbom).toMatchObject({ spdxVersion: 'SPDX-2.3', dataLicense: 'CC0-1.0', SPDXID: 'SPDXRef-DOCUMENT' });
     expect(sbom.documentDescribes).toEqual(['SPDXRef-Package-1']);
@@ -179,6 +190,7 @@ describe('core security regressions', () => {
   test('vendor SPDX evidence stays in a standard comment with valid npm checksum and reference', async () => {
     const image = `ghcr.io/opr/builder@sha256:${'b'.repeat(64)}`;
     const integrity = `sha512-${btoa(String.fromCharCode(...new Uint8Array(64).fill(7)))}`;
+
     const draft = await createFactoryRevision({
       request: { id: 'request-vendor-spdx', name: 'vendor', upstreamUrl: 'https://example.org/vendor.tar.gz', sourceKind: 'archive', area: 'system', declaredLicense: 'unknown' },
       version: '1.0.0', sources: [{ name: 'vendor.tar.gz', url: 'https://example.org/vendor.tar.gz', sha256: 'a'.repeat(64) }],
@@ -191,6 +203,7 @@ describe('core security regressions', () => {
         vendorBundle: { kind: 'npm', source: { name: 'opr-vendor-npm.tar', url: 'https://omapkg.example/sources/a.tar', sha256: 'c'.repeat(64) }, components: [{ name: 'left-pad', version: '1.3.0', source: 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz', integrity, license: 'SEE LICENSE IN LICENSE' }] },
       },
     });
+
     const sbom = JSON.parse(draft.revision.sbom_json) as Record<string, any>;
     const component = sbom.packages.at(-1);
     expect(sbom).not.toHaveProperty('oprEvidence');
@@ -226,6 +239,7 @@ describe('core security regressions', () => {
       INSERT INTO requests VALUES('a','demo'),('b','demo'),('c','other');
       INSERT INTO revisions VALUES('a','1.0',5),('b','1.0',2),('c','1.0',99),('a','2.0',7);
     `);
+
     try {
       const database = asD1(db);
       expect(await nextPackageRelease({ DB: database }, 'demo', '1.0')).toBe(6);
@@ -239,6 +253,7 @@ describe('core security regressions', () => {
 
   test('request quota is enforced inside the write batch', async () => {
     const db = new TestD1(requestSchema);
+
     try {
       const service = env(db);
       await Promise.all(Array.from({ length: 20 }, (_, index) => submitRequest(service, actor, {
@@ -253,6 +268,7 @@ describe('core security regressions', () => {
 
   test('Better Auth account issuer and approval revocation columns are migrated', () => {
     const migration = readFileSync(new URL('../migrations/0007_core_guards.sql', import.meta.url), 'utf8');
+
     const db = new TestD1(`
       CREATE TABLE account(id TEXT PRIMARY KEY,accountId TEXT NOT NULL,providerId TEXT NOT NULL,userId TEXT NOT NULL,
         accessToken TEXT,refreshToken TEXT,idToken TEXT,accessTokenExpiresAt INTEGER,refreshTokenExpiresAt INTEGER,scope TEXT,password TEXT,createdAt INTEGER NOT NULL,updatedAt INTEGER NOT NULL,
@@ -262,6 +278,7 @@ describe('core security regressions', () => {
         UNIQUE(revision_id,kind));
       ${migration}
     `);
+
     try {
       expect(db.prepare('SELECT issuer FROM account WHERE accountId=?').bind('test-github-id').first<{ issuer: string }>()?.issuer).toBe('local:oauth:github');
       const columns = db.prepare('PRAGMA table_info(approvals)').all<{ name: string }>().results.map((column) => column.name);
@@ -272,11 +289,8 @@ describe('core security regressions', () => {
   });
 
   test('queued finalization can resume only when no worker job exists', async () => {
-    const schema = readFileSync(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0005_factory_run_id.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0007_core_guards.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0011_build_images.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0022_public_recipes.sql', import.meta.url), 'utf8');
+    const schema = readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n');
+
     const db = new TestD1(schema);
     const item = revision({ id: 'generation-1', request_id: 'request-1', recipe_sha256: await sha256('pkgname=hello\n') });
     item.manifest_sha256 = await manifestDigest(item);
@@ -297,8 +311,10 @@ describe('core security regressions', () => {
     const previousFetch = globalThis.fetch;
     globalThis.fetch = (async (input) => {
       if (String(input).endsWith('/pulls/1')) return Response.json({ head: { sha: item.commit_sha }, merged: true });
+
       return new Response('unexpected request', { status: 500 });
     }) as typeof globalThis.fetch;
+
     try {
       await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'x'.repeat(2_001)))
         .rejects.toMatchObject({ status: 400 });

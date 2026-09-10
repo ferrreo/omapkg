@@ -2,10 +2,16 @@
   import { enhance } from '$app/forms';
   import MaintainerShell from '$lib/components/MaintainerShell.svelte';
   import type { PageData, ActionData } from './$types';
-  export let data: PageData; export let form: ActionData;
+
+  export let data: PageData;
+
+ export let form: ActionData;
+
   $: currentReviews = data.reviews.filter((review) => !review.revoked_at);
   $: canSecurity = data.role === 'security' || data.role === 'admin';
+
   const object = (digest: string, filename?: string) => `/api/maintain/inputs/objects/${digest}${filename ? `?filename=${encodeURIComponent(filename)}` : ""}`;
+
   const page = (offset: number) => `?search=${encodeURIComponent(data.search)}&offset=${offset}`;
 </script>
 <svelte:head><title>{data.recipe?.name} input lock · omapkg</title></svelte:head>

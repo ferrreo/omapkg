@@ -20,16 +20,22 @@ type DetailRow = Release & {
 export const GET: RequestHandler = async ({ platform, params, url }) => {
   if (!platform?.env?.DB) return json({ error: 'Catalog is unavailable.' }, { status: 503 });
   const name = params.name ?? '';
+
   if (!/^[a-z0-9][a-z0-9@._+:-]{0,63}$/.test(name)) error(404, 'Package not found.');
   const dev = url.searchParams.get('channel') === 'dev';
+
   const rows = await query<DetailRow>(platform.env.DB, `SELECT r.*, b.artifact_filename, b.artifact_sha256, b.artifact_size,
     v.sources_json AS source_json, v.dependencies_json, v.smoke_commands_json, v.license, v.description, v.recipe, v.explanation, q.upstream_url
     FROM releases r JOIN builds b ON b.id=r.build_id JOIN revisions v ON v.id=b.revision_id JOIN requests q ON q.id=v.request_id
     WHERE r.name=? AND r.channel ${dev ? '= \'dev\'' : "IN ('stable','withdrawn')"} ORDER BY r.published_at DESC, r.id DESC`, name);
+
   if (!rows.length) error(404, 'Package not found.');
+
   const versions = rows.map((row) => {
     const release = catalogRelease(row, url.origin, dev);
+
     if (!release) return null;
+
     return {
       ...release,
       dependencies: stringList(row.dependencies_json),
@@ -37,5 +43,6 @@ export const GET: RequestHandler = async ({ platform, params, url }) => {
       explanation: row.explanation,
     };
   }).filter(Boolean);
+
   return json({ name, versions }, { headers: { 'Cache-Control': dev ? 'public, max-age=30, s-maxage=60' : 'public, max-age=60, s-maxage=300, stale-while-revalidate=60' } });
 };

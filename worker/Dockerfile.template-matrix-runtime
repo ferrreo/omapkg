@@ -1,0 +1,7 @@
+# Private runtime image for template acceptance. No compiler, package manager
+# adapters, or build tools are installed here; only reviewed runtime closure.
+FROM docker.io/library/archlinux@sha256:694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34
+
+RUN pacman -Syu --noconfirm --needed \
+    bash glibc gcc-libs python nodejs electron43 xorg-server-xvfb \
+    && pacman -Scc --noconfirm

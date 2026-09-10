@@ -12,34 +12,48 @@ import type { Actions, PageServerLoad } from './$types';
 
 function candidateInput(form: FormData): DistributionCandidateInput {
   const raw = field(form, 'candidate_json');
+
   if (raw.length > 4 * 1024 * 1024) throw new PolicyError(413, 'Candidate JSON is too large.');
   let value: unknown;
+
   try { value = JSON.parse(raw); } catch { throw new PolicyError(400, 'Candidate JSON is invalid.'); }
+
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new PolicyError(400, 'Candidate JSON must be an object.');
   const candidate = { ...(value as Record<string, unknown>) };
   const preparedRaw = field(form, 'prepared_json');
+
   if (preparedRaw) {
     if (preparedRaw.length > 8 * 1024 * 1024) throw new PolicyError(413, 'Prepared repository output is too large.');
     let prepared: unknown;
+
     try { prepared = JSON.parse(preparedRaw); } catch { throw new PolicyError(400, 'Prepared repository output is invalid.'); }
+
     if (!prepared || typeof prepared !== 'object' || Array.isArray(prepared)) throw new PolicyError(400, 'Prepared repository output is invalid.');
     const output = prepared as { preparation?: Record<string, unknown>; repositories?: unknown };
     const preparation = output.preparation ?? (prepared as Record<string, unknown>);
+
     if (!candidate.repositories && Array.isArray(output.repositories)) candidate.repositories = output.repositories;
+
     if (!candidate.packageChunks && Array.isArray(preparation.packageChunks)) candidate.packageChunks = preparation.packageChunks;
+
     if (candidate.packageCount === undefined && typeof preparation.packageCount === 'number') candidate.packageCount = preparation.packageCount;
+
     if (!candidate.architectures && Array.isArray(output.repositories)) {
       candidate.architectures = [...new Set(output.repositories.flatMap((item) => item && typeof item === 'object' && 'architecture' in item ? [(item as { architecture?: unknown }).architecture] : []))];
     }
   }
+
   if (!Array.isArray(candidate.repositories) || !Array.isArray(candidate.packageChunks) || typeof candidate.packageCount !== 'number') {
     throw new PolicyError(400, 'Candidate JSON must include repositories, package chunks, and package count, or a prepared repository output.');
   }
+
   return candidate as unknown as DistributionCandidateInput;
 }
+
 export const load: PageServerLoad = async (event) => {
   const actor = maintainer(event);
   const { DB } = environment(event);
+
   const [releases, builds, crashQuarantines, cohorts, releaseTeam, distributionCandidates] = await Promise.all([
     query<Release>(DB, 'SELECT * FROM releases ORDER BY published_at DESC LIMIT 200'),
     query<Build & { cohort_id: string | null }>(DB, `SELECT b.*,c.cohort_id FROM builds b
@@ -57,6 +71,7 @@ export const load: PageServerLoad = async (event) => {
       : Promise.resolve(false),
     listDistributionReleaseCandidates(environment(event)),
   ]);
+
   return {
     releases, builds, crashQuarantines,
     releaseTeam,
@@ -64,30 +79,37 @@ export const load: PageServerLoad = async (event) => {
     candidates: cohorts.map((cohort) => {
       let systemVersion: string | null = null;
       let compatibleSystems: string[] = [];
+
       try {
         const manifest = JSON.parse(cohort.manifest_json) as { systemVersion?: unknown; compatibleSystems?: unknown };
         systemVersion = typeof manifest.systemVersion === 'string' ? manifest.systemVersion : null;
         compatibleSystems = Array.isArray(manifest.compatibleSystems) ? manifest.compatibleSystems.filter((value): value is string => typeof value === 'string') : [];
       } catch { /* A malformed immutable manifest remains visible as missing evidence. */ }
+
       return { ...cohort, systemVersion, compatibleSystems };
     }),
   };
 };
+
 export const actions: Actions = {
   prepareRepositories: (event) => formAction(event, async (form) => {
     const lane = field(form, 'lane');
+
     if (lane !== 'system' && lane !== 'opr') throw new PolicyError(400, 'Choose a repository lane.');
     humanMaintainer(event.locals.actor, lane === 'system' ? 'system' : undefined);
+
     const preparation = await prepareOwnedRepositorySnapshots(environment(event), {
       lane,
       releaseId: field(form, 'release_id'),
       cohortIds: field(form, 'cohort_ids').split(',').map((value) => value.trim()).filter(Boolean),
       trustedParentReleaseId: field(form, 'trusted_parent_release_id') || null,
     });
+
     return { preparation, repositories: ownedRepositoryReleaseRepositories(preparation) };
   }),
   prepareCandidate: (event) => formAction(event, async (form) => {
     const result = await prepareDistributionRelease(environment(event), event.locals.actor, candidateInput(form));
+
     return { candidateId: result.candidate.id, manifestSha256: result.candidate.manifest_sha256 };
   }),
   retryQuarantine: (event) => formAction(event, async (form) => {

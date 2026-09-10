@@ -4,6 +4,7 @@ import { assertRuntimeEvidence } from '../src/lib/server/runtime-evidence';
 import { runtimeEvidence } from './runtime-fixtures';
 
 const digest = `sha256:${'a'.repeat(64)}`;
+
 test('runtime evidence requires distinct exact environments and cannot waive errors or alter findings', async () => {
   const valid = runtimeEvidence(digest);
   await assertRuntimeEvidence(valid, digest, []);

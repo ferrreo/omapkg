@@ -38,34 +38,43 @@ export async function checkUpstreams(env: ScheduleEnv, limit = MAX_REQUESTS): Pr
   const rows = await trackedUpstreamRequests(env, limit);
   let failed = 0;
   const pendingRequestIds: string[] = [];
+
   for (const row of rows) {
     const request = requestFromRow(row);
+
     try {
       let sandbox: FlueSandbox | undefined;
       let allowHost: SourceHostAuthorizer | undefined;
       let createSandbox: (() => Promise<{ sandbox: FlueSandbox; allowHost: SourceHostAuthorizer }>) | undefined;
+
       if (request.sourceKind === 'git' || request.sourceKind === 'archive') {
         if (!env.Sandbox) {
           if (request.sourceKind === 'git') throw new Error('upstream Git checks require Sandbox binding');
         } else {
           const allowedHosts = new Set([new URL(request.upstreamUrl).hostname]);
+
           const stub = getSandbox(env.Sandbox as DurableObjectNamespace<CloudflareSandbox>, `release-check-${request.id}`, {
             sleepAfter: '15m',
             labels: { requestId: request.id, phase: 'upstream-release-check' },
           });
+
           const create = async () => {
             await stub.setAllowedHosts([...allowedHosts]);
+
             const authorize: SourceHostAuthorizer = async (hostname) => {
               const host = normalizeRedirectSourceUrl(`https://${hostname}/`).hostname;
+
               if (allowedHosts.has(host)) return;
               allowedHosts.add(host);
               await stub.setAllowedHosts([...allowedHosts]);
             };
+
             return {
               sandbox: await cloudflareSandbox(stub, { cwd: '/workspace' }).createSandbox({ id: `release-check-${request.id}` }),
               allowHost: authorize,
             };
           };
+
           if (request.sourceKind === 'git') {
             ({ sandbox, allowHost } = await create());
           } else {
@@ -73,7 +82,9 @@ export async function checkUpstreams(env: ScheduleEnv, limit = MAX_REQUESTS): Pr
           }
         }
       }
+
       const result = await detectUpstreamRelease(env, request, { sandbox, allowHost, createSandbox, currentVersion: row.published_version });
+
       if (result.pendingRequestId) {
         pendingRequestIds.push(result.pendingRequestId);
         await dispatchUpstreamFactory(env, result.pendingRequestId);
@@ -83,6 +94,7 @@ export async function checkUpstreams(env: ScheduleEnv, limit = MAX_REQUESTS): Pr
       await recordCheckError(env, request.id, cause);
     }
   }
+
   return { checked: rows.length, failed, pendingRequestIds };
 }
 
@@ -92,5 +104,6 @@ export async function runScheduledChecks(env: FactoryEnv): Promise<{
 }> {
   const upstream = await checkUpstreams(env as unknown as ScheduleEnv);
   const integrity = await checkSourceOfTruth(env);
+
   return { upstream, integrity };
 }

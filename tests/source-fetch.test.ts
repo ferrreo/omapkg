@@ -10,7 +10,9 @@ function sandboxFor(results: Result[], commands: string[]): Sandbox {
     exec: async (command: string) => {
       commands.push(command);
       const result = results.shift();
+
       if (!result) throw new Error('unexpected sandbox command');
+
       return result;
     },
   } as unknown as Sandbox;
@@ -22,6 +24,7 @@ describe('trusted source redirect fetching', () => {
   test('adds GitHub codeload host only after a validated redirect', async () => {
     const commands: string[] = [];
     const allowed: string[] = [];
+
     const result = await fetchSourceWithRedirects(
       sandboxFor([
         { stdout: 'http_status=302\nredirect_location=https://codeload.github.com/example/project/tar.gz/v1.0.0\n', stderr: '', exitCode: 0 },
@@ -30,6 +33,7 @@ describe('trusted source redirect fetching', () => {
       'https://github.com/example/project/archive/v1.0.0.tar.gz',
       { allowHost: async (host) => { allowed.push(host); } },
     );
+
     expect(allowed).toEqual(['codeload.github.com']);
     expect(result.finalUrl).toBe('https://codeload.github.com/example/project/tar.gz/v1.0.0');
     expect(result.redirectChain).toEqual([
@@ -52,14 +56,17 @@ describe('trusted source redirect fetching', () => {
 
   test('stops redirect loops and does not log signed query secrets', async () => {
     const commands: string[] = [];
+
     const result = fetchSourceWithRedirects(
       sandboxFor([{ stdout: 'http_status=302\nredirect_location=https://github.com/example/project/archive/v1.0.0.tar.gz\n', stderr: '', exitCode: 0 }], commands),
       'https://github.com/example/project/archive/v1.0.0.tar.gz',
       { allowHost: async () => undefined },
     );
+
     await expect(result).rejects.toThrow('source redirect loop detected');
 
     const signedCommands: string[] = [];
+
     const signed = await fetchSourceWithRedirects(
       sandboxFor([
         { stdout: 'http_status=302\nredirect_location=https://release-assets.githubusercontent.com/project/source.tar.gz?X-Amz-Signature=SECRET&X-Amz-Credential=internal\n', stderr: '', exitCode: 0 },
@@ -68,6 +75,7 @@ describe('trusted source redirect fetching', () => {
       'https://github.com/example/project/archive/v1.0.0.tar.gz',
       { allowHost: async () => undefined },
     );
+
     expect(signed.finalUrl).toBe('https://release-assets.githubusercontent.com/project/source.tar.gz');
     expect(signed.redirectChain.join('\n')).not.toContain('SECRET');
     expect(signedCommands[1]).toContain('X-Amz-Signature');
@@ -77,6 +85,7 @@ describe('trusted source redirect fetching', () => {
     for (const key of ['token', 'api_key', 'X-Amz-Signature', 'AWSAccessKeyId']) {
       expect(() => normalizeSourceUrl(`https://example.com/source.tar.gz?${key}=secret`)).toThrow('permanent HTTPS URL');
     }
+
     expect(() => normalizeSourceUrl('https://example.com/source.tar.gz?download=1')).not.toThrow();
     expect(parseSourceFetchResponse(success)).toEqual({ status: 200, location: null });
     expect(sourceFetchCommand('https://example.com/source.tar.gz', '/workspace/source.bundle')).not.toContain('--location');
@@ -84,10 +93,12 @@ describe('trusted source redirect fetching', () => {
 
   test('bounds Sandbox metadata range fallback and requires archive length', async () => {
     const commands: string[] = [];
+
     const sandbox = sandboxFor([
       { stdout: 'HTTP/2 403 Forbidden\r\n\r\n\nhttp_status=403\ncurl_status=0\n', stderr: '', exitCode: 0 },
       { stdout: 'HTTP/2 206 Partial Content\r\nContent-Range: bytes 0-0/4242\r\nETag: "archive"\r\n\r\n\nhttp_status=206\ncurl_status=0\n', stderr: '', exitCode: 0 },
     ], commands);
+
     const result = await fetchMetadataWithRedirects(sandbox, 'https://example.com/source.tar.gz');
     expect(result.status).toBe(206);
     expect(result.headers.contentLength).toBe('4242');
