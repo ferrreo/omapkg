@@ -7,7 +7,7 @@
   "network": "none",
   "sourceDateEpoch": 1700000000,
   "builder": "buildah",
-  "builderVersion": "1.43.2",
+  "builderVersion": "1.45.0",
   "dockerfileSha256": "e451988c36ee5c3c146b9abd47c0edf2a3d730ae409f1a71eebb856c09920720",
   "payloadSha256": "d440f4dd8fdcb6e0bd15a633d7ed3ba1db38df9671ffc9634aa02bd6a81fc378"
 }

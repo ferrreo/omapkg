@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$image_tools_base_context"
           cat >"$image_tools_base_context/Dockerfile" <<EOF
           FROM $FACTORY_TEMPLATE_IMAGE
-          RUN pacman -Syu --noconfirm --needed buildah e2fsprogs grub jq mtools \\
+          RUN pacman -Syu --noconfirm --needed buildah=1:1.45.0-1 e2fsprogs grub jq mtools \\
               && pacman -Scc --noconfirm
           EOF
           image_tools_base_tag="$FACTORY_REGISTRY_HOST/opr-image-tools-base-x86:ci"
