@@ -383,6 +383,60 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare digest-pinned ARM image-build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_tag="$FACTORY_REGISTRY_HOST/opr-image-tools-arm64:ci"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_ARCH=aarch64 \
+          SYSTEM_IMAGE_REPRO_BOOT_BASE_IMAGE="$FACTORY_ARM_BASE_IMAGE" \
+          SYSTEM_IMAGE_REPRO_BOOT_TOOL_TAG="$tool_tag" \
+          SYSTEM_IMAGE_REPRO_BOOT_TOOL_METADATA="$FACTORY_EVIDENCE/toolchain.json" \
+            system-images/reproducibility/prepare-tool-image.sh --push-local \
+            2>&1 | tee "$FACTORY_EVIDENCE/prepare-tool-image.log"
+          tool_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$tool_tag")
+          [[ "$tool_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-image-tools-arm64@sha256:[0-9a-f]{64}$ ]]
+          docker run --rm --network none "$tool_ref" bash -lc '
+            test "$(uname -m)" = aarch64
+            command -v buildah
+            command -v arch-chroot
+            command -v grub-install
+            command -v qemu-img
+            command -v sgdisk
+            command -v mkfs.fat
+          '
+          printf 'FACTORY_IMAGE_TOOLCHAIN_ARM=%s\n' "$tool_ref" >>"$GITHUB_ENV"
+
+      - name: Fetch exact real ARM image package inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/factory-real-packages-arm"
+          mkdir -m 700 "$package_dir"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN_ARM" \
+          SYSTEM_IMAGE_REPRO_ARCH_MIRROR=https://fl.us.mirror.archlinuxarm.org \
+            system-images/reproducibility/run.sh --fetch-real-packages "$package_dir" \
+            --profile system-images/profiles/aarch64-uefi.json \
+            2>&1 | tee "$FACTORY_EVIDENCE/fetch-real-packages.log"
+          cp "$package_dir/manifest.json" "$FACTORY_EVIDENCE/real-package-manifest.json"
+          cp "$package_dir/packages.tsv" "$FACTORY_EVIDENCE/real-package-hashes.tsv"
+          cp "$package_dir/closure.tsv" "$FACTORY_EVIDENCE/real-package-closure.tsv"
+
+      - name: Run real ARM boot-filesystem A/B image pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/factory-real-packages-arm"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN_ARM" \
+          SYSTEM_IMAGE_REPRO_REAL_PACKAGE_DIR="$package_dir" \
+            system-images/reproducibility/run.sh --filesystem-fixture --gap 5 \
+            --profile system-images/profiles/aarch64-uefi.json \
+            --output "$FACTORY_EVIDENCE/filesystem" \
+            2>&1 | tee "$FACTORY_EVIDENCE/filesystem.log"
+
       - name: Stage ARM logs, hashes, and acceptance evidence
         if: ${{ always() }}
         shell: bash

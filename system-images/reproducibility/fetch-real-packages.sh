@@ -2,12 +2,34 @@
 set -euo pipefail
 
 output=$1
-mirror=${SYSTEM_IMAGE_REPRO_ARCH_MIRROR:-https://fastly.mirror.pkgbuild.com}
+mirror_from_env=$(printenv SYSTEM_IMAGE_REPRO_ARCH_MIRROR || true)
+mirror=${mirror_from_env:-https://fastly.mirror.pkgbuild.com}
+profile=${SYSTEM_IMAGE_REPRO_PROFILE:-}
+architecture=${SYSTEM_IMAGE_REPRO_ARCH:-}
+if [[ -n "$profile" && -f "$profile" ]]; then
+  architecture=$(jq -er '.architecture' "$profile")
+fi
+case "$architecture" in x86_64|aarch64) ;; *) echo "unsupported native fixture architecture: $architecture" >&2; exit 3 ;; esac
+if [[ "$architecture" == aarch64 && -z "$mirror_from_env" ]]; then
+  echo 'incomplete: SYSTEM_IMAGE_REPRO_ARCH_MIRROR is required for aarch64 package capture' >&2
+  exit 3
+fi
 mkdir -p "$output"
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT INT TERM
 mkdir -p "$root/var/lib/pacman" "$root/etc"
-cat >"$root/pacman.conf" <<EOF
+if [[ "$architecture" == aarch64 ]]; then
+  cat >"$root/pacman.conf" <<EOF
+[options]
+Architecture = auto
+SigLevel = Required DatabaseOptional
+[core]
+Server = $mirror/\$arch/\$repo
+[extra]
+Server = $mirror/\$arch/\$repo
+EOF
+else
+  cat >"$root/pacman.conf" <<EOF
 [options]
 Architecture = auto
 SigLevel = Required DatabaseOptional
@@ -16,8 +38,14 @@ Server = $mirror/core/os/\$arch
 [extra]
 Server = $mirror/extra/os/\$arch
 EOF
+fi
 pacman --config "$root/pacman.conf" --root "$root" --dbpath "$root/var/lib/pacman" -Sy --noconfirm
-pacman --config "$root/pacman.conf" --root "$root" --dbpath "$root/var/lib/pacman" -Sp --print-format '%n|%f|%l' base linux grub edk2-ovmf >"$output/closure.tsv"
+if [[ -n "$profile" && -f "$profile" ]]; then
+  mapfile -t package_roots < <(jq -er '.installPackages[]?, .firmware.package' "$profile")
+else
+  if [[ "$architecture" == x86_64 ]]; then package_roots=(base linux grub edk2-ovmf); else package_roots=(base linux-aarch64 grub edk2-aarch64); fi
+fi
+pacman --config "$root/pacman.conf" --root "$root" --dbpath "$root/var/lib/pacman" -Sp --print-format '%n|%f|%l' "${package_roots[@]}" >"$output/closure.tsv"
 : >"$output/packages.tsv"
 while IFS='|' read -r name filename url; do
   [[ -n "$filename" && -n "$url" ]] || continue
@@ -38,5 +66,5 @@ while IFS='|' read -r name filename url; do
   printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$filename" "$url" "$sha" "$sig_sha" >>"$output/packages.tsv"
 done <"$output/closure.tsv"
 sort -u -o "$output/packages.tsv" "$output/packages.tsv"
-jq -cS -n --arg mirror "$mirror" --argjson count "$(wc -l <"$output/packages.tsv")" '{schemaVersion:1,source:"private-arch-fixture",mirror:$mirror,packageCount:$count,packagesFile:"packages.tsv"}' >"$output/manifest.json"
+jq -cS -n --arg mirror "$mirror" --arg architecture "$architecture" --argjson count "$(wc -l <"$output/packages.tsv")" '{schemaVersion:1,source:"private-arch-fixture",mirror:$mirror,architecture:$architecture,packageCount:$count,packagesFile:"packages.tsv"}' >"$output/manifest.json"
 echo "fetched private real package fixture: $output"

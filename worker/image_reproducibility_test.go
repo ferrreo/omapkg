@@ -370,6 +370,10 @@ func writeImageMismatchArtifacts(pair pairRun) {
 
 func runBootImageReproducibility(t *testing.T, repoRoot, profile, outputRoot string, gap time.Duration) {
 	t.Helper()
+	architecture := imageProfileArchitecture(profile)
+	if architecture != "x86_64" && architecture != "aarch64" {
+		t.Fatalf("incomplete: unsupported image profile architecture %q", architecture)
+	}
 	if os.Geteuid() != 0 {
 		t.Fatal("incomplete: boot/filesystem image build requires root for loop devices and filesystems")
 	}
@@ -438,11 +442,25 @@ func bootImageBuilder(repoRoot, profile string) ReproducibilityBuilder {
 		if plan := os.Getenv("SYSTEM_IMAGE_REPRO_NATIVE_PLAN"); plan != "" {
 			builderIdentity["nativePlanSha256"] = hashPath(plan)
 		}
-		metadata := imageAttemptMetadata{SchemaVersion: 1, Kind: "boot-filesystem-image-reproducibility-attempt", Attempt: request.Attempt, Status: "built", StartedAtUnixNs: strconv.FormatInt(start.UnixNano(), 10), FinishedAtUnixNs: strconv.FormatInt(finish.UnixNano(), 10), Architecture: "x86_64", ProfileSHA256: profileDigest, Builder: builderIdentity, OutputTreeSHA256: hashPath(tree), InputIdentity: inputIdentity}
+		metadata := imageAttemptMetadata{SchemaVersion: 1, Kind: "boot-filesystem-image-reproducibility-attempt", Attempt: request.Attempt, Status: "built", StartedAtUnixNs: strconv.FormatInt(start.UnixNano(), 10), FinishedAtUnixNs: strconv.FormatInt(finish.UnixNano(), 10), Architecture: imageProfileArchitecture(profile), ProfileSHA256: profileDigest, Builder: builderIdentity, OutputTreeSHA256: hashPath(tree), InputIdentity: inputIdentity}
 		metadataPath := filepath.Join(request.Root, "image-builder-metadata.json")
 		if err := writeJSON(metadataPath, metadata); err != nil {
 			return ReproducibilityBuild{Log: string(outputBytes)}, err
 		}
 		return ReproducibilityBuild{OutputPaths: outputs, EvidencePaths: []string{tree, metadataPath}, Log: string(outputBytes)}, nil
 	}
+}
+
+func imageProfileArchitecture(profile string) string {
+	body, err := os.ReadFile(profile)
+	if err != nil {
+		return ""
+	}
+	var value struct {
+		Architecture string `json:"architecture"`
+	}
+	if json.Unmarshal(body, &value) != nil {
+		return ""
+	}
+	return value.Architecture
 }

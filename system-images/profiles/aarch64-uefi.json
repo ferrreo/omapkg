@@ -13,7 +13,7 @@
     "filesystem": "ext4"
   },
   "kernel": {
-    "package": "linux",
+    "package": "linux-aarch64",
     "path": "/boot/Image",
     "initramfs": ["/boot/initramfs-linux.img"]
   },
@@ -23,12 +23,12 @@
     "efiBinary": "EFI/BOOT/BOOTAA64.EFI"
   },
   "firmware": {
-    "package": "edk2-armvirt",
+    "package": "edk2-aarch64",
     "codePath": "/usr/share/edk2/aarch64/QEMU_EFI.fd",
-    "varsTemplatePath": "/usr/share/edk2/aarch64/vars-template-pflash.raw"
+    "varsTemplatePath": "/usr/share/edk2/aarch64/QEMU_VARS.fd"
   },
-  "basePackages": ["base", "linux", "grub"],
-  "installPackages": ["base", "linux", "grub"],
+  "basePackages": ["base", "linux-aarch64", "grub"],
+  "installPackages": ["base", "linux-aarch64", "grub"],
   "boot": {
     "kernelArguments": "root=UUID={rootUuid} rw console=ttyAMA0",
     "serialMarker": "login:"

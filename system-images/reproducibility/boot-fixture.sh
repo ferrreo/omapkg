@@ -6,7 +6,8 @@ fixture=/work/fixture
 results=/work/results/filesystem-fixture
 epoch=1700000000
 real_package_dir=${SYSTEM_IMAGE_REPRO_REAL_PACKAGE_DIR:-}
-mkdir -p "$fixture/bin" "$fixture/packages" "$results" /usr/share/edk2/x64
+input_profile=${OPR_IMAGE_REPRO_INPUT_PROFILE:-}
+mkdir -p "$fixture/bin" "$fixture/packages" "$results"
 chmod 700 "$fixture" "$results"
 command -v losetup >/dev/null 2>&1 || { echo 'incomplete: missing losetup' >&2; exit 3; }
 losetup -f >/dev/null 2>&1 || { echo 'incomplete: no usable native loop device' >&2; exit 3; }
@@ -20,16 +21,23 @@ fingerprint=$(gpg --batch --no-tty --homedir "$gpg_home" --with-colons --list-se
 gpg --batch --no-tty --homedir "$gpg_home" --armor --export "$fingerprint" >"$fixture/release-key.asc"
 
 profile=$fixture/profile.json
-firmware_code_path=/usr/share/edk2/x64/OVMF_CODE.fd
-firmware_vars_path=/usr/share/edk2/x64/OVMF_VARS.fd
-if [[ -n "$real_package_dir" ]]; then
-  firmware_code_path=/usr/share/edk2/x64/OVMF_CODE.4m.fd
-  firmware_vars_path=/usr/share/edk2/x64/OVMF_VARS.4m.fd
+if [[ -n "$input_profile" ]]; then
+  [[ -f "$input_profile" && ! -L "$input_profile" ]] || { echo "incomplete: profile is not a regular file: $input_profile" >&2; exit 3; }
+  cp -- "$input_profile" "$profile"
+else
+  jq -cS -n '{schemaVersion:1,id:"x86_64-uefi-fixture-v1",architecture:"x86_64",nativeGoarch:"amd64",platform:"uefi",requiresNative:true,requiresKvm:true,emulationAllowed:false,disk:{sizeBytes:2147483648,espSizeMiB:64,filesystem:"ext4"},kernel:{package:"linux",path:"/boot/vmlinuz-linux",initramfs:["/boot/initramfs-linux.img"]},bootloader:{package:"grub",target:"x86_64-efi",efiBinary:"EFI/BOOT/BOOTX64.EFI"},firmware:{package:"edk2-ovmf",codePath:"/usr/share/edk2/x64/OVMF_CODE.fd",varsTemplatePath:"/usr/share/edk2/x64/OVMF_VARS.fd"},basePackages:["base","linux","grub"],installPackages:["base","linux","grub"],boot:{kernelArguments:"root=UUID={rootUuid} rw console=ttyS0",serialMarker:"login:"},qualification:{qemuBinary:"qemu-system-x86_64",machine:"q35",nativeHost:"x86_64",kvmDevice:"/dev/kvm",cleanVarsRequired:true}}' >"$profile"
 fi
-jq -cS -n --arg firmwareCodePath "$firmware_code_path" --arg firmwareVarsPath "$firmware_vars_path" '{schemaVersion:1,id:"x86_64-uefi-fixture-v1",architecture:"x86_64",nativeGoarch:"amd64",platform:"uefi",requiresNative:true,requiresKvm:true,emulationAllowed:false,disk:{sizeBytes:2147483648,espSizeMiB:64,filesystem:"ext4"},kernel:{package:"linux",path:"/boot/vmlinuz-linux",initramfs:["/boot/initramfs-linux.img"]},bootloader:{package:"grub",target:"x86_64-efi",efiBinary:"EFI/BOOT/BOOTX64.EFI"},firmware:{package:"edk2-ovmf",codePath:$firmwareCodePath,varsTemplatePath:$firmwareVarsPath},basePackages:["base","linux","grub"],installPackages:["base","linux","grub"],boot:{kernelArguments:"root=UUID={rootUuid} rw console=ttyS0",serialMarker:"login:"},qualification:{qemuBinary:"qemu-system-x86_64",machine:"q35",nativeHost:"x86_64",kvmDevice:"/dev/kvm",cleanVarsRequired:true}}' >"$profile"
+architecture=$(jq -er '.architecture' "$profile")
+native_host=$(jq -er '.qualification.nativeHost' "$profile")
+host_arch=$(case "$(uname -m)" in x86_64) echo x86_64 ;; aarch64|arm64) echo aarch64 ;; *) echo unknown ;; esac)
+[[ "$architecture" == "$native_host" && "$host_arch" == "$native_host" ]] || { echo "incomplete: native profile/host mismatch: $architecture/$native_host on $host_arch" >&2; exit 3; }
+firmware_package_name=$(jq -er '.firmware.package' "$profile")
+firmware_code_path=$(jq -er '.firmware.codePath' "$profile")
+firmware_vars_path=$(jq -er '.firmware.varsTemplatePath' "$profile")
+mkdir -p -- "$(dirname -- "$firmware_code_path")" "$(dirname -- "$firmware_vars_path")"
 if [[ -z "$real_package_dir" ]]; then
-  printf 'fixture firmware code\n' >/usr/share/edk2/x64/OVMF_CODE.fd
-  printf 'fixture firmware vars\n' >/usr/share/edk2/x64/OVMF_VARS.fd
+  printf 'fixture firmware code\n' >"$firmware_code_path"
+  printf 'fixture firmware vars\n' >"$firmware_vars_path"
 fi
 
 make_package() {
@@ -61,11 +69,12 @@ if [[ -n "$real_package_dir" ]]; then
     gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" --output "$fixture/signatures/$filename.sig" "$source_package"
     ln -s "$fixture/signatures/$filename.sig" "$fixture/packages/$filename.sig"
   done
-  firmware_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) -name 'edk2-ovmf-*.pkg.tar.zst' | head -n1)
-  [[ -n "$firmware_package" ]] || { echo 'incomplete: real package fixture has no edk2-ovmf archive' >&2; exit 3; }
+  firmware_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) -name "$firmware_package_name-*.pkg.tar.zst" | head -n1)
+  [[ -n "$firmware_package" ]] || { echo "incomplete: real package fixture has no $firmware_package_name archive" >&2; exit 3; }
   bsdtar -xOf "$firmware_package" "${firmware_code_path#/}" >"$firmware_code_path"
   bsdtar -xOf "$firmware_package" "${firmware_vars_path#/}" >"$firmware_vars_path"
 else
+  [[ "$architecture" == x86_64 ]] || { echo 'incomplete: ARM filesystem fixture requires real package inputs' >&2; exit 3; }
   base_package=$(make_package base base)
   linux_package=$(make_package linux linux)
   grub_package=$(make_package grub grub)
@@ -118,12 +127,12 @@ package_set=$(jq -cS 'sort_by(.name,.architecture,.version,.sha256)' "$package_r
 input_lock=$(printf 'omapkg-image-fixture-inputs-v1\n' | sha256sum | awk '{print $1}')
 owned_universe=$(printf 'omapkg-image-fixture-owned-v1\n' | sha256sum | awk '{print $1}')
 plan=$fixture/native-plan.json
-jq -cS -n --arg candidateId fixture-candidate --arg owned "$owned_universe" --arg input "$input_lock" '{schemaVersion:1,kind:"factory-image-native-plan",executionScope:"private",candidateId:$candidateId,architecture:"x86_64",ownedUniverseSha256:$owned,inputLockSha256:$input,status:"reviewed"}' >"$plan"
+jq -cS -n --arg candidateId fixture-candidate --arg architecture "$architecture" --arg owned "$owned_universe" --arg input "$input_lock" '{schemaVersion:1,kind:"factory-image-native-plan",executionScope:"private",candidateId:$candidateId,architecture:$architecture,ownedUniverseSha256:$owned,inputLockSha256:$input,status:"reviewed"}' >"$plan"
 plan_sha=$(canonical_sha "$plan")
 gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" "$plan"
 
 lock=$fixture/candidate-lock.json
-jq -cS -n --arg candidateId fixture-candidate --arg owned "$owned_universe" --arg input "$input_lock" --arg plan "$plan_sha" --arg tx "$transaction_sha" --arg txSig "$transaction_sig_sha" --arg system "$system_sha" --arg systemSig "$system_sig_sha" --arg opr "$opr_sha" --arg oprSig "$opr_sig_sha" --arg repoSha "$repo_sha" --arg repoSig "$repo_sig_sha" --arg packageSet "$package_set" --argjson packages "$(cat "$package_rows")" '{schemaVersion:1,authority:"factory-candidate-v1",candidate:{id:$candidateId,executionScope:"private",ownedUniverseSha256:$owned,inputLockSha256:$input,nativePlanSha256:$plan},architecture:"x86_64",systemVersion:"fixture-system",oprGeneration:"fixture-opr",sourceDateEpoch:1700000000,transactionSha256:$tx,transaction:{path:"transaction.json",signature:"transaction.json.sig",signatureSha256:$txSig},systemManifestSha256:$system,systemManifest:{path:"system.json",sha256:$system,signature:"system.json.sig",signatureSha256:$systemSig},oprManifestSha256:$opr,oprManifest:{path:"opr.json",sha256:$opr,signature:"opr.json.sig",signatureSha256:$oprSig},packageChunks:[],repositories:[{name:"fixture",path:"packages/fixture.db.tar.gz",signature:"packages/fixture.db.tar.gz.sig",sha256:$repoSha,signatureSha256:$repoSig}],packages:$packages,packageSetSha256:$packageSet,packageCount:($packages|length),sourcePackageCount:($packages|length)}' >"$lock"
+jq -cS -n --arg candidateId fixture-candidate --arg architecture "$architecture" --arg owned "$owned_universe" --arg input "$input_lock" --arg plan "$plan_sha" --arg tx "$transaction_sha" --arg txSig "$transaction_sig_sha" --arg system "$system_sha" --arg systemSig "$system_sig_sha" --arg opr "$opr_sha" --arg oprSig "$opr_sig_sha" --arg repoSha "$repo_sha" --arg repoSig "$repo_sig_sha" --arg packageSet "$package_set" --argjson packages "$(cat "$package_rows")" '{schemaVersion:1,authority:"factory-candidate-v1",candidate:{id:$candidateId,executionScope:"private",ownedUniverseSha256:$owned,inputLockSha256:$input,nativePlanSha256:$plan},architecture:$architecture,systemVersion:"fixture-system",oprGeneration:"fixture-opr",sourceDateEpoch:1700000000,transactionSha256:$tx,transaction:{path:"transaction.json",signature:"transaction.json.sig",signatureSha256:$txSig},systemManifestSha256:$system,systemManifest:{path:"system.json",sha256:$system,signature:"system.json.sig",signatureSha256:$systemSig},oprManifestSha256:$opr,oprManifest:{path:"opr.json",sha256:$opr,signature:"opr.json.sig",signatureSha256:$oprSig},packageChunks:[],repositories:[{name:"fixture",path:"packages/fixture.db.tar.gz",signature:"packages/fixture.db.tar.gz.sig",sha256:$repoSha,signatureSha256:$repoSig}],packages:$packages,packageSetSha256:$packageSet,packageCount:($packages|length),sourcePackageCount:($packages|length)}' >"$lock"
 gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" "$lock"
 
 mkdir -p "$fixture/http" "$fixture/http/packages"
@@ -175,5 +184,16 @@ export OPR_IMAGE_REPRO_OUTPUT="$results"
 export OPR_IMAGE_REPRO_GAP=${OPR_IMAGE_REPRO_GAP-5}
 export CURL_CA_BUNDLE="$fixture/tls.crt"
 export PATH="$fixture/bin:$PATH"
-
-exec "$test_binary" -test.run '^TestImageReproducibilityAcceptance$' -test.count=1 -test.v
+mkdir -p "$fixture/home"
+exec env -i \
+  PATH="$fixture/bin:/usr/bin:/bin" HOME="$fixture/home" LANG=C LC_ALL=C TZ=UTC TMPDIR=/tmp \
+  SOURCE_DATE_EPOCH="$epoch" OMAPKG_IMAGE_CLEAN_ENV=1 CURL_CA_BUNDLE="$fixture/tls.crt" \
+  SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK="$SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK" \
+  SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK_SIGNATURE="$SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK_SIGNATURE" \
+  SYSTEM_IMAGE_REPRO_CANDIDATE_ID="$SYSTEM_IMAGE_REPRO_CANDIDATE_ID" \
+  SYSTEM_IMAGE_REPRO_NATIVE_PLAN="$SYSTEM_IMAGE_REPRO_NATIVE_PLAN" \
+  SYSTEM_IMAGE_REPRO_NATIVE_PLAN_SIGNATURE="$SYSTEM_IMAGE_REPRO_NATIVE_PLAN_SIGNATURE" \
+  SYSTEM_IMAGE_REPRO_KEY="$SYSTEM_IMAGE_REPRO_KEY" SYSTEM_IMAGE_REPRO_FINGERPRINT="$SYSTEM_IMAGE_REPRO_FINGERPRINT" \
+  OPR_IMAGE_REPRO_ACCEPTANCE=1 OPR_IMAGE_REPRO_KIND=boot OPR_IMAGE_REPRO_REPO_ROOT=/repo \
+  OPR_IMAGE_REPRO_PROFILE="$profile" OPR_IMAGE_REPRO_OUTPUT="$results" OPR_IMAGE_REPRO_GAP="${OPR_IMAGE_REPRO_GAP-5}" \
+  "$test_binary" -test.run '^TestImageReproducibilityAcceptance$' -test.count=1 -test.v

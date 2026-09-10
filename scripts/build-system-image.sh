@@ -266,12 +266,12 @@ fi
 [[ "$output" != "$provenance" ]] || die "image and provenance paths must differ"
 [[ ! -L "$output" && ! -L "$provenance" ]] || die "output paths must not be symlinks"
 if [[ -e "$output" || -e "$provenance" ]] && (( ! overwrite )); then die "refusing to overwrite existing output; pass --overwrite"; fi
-output_parent=$(CDPATH='' cd -- "$(dirname -- "$output")" 2>/dev/null && pwd -P); [[ -n "$output_parent" && -d "$output_parent" ]] || die "output parent must exist"
-prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null && pwd -P); [[ -n "$prov_parent" && -d "$prov_parent" ]] || die "provenance parent must exist"
+output_parent=$(CDPATH='' cd -- "$(dirname -- "$output")" 2>/dev/null && pwd -P || true); [[ -n "$output_parent" && -d "$output_parent" ]] || die "output parent must exist"
+prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null && pwd -P || true); [[ -n "$prov_parent" && -d "$prov_parent" ]] || die "provenance parent must exist"
 [[ "$EUID" == 0 ]] || die "image build needs root for loop devices and filesystems"
 native_host=$(uname -m)
 case "$native_host" in x86_64) [[ "$architecture" == x86_64 ]] || die "x86_64 builder cannot produce aarch64 native image" ;; aarch64|arm64) [[ "$architecture" == aarch64 ]] || die "aarch64 builder cannot produce x86_64 native image" ;; *) die "unsupported native builder architecture: $native_host" ;; esac
-for command_name in curl qemu-img sgdisk losetup udevadm mkfs.fat mkfs.ext4 mount umount blkid pacman grub-install arch-chroot gpg realpath bsdtar gzip unshare debugfs e2fsck tune2fs mcopy truncate dd; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
+for command_name in curl qemu-img sgdisk losetup partx udevadm mknod mkfs.fat mkfs.ext4 mount umount blkid pacman grub-install arch-chroot gpg realpath bsdtar gzip unshare debugfs e2fsck tune2fs mcopy truncate dd; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
 if [[ -n "$work_dir" ]]; then mkdir -p -- "$work_dir"; chmod 700 "$work_dir"; build_root=$(mktemp -d "$work_dir/build.XXXXXX"); else build_root=$(mktemp -d "${TMPDIR:-/tmp}/omapkg-system-image.XXXXXX"); fi
 cleanup_paths+=("$build_root"); temporary_root=$build_root
 chmod 700 "$temporary_root"
@@ -283,19 +283,62 @@ qemu-img create -f raw "$image_tmp" "$disk_size" >/dev/null
 sgdisk --zap-all "$image_tmp" >/dev/null
 sgdisk --disk-guid="$disk_guid" --new=1:2048:+"${esp_size}"M --partition-guid=1:"$esp_partition_guid" --typecode=1:ef00 --change-name=1:ESP --new=2:0:0 --partition-guid=2:"$root_partition_guid" --typecode=2:8300 --change-name=2:ROOT "$image_tmp" >/dev/null
 loop=$(losetup --find --show --partscan "$image_tmp")
+created_partition_nodes=()
 mounted=0
 dev_mounted=0; proc_mounted=0; sys_mounted=0
+remove_partition_nodes() {
+  local node
+  for node in "${created_partition_nodes[@]}"; do
+    rm -f -- "$node"
+  done
+  created_partition_nodes=()
+}
+detach_partitioned_loop() {
+  remove_partition_nodes
+  if [[ -n "$loop" ]]; then
+    partx --delete "$loop" >/dev/null 2>&1 || true
+    losetup -d "$loop" 2>/dev/null || true
+    loop=
+  fi
+}
 detach() {
   if (( sys_mounted )); then umount -R "$temporary_root/root/sys" || return 1; fi
   if (( proc_mounted )); then umount -R "$temporary_root/root/proc" || return 1; fi
   if (( dev_mounted )); then umount -R "$temporary_root/root/dev" || return 1; fi
   if (( mounted )); then umount "$temporary_root/root/boot/efi" || return 1; umount "$temporary_root/root" || return 1; mounted=0; fi
-  losetup -d "$loop" 2>/dev/null || true
+  detach_partitioned_loop
   cleanup_all
 }
 trap detach EXIT INT TERM
 udevadm settle
 esp_device=${loop}p1; root_device=${loop}p2
+if [[ ! -b "$esp_device" || ! -b "$root_device" ]]; then
+  partx --add "$loop" >/dev/null 2>&1 || true
+  udevadm settle
+fi
+for device in "$esp_device" "$root_device"; do
+  if [[ ! -b "$device" ]]; then
+    sysdev="/sys/class/block/$(basename -- "$device")/dev"
+    for attempt in $(seq 1 20); do
+      [[ -r "$sysdev" ]] && break
+      sleep 0.1
+    done
+    if [[ -r "$sysdev" ]]; then
+      IFS=: read -r major minor <"$sysdev"
+      [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || die "invalid loop partition device identity: $device"
+      mknod --mode=660 "$device" b "$major" "$minor"
+      created_partition_nodes+=("$device")
+    fi
+  fi
+done
+if [[ ! -b "$esp_device" || ! -b "$root_device" ]]; then
+  partition_status=""
+  for device in "$esp_device" "$root_device"; do
+    sysdev="/sys/class/block/$(basename -- "$device")/dev"
+    partition_status+=" $device=$(cat "$sysdev" 2>/dev/null || printf absent)"
+  done
+  die "loop partition devices are unavailable:$partition_status"
+fi
 mkfs.fat -F32 -i "$esp_uuid_raw" "$esp_device" >/dev/null
 mkfs.ext4 -F -U "$root_uuid" -E lazy_itable_init=0,lazy_journal_init=0,hash_seed="$root_uuid" "$root_device" >/dev/null
 mkdir -p "$temporary_root/root"
@@ -375,7 +418,7 @@ sync
 [[ "$(blkid -s UUID -o value "$esp_device" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "ESP filesystem UUID changed during image build"
 umount -R "$root/sys"; sys_mounted=0; umount -R "$root/proc"; proc_mounted=0; umount -R "$root/dev"; dev_mounted=0; umount "$root/boot/efi"; umount "$root"; mounted=0
 normalize_ext4_metadata "$root_device" "$root_inodes" "$source_date_epoch"
-losetup -d "$loop"; loop=
+detach_partitioned_loop
 esp_image="$temporary_root/esp.img"
 truncate -s "$((esp_size * 1024 * 1024))" "$esp_image"
 mkfs.fat -F32 -i "$esp_uuid_raw" "$esp_image" >/dev/null
