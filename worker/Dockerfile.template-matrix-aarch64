@@ -7,7 +7,9 @@ RUN cp /etc/pacman.conf /tmp/opr-pacman.conf \
     && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
       arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools \
       cmake meson ninja rust python python-build python-installer python-setuptools npm go \
-      pnpm yarn xorg-server-xvfb \
+      pnpm yarn xorg-server-xvfb gtk3 nss alsa-lib libxss libx11 libxcb \
+      libxcomposite libxdamage libxrandr mesa libdrm at-spi2-core pango cairo \
+      dbus libpulse \
     && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm
 
 RUN install -d /tmp/electron-pkg \
@@ -18,7 +20,9 @@ RUN install -d /tmp/electron-pkg \
 COPY testdata/template-matrix/electron-arm64.PKGBUILD /tmp/electron-pkg/PKGBUILD
 RUN useradd --create-home matrix-builder \
     && chown -R matrix-builder:matrix-builder /tmp/electron-pkg \
-    && runuser -u matrix-builder -- bash -ceu 'cd /tmp/electron-pkg && makepkg --nodeps --noconfirm' \
-    && pacman --config /tmp/opr-pacman.conf -U --noconfirm /tmp/electron-pkg/*.pkg.tar.zst \
-    && install -Dm644 /tmp/electron-pkg/*.pkg.tar.zst /opt/electron43-arm-runtime.pkg.tar.zst \
+    && runuser -u matrix-builder -- bash -ceu 'export PKGDEST=/tmp/electron-pkg PKGEXT=.pkg.tar.zst; cd /tmp/electron-pkg && makepkg --nodeps --noconfirm' \
+    && package=$(find /tmp/electron-pkg -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit) \
+    && test -n "$package" \
+    && pacman --config /tmp/opr-pacman.conf -U --noconfirm "$package" \
+    && install -Dm644 "$package" /opt/electron43-arm-runtime.pkg.tar.zst \
     && rm -rf /tmp/electron-pkg /tmp/opr-pacman.conf
