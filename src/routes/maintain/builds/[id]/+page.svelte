@@ -74,6 +74,7 @@
       <header class="maintainer-page__head"><div><span class="eyebrow">Build {build.id}</span><h1 id="build-title">{build.architecture} build</h1><p>{revision ? `Revision ${revision.id}` : 'Revision details are unavailable.'}</p></div><div class="release-actions"><StatusPill status={build.status} />{#if revision}<a class="button" href={`/maintain/requests/${encodeURIComponent(revision.request_id)}`}>Open request<Icon name="arrow" size={14} /></a>{/if}</div></header>
 
       {#if form?.error}<p class="form-notice form-notice--danger" role="alert">{form.error}</p>{:else if form?.success}<p class="notice-bar" role="status">Action recorded. Signed output remains private until its release is approved.</p>{/if}
+      {#if data.outputContract && build.error}<p class="form-notice form-notice--danger" role="status">{build.error}</p>{/if}
       <div class="detail-grid">
         <div class="detail-stack">
           {#if data.outputContract}
@@ -92,12 +93,22 @@
         </div>
 
         <aside class="detail-stack">
+          {#if data.preserved}
+            <section class="workbench-panel" aria-labelledby="source-inputs-title">
+              <div class="workbench-panel__head"><h2 id="source-inputs-title">Reviewed source inputs</h2><Icon name="lock" size={18} /></div>
+              <p>Workers verify original files and prepared sources without network access.</p>
+              <div class="detail-list">
+                <div class="detail-list__row"><span class="detail-list__key">Recipe capture</span><a class="detail-list__value hash" aria-label="Review original recipe capture" href={`/maintain/recipes/${data.preserved.capture.sha256}`}>{data.preserved.capture.sha256}</a></div>
+                <div class="detail-list__row"><span class="detail-list__key">{build.architecture} sources</span><a class="detail-list__value hash" aria-label={`Download ${build.architecture} source bundle`} href={`/maintain/recipes/${data.preserved.capture.sha256}/source-bundle?bundle=${data.preserved.sourceBundle.sha256}`} download="recipe-sources.json">{data.preserved.sourceBundle.sha256}</a></div>
+              </div>
+            </section>
+          {/if}
           <section class="workbench-panel" aria-labelledby="build-record-title"><div class="workbench-panel__head"><h2 id="build-record-title">Build record</h2><span class="timestamp">attempt {build.attempt}</span></div><div class="detail-list"><div class="detail-list__row"><span class="detail-list__key">Build</span><span class="detail-list__value hash">{build.id}</span></div><div class="detail-list__row"><span class="detail-list__key">Architecture</span><span class="detail-list__value">{build.architecture}</span></div><div class="detail-list__row"><span class="detail-list__key">Worker</span><span class="detail-list__value">{build.worker_id || 'Unassigned'}</span></div><div class="detail-list__row"><span class="detail-list__key">Started</span><span class="detail-list__value">{formatDate(build.started_at)}</span></div><div class="detail-list__row"><span class="detail-list__key">Finished</span><span class="detail-list__value">{formatDate(build.finished_at)}</span></div><div class="detail-list__row"><span class="detail-list__key">Smoke tests</span><span class="detail-list__value">{build.smoke_passed ? 'passed' : build.status === 'succeeded' ? 'not recorded' : 'pending'}</span></div></div></section>
 
           {#if !data.outputContract}<section class="workbench-panel" aria-labelledby="artifact-title"><div class="workbench-panel__head"><h2 id="artifact-title">Artifact</h2><Icon name="box" size={18} /></div><div class="detail-list"><div class="detail-list__row"><span class="detail-list__key">File</span>{#if build.artifact_key && build.artifact_filename}<a class="detail-list__value" href={`/maintain/builds/${encodeURIComponent(build.id)}/artifact`} download={build.artifact_filename}>{build.artifact_filename}<Icon name="download" size={14} /></a>{:else}<span class="detail-list__value">{build.artifact_filename || 'Pending'}</span>{/if}</div><div class="detail-list__row"><span class="detail-list__key">SHA-256</span><span class="detail-list__value hash">{build.artifact_sha256 || 'Pending'}</span></div><div class="detail-list__row"><span class="detail-list__key">Size</span><span class="detail-list__value">{build.artifact_size ? `${build.artifact_size.toLocaleString()} bytes` : 'Pending'}</span></div><div class="detail-list__row"><span class="detail-list__key">Result</span><span class="detail-list__value">{build.error || 'No error recorded.'}</span></div></div></section>{/if}
 
           {#if build.status === 'failed'}
-            <section class="workbench-panel" aria-labelledby="retry-title"><div class="workbench-panel__head"><h2 id="retry-title">Retry build</h2><Icon name="refresh" size={18} /></div><p class="prose">Queue this same reviewed revision again after fixing the worker or source issue.</p><form class="form-actions" method="POST" action="?/retry"><div class="field field--full"><label for="retry-reason">Retry reason</label><input id="retry-reason" name="reason" required maxlength="2000" placeholder="Worker issue fixed" /></div><button class="button button--primary" type="submit"><Icon name="refresh" size={14} />Retry build</button></form></section>
+            <section class="workbench-panel" aria-labelledby="retry-title"><div class="workbench-panel__head"><h2 id="retry-title">Retry build</h2><Icon name="refresh" size={18} /></div><p class="prose">{data.preserved ? 'Retry these reviewed inputs after fixing the worker. Changed recipes or sources need a new review.' : 'Queue this same reviewed revision again after fixing the worker or source issue.'}</p><form class="form-actions" method="POST" action="?/retry"><div class="field field--full"><label for="retry-reason">Retry reason</label><input id="retry-reason" name="reason" required maxlength="2000" placeholder="Worker issue fixed" /></div><button class="button button--primary" type="submit"><Icon name="refresh" size={14} />Retry build</button></form></section>
           {/if}
 
           {#if dependencyPlan}

@@ -4,6 +4,7 @@ import { revisionImage } from './policy';
 import { sha256, now } from './db';
 import { error } from '@sveltejs/kit';
 import { canonicalValue } from '../canonical-json';
+import { preservedRecipe, type PreservedBuildInputs } from '../preserved-recipe';
 
 export const CLOCK_SKEW_SECONDS = 60;
 
@@ -78,6 +79,7 @@ export interface EnrollmentToken {
 }
 
 export interface WorkerJob {
+  preservedRecipe?: PreservedBuildInputs;
   inputLock?: import('../frozen-inputs').InputObject;
   attempt?: number;
   outputContract?: import('./build-outputs').OutputContract;
@@ -365,7 +367,7 @@ function parseArchitectures(value: string): Architecture[] {
   return parsed.map(requireArchitecture);
 }
 
-export function parseRevisionForJob(revision: CandidateBuild): {
+export function parseRevisionForJob(revision: WorkerLease): {
   sources: Source[];
   dependencies: string[];
   runtimeDependencies: string[];
@@ -377,10 +379,13 @@ export function parseRevisionForJob(revision: CandidateBuild): {
     throw new WorkerProtocolError(500, 'Reviewed recipe is invalid');
   }
   if (!sha256Pattern.test(revision.revision_recipe_sha256)) throw new WorkerProtocolError(500, 'Reviewed recipe checksum is invalid');
-  const runtimeDependencies = parseStringArray(revision.revision_dependencies_json, 'dependencies', 256);
-  const makeDependencies = parseStringArray(revision.revision_make_dependencies_json ?? '[]', 'build dependencies', 256);
+  const preserved = preservedRecipe({ id: revision.revision_id, sbom_json: revision.revision_sbom_json, architectures_json: revision.revision_architectures_json });
+  const target = preserved?.dependencies[revision.architecture];
+  if (preserved && (!target || revision.revision_public_recipe || revision.revision_sources_json !== '[]')) throw new WorkerProtocolError(500, 'Invalid preserved recipe source scope');
+  const runtimeDependencies = target?.runtime ?? parseStringArray(revision.revision_dependencies_json, 'dependencies', 256);
+  const makeDependencies = target?.build ?? parseStringArray(revision.revision_make_dependencies_json ?? '[]', 'build dependencies', 256);
   return {
-    sources: parseSources(revision.revision_sources_json),
+    sources: preserved ? [] : parseSources(revision.revision_sources_json),
     dependencies: [...new Set([...runtimeDependencies, ...makeDependencies])],
     runtimeDependencies,
     makeDependencies,
@@ -496,7 +501,7 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
   try {
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
-        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json, b.input_lock_sha256,
+        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json, b.input_lock_sha256, b.preserved_inputs_json,
         b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at, b.dependency_blockers_json,
         q.name AS revision_name, r.request_id AS revision_request_id, r.version AS revision_version, r.recipe AS revision_recipe,
         r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,

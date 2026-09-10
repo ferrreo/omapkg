@@ -4,8 +4,9 @@ import { archRelationCovers } from './arch';
 import { storedOutputContract } from './build-outputs';
 import { parseDependencyPlan, dependencyPlansEqual } from './dependency-plan';
 import { reviewedRuntimeExceptions } from './runtime-evidence';
-import { WorkerProtocolError, decodeBase64, parseSources, parseStringArray, sameJson, verifyEd25519, workerImage,
+import { WorkerProtocolError, decodeBase64, parseRevisionForJob, sameJson, verifyEd25519, workerImage,
   type ArtifactReference, type WorkerLease } from './worker-protocol';
+import { preservedBuildInputs } from '../preserved-recipe';
 
 export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public_key' | 'architecture'>, build: WorkerLease,
   artifacts: ArtifactReference[], provenance: string, signature: string, installedSize: number | undefined): Promise<void> {
@@ -15,11 +16,16 @@ export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public
   try { report = await assertOutputEvidence(JSON.parse(provenance), reviewedRuntimeExceptions(build.revision_sbom_json)); }
   catch (cause) { throw new WorkerProtocolError(409, cause instanceof Error ? cause.message : 'Invalid output evidence'); }
   const { imageDigest } = workerImage(build);
+  const revision = parseRevisionForJob(build);
+  const preserved = preservedBuildInputs({ id: build.revision_id, sbom_json: build.revision_sbom_json, architectures_json: build.revision_architectures_json }, build.architecture);
+  if (!sameJson(report.preservedRecipe ?? null, preserved) || !sameJson(build.preserved_inputs_json ? JSON.parse(build.preserved_inputs_json) : null, preserved)) {
+    throw new WorkerProtocolError(409, 'Preserved source inputs differ from reviewed attempt');
+  }
   if ((report.frozenInputs?.lock.sha256 ?? null) !== (build.input_lock_sha256 ?? null)) throw new WorkerProtocolError(409, 'Frozen input lock differs from lease');
   if (report.schemaVersion !== 2 || report.attempt !== build.attempt || !sameJson(report.outputContract, contract) || report.buildId !== build.id ||
       report.revisionId !== build.revision_id || report.workerId !== worker.id || report.recipeSha256 !== build.revision_recipe_sha256 ||
       report.architecture !== build.architecture || report.imageDigest !== imageDigest || report.network !== 'disabled' ||
-      report.sourceDateEpoch !== build.revision_source_date_epoch || !sameJson(report.sources, parseSources(build.revision_sources_json))) {
+      report.sourceDateEpoch !== build.revision_source_date_epoch || !sameJson(report.sources, revision.sources)) {
     throw new WorkerProtocolError(409, 'V2 provenance does not match leased inputs');
   }
   const expectedPlan = build.dependency_plan_json ? parseDependencyPlan(JSON.parse(build.dependency_plan_json)) : null;
@@ -41,7 +47,7 @@ export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public
     relations.push(...output.packageMetadata.depends);
   }
   if (!Number.isSafeInteger(total) || total !== installedSize) throw new WorkerProtocolError(409, 'Output installed size does not match completion');
-  if (parseStringArray(build.revision_dependencies_json, 'dependencies', 256).some((reviewed) => !relations.some((native) => archRelationCovers(native, reviewed)))) {
+  if (revision.runtimeDependencies.some((reviewed) => !relations.some((native) => archRelationCovers(native, reviewed)))) {
     throw new WorkerProtocolError(409, 'Output metadata omits reviewed runtime dependencies');
   }
   if (!await verifyEd25519(decodeBase64(worker.public_key, 'worker public key'), new TextEncoder().encode(provenance), decodeBase64(signature, 'provenance signature'))) {

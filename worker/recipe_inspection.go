@@ -42,7 +42,7 @@ func validateRecipeInspectionJob(job Job, cfg Config) error {
 	if job.Kind != "recipe-inspection" || job.RecipeCapture == nil || !validInputObject(*job.RecipeCapture, 512<<10) ||
 		!idPattern.MatchString(job.ID) || job.LeaseToken == "" || !depNamePattern.MatchString(job.PackageName) || job.Attempt < 1 ||
 		job.Architecture != cfg.Architecture || !archPattern.MatchString(job.Architecture) || validateImageReference(job.ImageRef, job.ImageDigest) != nil ||
-		job.InputLock != nil || job.OutputContract != nil || job.DependencyPlan != nil || len(job.Sources) != 0 || job.Recipe != "" {
+		job.InputLock != nil || job.OutputContract != nil || job.DependencyPlan != nil || job.PreservedRecipe != nil || len(job.Sources) != 0 || job.Recipe != "" {
 		return errors.New("invalid isolated recipe inspection job")
 	}
 	expires, err := time.Parse(time.RFC3339, job.LeaseExpiresAt)

@@ -181,17 +181,17 @@ func runtimeDependencyPlan(plan *DependencyPlan) (*DependencyPlan, error) {
 	return &result, nil
 }
 
-func copyRuntimeDependencies(plan *DependencyPlan, source, destination string) error {
+func copyRuntimeDependencies(ctx context.Context, plan *DependencyPlan, source, destination string) error {
 	if err := os.MkdirAll(destination, 0o700); err != nil {
 		return err
 	}
-	if err := copyFile(filepath.Join(source, "public-key"), filepath.Join(destination, "public-key")); err != nil {
+	if err := copyFile(ctx, filepath.Join(source, "public-key"), filepath.Join(destination, "public-key")); err != nil {
 		return err
 	}
 	var manifest strings.Builder
 	for _, item := range plan.Packages {
 		for _, name := range []string{item.Filename, item.Filename + ".sig"} {
-			if err := copyFile(filepath.Join(source, name), filepath.Join(destination, name)); err != nil {
+			if err := copyFile(ctx, filepath.Join(source, name), filepath.Join(destination, name)); err != nil {
 				return err
 			}
 		}

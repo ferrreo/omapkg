@@ -10,6 +10,7 @@ import { environment, field, formAction, maintainer } from '$lib/server/http';
 import { finalDescription } from '$lib/server/descriptions';
 import { retryBuild } from '$lib/server/workers';
 import { buildArtifacts, packageFilename, storedOutputContract } from '$lib/server/build-outputs';
+import { preservedBuildInputs } from '$lib/preserved-recipe';
 import type { Build, Revision } from '$lib/model';
 import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async (event) => {
@@ -33,7 +34,8 @@ export const load: PageServerLoad = async (event) => {
   const outputs = contract?.outputs.map((output) => ({ ...output, filename: packageFilename(output),
     signature: signatures.find((item) => item.artifact_filename === packageFilename(output)) ?? null,
     artifact: artifacts.find((artifact) => artifact.filename === packageFilename(output)) ?? null })) ?? [];
-  return { build, revision, logs, outputContract: contract, outputs, canSign, canRetain, retained, statementSigned: signatures.some((item) => item.artifact_filename === 'attestation.json') };
+  return { build, revision, logs, preserved: revisionRow ? preservedBuildInputs(revisionRow, build.architecture) : null,
+    outputContract: contract, outputs, canSign, canRetain, retained, statementSigned: signatures.some((item) => item.artifact_filename === 'attestation.json') };
 };
 
 export const actions: Actions = {

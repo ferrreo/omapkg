@@ -82,6 +82,7 @@ var supportedWorkerCapabilities = [...]string{
 	"multi-output-v2",
 	"frozen-inputs-v1",
 	"recipe-inspection-v1",
+	"preserved-recipe-v1",
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {
@@ -135,33 +136,34 @@ type DependencyPackage struct {
 }
 
 type Job struct {
-	Kind                string             `json:"kind,omitempty"`
-	RecipeCapture       *inputObject       `json:"recipeCapture,omitempty"`
-	InputLock           *inputObject       `json:"inputLock,omitempty"`
-	OutputContract      *outputContract    `json:"outputContract,omitempty"`
-	Attempt             int64              `json:"attempt,omitempty"`
-	ID                  string             `json:"id"`
-	LeaseToken          string             `json:"leaseToken"`
-	LeaseExpiresAt      string             `json:"leaseExpiresAt"`
-	RevisionID          string             `json:"revisionId"`
-	PackageName         string             `json:"packageName"`
-	Version             string             `json:"version"`
-	Pkgrel              int64              `json:"pkgrel,omitempty"`
-	Architecture        string             `json:"architecture"`
-	Recipe              string             `json:"recipe"`
-	PublicRecipe        string             `json:"publicRecipe,omitempty"`
-	RecipeSHA256        string             `json:"recipeSha256"`
-	SourceDateEpoch     int64              `json:"sourceDateEpoch"`
-	ImageDigest         string             `json:"imageDigest"`
-	ImageRef            string             `json:"imageRef,omitempty"`
-	Sources             []Source           `json:"sources"`
-	Dependencies        []string           `json:"dependencies"`
-	RuntimeDependencies []string           `json:"runtimeDependencies,omitempty"`
-	MakeDependencies    []string           `json:"makeDependencies,omitempty"`
-	DependencyPlan      *DependencyPlan    `json:"dependencyPlan,omitempty"`
-	SmokeCommands       []string           `json:"smokeCommands"`
-	RuntimeExceptions   []runtimeException `json:"runtimeExceptions,omitempty"`
-	Surface             string             `json:"surface"`
+	PreservedRecipe     *preservedBuildInputs `json:"preservedRecipe,omitempty"`
+	Kind                string                `json:"kind,omitempty"`
+	RecipeCapture       *inputObject          `json:"recipeCapture,omitempty"`
+	InputLock           *inputObject          `json:"inputLock,omitempty"`
+	OutputContract      *outputContract       `json:"outputContract,omitempty"`
+	Attempt             int64                 `json:"attempt,omitempty"`
+	ID                  string                `json:"id"`
+	LeaseToken          string                `json:"leaseToken"`
+	LeaseExpiresAt      string                `json:"leaseExpiresAt"`
+	RevisionID          string                `json:"revisionId"`
+	PackageName         string                `json:"packageName"`
+	Version             string                `json:"version"`
+	Pkgrel              int64                 `json:"pkgrel,omitempty"`
+	Architecture        string                `json:"architecture"`
+	Recipe              string                `json:"recipe"`
+	PublicRecipe        string                `json:"publicRecipe,omitempty"`
+	RecipeSHA256        string                `json:"recipeSha256"`
+	SourceDateEpoch     int64                 `json:"sourceDateEpoch"`
+	ImageDigest         string                `json:"imageDigest"`
+	ImageRef            string                `json:"imageRef,omitempty"`
+	Sources             []Source              `json:"sources"`
+	Dependencies        []string              `json:"dependencies"`
+	RuntimeDependencies []string              `json:"runtimeDependencies,omitempty"`
+	MakeDependencies    []string              `json:"makeDependencies,omitempty"`
+	DependencyPlan      *DependencyPlan       `json:"dependencyPlan,omitempty"`
+	SmokeCommands       []string              `json:"smokeCommands"`
+	RuntimeExceptions   []runtimeException    `json:"runtimeExceptions,omitempty"`
+	Surface             string                `json:"surface"`
 }
 
 type ClaimResponse struct {
@@ -400,6 +402,10 @@ func validateJob(job Job, cfg Config) error {
 	if job.InputLock != nil && (!validInputObject(*job.InputLock, 128<<10) || job.OutputContract == nil || job.DependencyPlan != nil) {
 		return errors.New("frozen inputs require a bounded lock and native outputs without a legacy dependency plan")
 	}
+	if job.PreservedRecipe != nil && (!validInputObject(job.PreservedRecipe.Capture, 512<<10) || !validInputObject(job.PreservedRecipe.SourceBundle, 2<<20) ||
+		job.InputLock == nil || job.OutputContract == nil || job.PublicRecipe != "" || len(job.Sources) != 0 || len(job.SmokeCommands) == 0) {
+		return errors.New("preserved recipes require retained sources, frozen native inputs and installed smoke commands")
+	}
 	if !idPattern.MatchString(job.ID) || job.LeaseToken == "" || job.RevisionID == "" {
 		return errors.New("job has invalid identity or lease")
 	}
@@ -433,7 +439,7 @@ func validateJob(job Job, cfg Config) error {
 	if job.Surface != "binary" && job.Surface != "recipe" {
 		return errors.New("job surface must be binary or recipe")
 	}
-	if len(job.Sources) == 0 {
+	if len(job.Sources) == 0 && job.PreservedRecipe == nil {
 		return errors.New("job must contain at least one source")
 	}
 	seen := make(map[string]struct{}, len(job.Sources))
@@ -454,7 +460,12 @@ func validateJob(job Job, cfg Config) error {
 	}
 	allDependencies := append(append(append([]string{}, job.Dependencies...), job.RuntimeDependencies...), job.MakeDependencies...)
 	for _, dependency := range allDependencies {
-		if !validArchDependency(dependency) {
+		valid := validArchDependency(dependency)
+		if job.PreservedRecipe != nil {
+			_, err := parsePackageRelation(dependency, false, true)
+			valid = err == nil
+		}
+		if !valid {
 			return fmt.Errorf("unsafe dependency %q", dependency)
 		}
 	}

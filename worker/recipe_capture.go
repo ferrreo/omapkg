@@ -85,6 +85,10 @@ func parseRecipeGitTree(raw []byte) ([]recipeGitEntry, error) {
 }
 
 func validateRecipeLinks(links map[string]string) error {
+	return validateContainedLinks(links, func(path string) bool { return safeRecipePath(path, false) })
+}
+
+func validateContainedLinks(links map[string]string, validPath func(string) bool) error {
 	for path, target := range links {
 		if target == "" || len(target) > 512 || strings.HasPrefix(target, "/") {
 			return errors.New("unsafe recipe symlink")
@@ -102,7 +106,7 @@ func validateRecipeLinks(links map[string]string) error {
 				}
 				parts = parts[:len(parts)-1]
 			} else if part != "." {
-				if !safeRecipePath(part, false) {
+				if !validPath(part) {
 					return errors.New("unsafe recipe symlink target")
 				}
 				parts = append(parts, part)

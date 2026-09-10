@@ -1,5 +1,10 @@
 import { cohortOutputContract, storedOutputContract } from './build-outputs';
 import { selectedInputLock } from './input-locks';
+import { preservedBuildInputs } from '../preserved-recipe';
+import { canonicalJson } from '../canonical-json';
+import { assertPreservedImportCurrent } from './preserved-imports';
+import { srcinfoField, type Srcinfo } from '../srcinfo';
+import { archRelationCovers } from './arch';
 import { revisionRecipePolicy } from '../../../services/pipeline/recipe-policy';
 import { sha256, id, now, audit } from './db';
 import type { Worker, Architecture, Build, Actor } from '../model';
@@ -31,8 +36,8 @@ import {
   workerImage,
   sha256Pattern,
   LEASE_SECONDS,
-  type WorkerLease,
   leaseExpiryValue,
+  getBuildForWorker,
 } from './worker-protocol';
 
 export async function enrollWorker(db: D1Database, input: unknown): Promise<EnrollmentResult> {
@@ -385,6 +390,22 @@ export async function claimJob(
   const outputContract = candidate.revision_surface === 'binary' ? await cohortOutputContract(db, { id: candidate.revision_id, version: candidate.revision_version, pkgrel: candidate.revision_pkgrel, sbom_json: candidate.revision_sbom_json }, worker.architecture) : null;
   const outputContractJSON = outputContract ? JSON.stringify(outputContract) : null;
   const inputLock = outputContract && dependencyContext ? await selectedInputLock({ DB: db, ARTIFACTS: dependencyContext.ARTIFACTS }, candidate.revision_id, worker.architecture, outputContract) : null;
+  const sourceRevision = { id: candidate.revision_id, sbom_json: candidate.revision_sbom_json, architectures_json: candidate.revision_architectures_json,
+    manifest_sha256: candidate.revision_manifest_sha256 };
+  const preserved = preservedBuildInputs(sourceRevision, worker.architecture);
+  if (preserved) {
+    if (!inputLock || !outputContract) throw new WorkerProtocolError(409, 'Preserved recipes require frozen native inputs');
+    await assertPreservedImportCurrent(db, sourceRevision);
+    const inspection = await db.prepare(`SELECT r.metadata_json FROM current_recipe_source_bundles b
+      JOIN recipe_inspection_results r ON r.job_id=b.inspection_id AND r.attempt=b.inspection_attempt WHERE b.sha256=?`)
+      .bind(preserved.sourceBundle.sha256).first<{ metadata_json: string }>();
+    if (!inspection) throw new WorkerProtocolError(409, 'Preserved source inspection is no longer current');
+    const metadata = JSON.parse(inspection.metadata_json) as Srcinfo;
+    const providers = metadata.outputs.flatMap((output) => [`${output.name}=${metadata.version}`, ...srcinfoField(metadata, output, 'provides', worker.architecture)]);
+    // Explicit make/check dependencies still need installed providers. Runtime
+    // relations satisfied by sibling outputs are checked during installation.
+    revision.dependencies = [...new Set([...revision.runtimeDependencies.filter((relation) => !providers.some((provider) => archRelationCovers(provider, relation))), ...revision.makeDependencies])];
+  }
   let dependencyPlan: DependencyPlan | null = null;
   let planDigest: string | null = null;
   let dependencyReleaseIds: string[] = [];
@@ -409,7 +430,7 @@ export async function claimJob(
     await db.batch([
       db.prepare(`UPDATE builds AS b SET status = 'leased', worker_id = ?, lease_token = ?, lease_expires_at = ?,
         attempt = attempt + 1, started_at = ?, finished_at = NULL, error = NULL,
-        artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = ?, output_contract_json = ?, input_lock_sha256 = ?,
+        artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = ?, output_contract_json = ?, input_lock_sha256 = ?, preserved_inputs_json = ?,
         provenance = NULL, provenance_signature = NULL, smoke_passed = 0, dependency_blockers_json = NULL
         WHERE id = ? AND architecture = ?
           AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))
@@ -419,7 +440,7 @@ export async function claimJob(
           AND EXISTS (SELECT 1 FROM revisions r WHERE r.id = b.revision_id AND r.pr_url IS NOT NULL AND r.commit_sha IS NOT NULL AND length(r.image_digest) > 0)
           AND EXISTS (SELECT 1 FROM requests q WHERE q.id = (SELECT request_id FROM revisions WHERE id = b.revision_id) AND q.status IN ('queued', 'building'))
           AND EXISTS (SELECT 1 FROM workers w WHERE w.id = ? AND w.status = 'active' AND w.accepting_jobs = 1 AND w.removed_at IS NULL)`)
-        .bind(worker.id, leaseToken, leaseExpiresAt, timestamp, dependencyPlanJSON, outputContractJSON, inputLock?.sha256 ?? null, candidate.id, worker.architecture, timestamp,
+        .bind(worker.id, leaseToken, leaseExpiresAt, timestamp, dependencyPlanJSON, outputContractJSON, inputLock?.sha256 ?? null, preserved ? canonicalJson(preserved) : null, candidate.id, worker.architecture, timestamp,
           candidate.revision_manifest_sha256, candidate.revision_manifest_sha256, worker.id),
       db.prepare(`INSERT INTO audit_events(actor, action, target, detail, created_at)
         SELECT ?, 'worker.job_claimed', ?, ?, ? WHERE changes() = 1`)
@@ -427,6 +448,7 @@ export async function claimJob(
           requestId: candidate.revision_request_id, architecture: worker.architecture, attempt: candidate.attempt + 1, revisionId: candidate.revision_id,
           dependencyPlanSha256: planDigest, dependencyReleaseIds,
           inputLockSha256: inputLock?.sha256 ?? null,
+          ...(preserved ? { preservedRecipe: preserved } : {}),
           dependencyPlanRefs: dependencyPlan?.packages.map((item) => ({ releaseId: item.releaseId, url: item.url, signatureUrl: item.signatureUrl, sha256: item.sha256, size: item.size })) ?? [],
         }), timestamp),
       db.prepare(`UPDATE requests SET status='building',updated_at=? WHERE id=? AND status='queued'
@@ -440,28 +462,8 @@ export async function claimJob(
   } catch (cause) {
     return databaseFailure(cause);
   }
-  let claimed: WorkerLease | null;
-  try {
-      claimed = await db.prepare(`
-      SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
-        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json,
-        b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at,
-        q.name AS revision_name, r.version AS revision_version, r.recipe AS revision_recipe,
-        r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,
-        r.sources_json AS revision_sources_json, r.dependencies_json AS revision_dependencies_json, r.make_dependencies_json AS revision_make_dependencies_json,
-        r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
-        r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
-        r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
-      FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
-      WHERE b.id = ? AND b.worker_id = ? AND b.lease_token = ? AND b.status = 'leased'
-        AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
-        AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'area' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
-        AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'security' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)`).bind(candidate.id, worker.id, leaseToken).first<WorkerLease>();
-  } catch (cause) {
-    return databaseFailure(cause);
-  }
-  if (!claimed || !claimed.lease_expires_at) return null;
+  const claimed = await getBuildForWorker(db, candidate.id, worker.id);
+  if (!claimed || !claimed.lease_expires_at || claimed.status !== 'leased' || claimed.lease_token !== leaseToken) return null;
   let claimedDependencyPlan: DependencyPlan | null = null;
   if (claimed.dependency_plan_json !== null) {
     try { claimedDependencyPlan = parseDependencyPlan(JSON.parse(claimed.dependency_plan_json)); }
@@ -469,6 +471,7 @@ export async function claimJob(
     if (!claimedDependencyPlan) throw new WorkerProtocolError(500, 'Stored OPR dependency plan is invalid');
   }
   return {
+    ...(preserved ? { preservedRecipe: preserved } : {}),
     ...(inputLock ? { inputLock } : {}),
     ...(storedOutputContract(claimed) ? { outputContract: storedOutputContract(claimed)!, attempt: claimed.attempt } : {}),
     id: claimed.id,

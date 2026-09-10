@@ -28,6 +28,7 @@ import { validateRevision } from '../src/lib/server/policy';
 import { reviewedPackageVersion } from '../src/lib/server/build-outputs';
 import { startFactory } from '../src/lib/server/requests';
 import type { Env } from '../src/lib/server/env';
+import { checkPreservedWorker } from './preserved-worker-fixture';
 
 const metadata = `pkgbase = demo
 \tpkgver = 1.4
@@ -41,6 +42,8 @@ const metadata = `pkgbase = demo
 \tsha256sums = ${'a'.repeat(64)}
 pkgname = demo
 \tinstall = demo.install
+\tdepends = glibc
+\tdepends = demo-docs=2:1.4-3.2
 pkgname = demo-docs
 \tarch = any
 \tdepends =
@@ -49,7 +52,7 @@ pkgname = demo-docs
 test('.SRCINFO preserves split outputs, complete versions and per-output overrides without shell evaluation', () => {
   const parsed = parseSrcinfo(metadata);
   expect(parsed.version).toBe('2:1.4-3.2');
-  expect(srcinfoField(parsed, parsed.outputs[0], 'depends', 'aarch64')).toEqual(['glibc']);
+  expect(srcinfoField(parsed, parsed.outputs[0], 'depends', 'aarch64')).toEqual(['glibc', 'demo-docs=2:1.4-3.2']);
   expect(srcinfoField(parsed, parsed.outputs[1], 'depends', 'aarch64')).toEqual([]);
   expect(srcinfoField(parsed, parsed.outputs[1], 'arch')).toEqual(['any']);
   expect(() => parseSrcinfo(metadata + '\tpkgver = 7\n')).toThrow('overrides');
@@ -60,9 +63,10 @@ test('.SRCINFO preserves split outputs, complete versions and per-output overrid
 test('real Git recipe capture rejects substitutions and omissions, retains immutable source mapping, and grants no approval', async () => {
   const root = mkdtempSync(join(tmpdir(), 'opr-recipe-capture-'));
   const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8')).join('\n');
-  const db = new TestD1(schema); const objects = new Map<string, Uint8Array>();
+  const db = new TestD1(schema); const objects = new Map<string, Uint8Array>(), objectMetadata = new Map<string, Record<string, string>>();
   const env = { DB: asD1(db), GITHUB_REPOSITORY: 'example/recipes', ARTIFACTS: {
-    put: async (key: string, bytes: Uint8Array) => { objects.set(key, bytes.slice()); },
+    put: async (key: string, bytes: Uint8Array | string, options?: R2PutOptions) => { objects.set(key, typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes.slice()); objectMetadata.set(key, options?.customMetadata ?? {}); },
+    head: async (key: string) => { const bytes = objects.get(key); return bytes ? { size: bytes.length, customMetadata: objectMetadata.get(key) ?? {} } : null; },
     get: async (key: string) => { const bytes = objects.get(key); return bytes ? { size: bytes.length, arrayBuffer: async () => bytes.slice().buffer,
       body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) } : null; },
   } as unknown as R2Bucket };
@@ -126,7 +130,7 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     for (const digest of readdirSync(join(capture, 'objects'))) await retainInputBytes(env, actor, await read({ sha256: digest }));
     const entries: ImportEntry[] = ['demo', 'demo-docs'].map((name) => ({ sourceId: 'opr-x86', name, pkgbase: 'demo', version: '2:1.4-3.2', architecture: name.endsWith('docs') ? 'any' : 'x86_64', target: 'x86_64', collection: 'omapkg',
       filename: `${name}-1.4-3.2-x86_64.pkg.tar.zst`, sha256: 'b'.repeat(64), size: 20, installedSize: 30, description: 'Demo', upstreamUrl: 'https://example.org/demo', licenses: ['MIT'],
-      dependencies: name.endsWith('docs') ? [] : ['glibc'], makeDependencies: ['cc'], checkDependencies: [], provides: [], conflicts: [], replaces: [], packageSignature: null }));
+      dependencies: name.endsWith('docs') ? [] : ['glibc', 'demo-docs=2:1.4-3.2'], makeDependencies: ['cc'], checkDependencies: [], provides: [], conflicts: [], replaces: [], packageSignature: null }));
     const index = await Promise.all(entries.map(async (entry) => [entry.sourceId, entry.name, await sha256(canonicalJson(entry))]));
     const inventory: ImportManifest = { schemaVersion: 1, kind: 'opr', channel: 'stable', sources: [{ id: 'opr-x86', url: 'https://example.org/opr.db', collection: 'omapkg', target: 'x86_64', status: 'captured', sha256: 'c'.repeat(64), entries: 2, signature: 'missing', signatureSha256: null, error: null }], entriesSha256: await sha256(canonicalJson(index)) };
     const { importId } = await beginCatalogImport(env.DB, actor, inventory);
@@ -243,7 +247,7 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     expect(draft.revision.sources_json).toBe('[]');
     expect(reviewedPackageVersion(draft.revision)).toBe('2:1.4-3.2');
     expect(draft.revision.source_date_epoch).toBe(Number(git('show', '-s', '--format=%ct', commit)));
-    expect(JSON.parse(imported.evidence_json).dependencies).toEqual({ x86_64: { runtime: ['glibc'], build: ['cc'] }, aarch64: { runtime: ['glibc'], build: ['arm-tool', 'cc'] } });
+    expect(JSON.parse(imported.evidence_json).dependencies).toEqual({ x86_64: { runtime: ['demo-docs=2:1.4-3.2', 'glibc'], build: ['cc'] }, aarch64: { runtime: ['demo-docs=2:1.4-3.2', 'glibc'], build: ['arm-tool', 'cc'] } });
     const treeFiles = await revisionRecipeFiles(env, draft), rootPath = 'packages/omapkg/demo/';
     expect(treeFiles).toHaveLength(manifest.files.length + 3);
     for (const file of manifest.files) {
@@ -290,6 +294,7 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
       expect(db.prepare('SELECT COUNT(*) AS n FROM approvals').first<{ n: number }>()).toEqual({ n: 0 });
       expect(db.prepare('SELECT COUNT(*) AS n FROM builds').first<{ n: number }>()).toEqual({ n: 0 });
     } finally { globalThis.fetch = previousFetch; }
+    await checkPreservedWorker(db, env, (await env.DB.prepare('SELECT * FROM revisions WHERE id=?').bind(draft.revision.id).first<FactoryRevisionDraft['revision']>())!);
     expect(readdirSync(root)).not.toContain('MUST_NOT_EXECUTE');
     db.exec("UPDATE workers SET status='revoked' WHERE id='inspection-worker'");
     expect(db.prepare('SELECT COUNT(*) AS n FROM current_recipe_source_bundles').first<{ n: number }>()).toEqual({ n: 1 });

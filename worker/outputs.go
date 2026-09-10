@@ -162,7 +162,7 @@ func provenanceForOutputs(job Job, workerID string, result BuildResult, started,
 	report := map[string]any{
 		"schemaVersion": 2, "attempt": job.Attempt, "outputContract": job.OutputContract, "buildId": job.ID, "revisionId": job.RevisionID,
 		"workerId": workerID, "recipeSha256": job.RecipeSHA256, "architecture": job.Architecture, "imageDigest": job.ImageDigest,
-		"sourceDateEpoch": job.SourceDateEpoch, "sources": job.Sources, "network": "disabled", "startedAt": started, "finishedAt": finished,
+		"sourceDateEpoch": job.SourceDateEpoch, "sources": append([]Source{}, job.Sources...), "network": "disabled", "startedAt": started, "finishedAt": finished,
 		"buildEnvironment": result.BuildEnvironment, "runtimeTests": result.RuntimeTests, "outputs": result.Outputs,
 	}
 	if job.DependencyPlan != nil {
@@ -173,6 +173,12 @@ func provenanceForOutputs(job Job, workerID string, result BuildResult, started,
 			return "", errors.New("frozen input evidence is missing")
 		}
 		report["frozenInputs"] = result.InputEvidence
+	}
+	if job.PreservedRecipe != nil {
+		if result.PreservedRecipe == nil || *result.PreservedRecipe != *job.PreservedRecipe {
+			return "", errors.New("preserved recipe source evidence is missing")
+		}
+		report["preservedRecipe"] = result.PreservedRecipe
 	}
 	data, err := encodeJSON(report)
 	if len(data) > 512*1024 {
@@ -225,7 +231,7 @@ func (r *Runner) finishOutputs(ctx context.Context, job Job, jobDir, outputDir, 
 	runtimeDir := ""
 	if plan != nil {
 		runtimeDir = filepath.Join(jobDir, "runtime-dependencies")
-		if err := copyRuntimeDependencies(plan, dependencyDir, runtimeDir); err != nil {
+		if err := copyRuntimeDependencies(ctx, plan, dependencyDir, runtimeDir); err != nil {
 			return result, err
 		}
 	}

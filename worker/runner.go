@@ -32,6 +32,7 @@ type Runner struct {
 
 type BuildResult struct {
 	InputEvidence      *frozenInputEvidence
+	PreservedRecipe    *preservedBuildInputs
 	Outputs            []buildOutput
 	RuntimeTests       []outputRuntimeTest
 	ArtifactPath       string
@@ -212,7 +213,7 @@ func (r *Runner) cleanupJobDirectory(jobDir, imageRef string) {
 	_, _ = r.runContainer(ctx, name, args...)
 }
 
-func (r *Runner) build(ctx context.Context, workdir, output, jobName string, sourceDateEpoch int64, imageRef string) (string, error) {
+func (r *Runner) build(ctx context.Context, workdir, output, jobName string, sourceDateEpoch int64, imageRef string, preserved *materializedRecipe) (string, error) {
 	env := map[string]string{
 		"SOURCE_DATE_EPOCH": fmt.Sprintf("%d", sourceDateEpoch),
 		"PKGDEST":           "/opr/output",
@@ -220,17 +221,34 @@ func (r *Runner) build(ctx context.Context, workdir, output, jobName string, sou
 		"LOGDEST":           "/opr/output",
 		"BUILDDIR":          "/opr/work/build",
 	}
-	args := r.baseContainerArgsForImage(containerName(jobName, "build"), "none", "/opr/work", []mount{
+	mounts := []mount{
 		{Source: workdir, Target: "/opr/work"},
 		{Source: output, Target: "/opr/output"},
-	}, env, workerContainerUser(), imageRef)
+	}
+	verification := ""
+	if preserved != nil {
+		var err error
+		mounts, err = preserved.buildMounts(workdir, output, env)
+		if err != nil {
+			return "", err
+		}
+		verification, err = preserved.verificationScript()
+		if err != nil {
+			return "", err
+		}
+	}
+	args := r.baseContainerArgsForImage(containerName(jobName, "build"), "none", "/opr/work", mounts, env, workerContainerUser(), imageRef)
 	if runtimeKind(r.Runtime) == "podman" {
 		// keep-id makes files produced by the numeric build user owned by the
 		// worker account on rootless Podman hosts, so cleanup cannot be fenced
 		// by an unmapped subuid.
 		args = insertBeforeImage(args, "--userns=keep-id")
 	}
-	args = append(args, "/bin/sh", "-ceu", "mkdir -m 700 /opr/output/.opr-tmp\ntrap 'rm -rf /opr/output/.opr-tmp' EXIT\nexport TMPDIR=/opr/output/.opr-tmp\ncp /etc/makepkg.conf /opr/output/.opr-tmp/makepkg.conf\nprintf '\\nOPTIONS=(\"${OPTIONS[@]/#debug/!debug}\")\\nPKGEXT=.pkg.tar.zst\\n' >> /opr/output/.opr-tmp/makepkg.conf\nexport MAKEPKG_CONF=/opr/output/.opr-tmp/makepkg.conf\nmakepkg --noconfirm --nodeps --check --log\nfound=0\nfor package in /opr/output/*.pkg.tar.zst; do\n  bsdtar -tf \"$package\" | grep -qx '.BUILDINFO'\n  bsdtar -xOf \"$package\" .PKGINFO > /opr/output/.PKGINFO\n  found=1\ndone\ntest \"$found\" -eq 1")
+	buildCommand := "makepkg --noconfirm --nodeps --check --log\n"
+	if preserved != nil {
+		buildCommand = "makepkg --holdver --noconfirm --nodeps --check --log\n"
+	}
+	args = append(args, "/bin/sh", "-ceu", "mkdir -m 700 /opr/output/.opr-tmp\ntrap 'rm -rf /opr/output/.opr-tmp' EXIT\nexport TMPDIR=/opr/output/.opr-tmp\ncp /etc/makepkg.conf /opr/output/.opr-tmp/makepkg.conf\nprintf '\\nOPTIONS=(\"${OPTIONS[@]/#debug/!debug}\")\\nPKGEXT=.pkg.tar.zst\\n' >> /opr/output/.opr-tmp/makepkg.conf\nexport MAKEPKG_CONF=/opr/output/.opr-tmp/makepkg.conf\n"+verification+buildCommand+"found=0\nfor package in /opr/output/*.pkg.tar.zst; do\n  bsdtar -tf \"$package\" | grep -qx '.BUILDINFO'\n  bsdtar -xOf \"$package\" .PKGINFO > /opr/output/.PKGINFO\n  found=1\ndone\ntest \"$found\" -eq 1")
 	log, err := r.runContainer(ctx, containerName(jobName, "build"), args...)
 	if err != nil {
 		return log, fmt.Errorf("offline Arch build: %w", err)
@@ -432,7 +450,15 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 			return BuildResult{}, err
 		}
 	}
-	if err := writeRecipe(workdir, job.Recipe); err != nil {
+	var preserved *materializedRecipe
+	if job.PreservedRecipe != nil {
+		preserved, err = materializePreservedRecipe(ctx, job, filepath.Join(jobDir, "recipe-inputs"), workdir, func(ctx context.Context, ref inputObject, path string) error {
+			return client.fetchInputObject(ctx, job, ref, path)
+		})
+		if err != nil {
+			return BuildResult{}, err
+		}
+	} else if err := writeRecipe(workdir, job.Recipe); err != nil {
 		return BuildResult{}, fmt.Errorf("write recipe: %w", err)
 	}
 	for index, source := range fetched {
@@ -450,7 +476,7 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		if digest, _, err := hashFile(source.Path); err != nil || digest != source.SHA256 {
 			return BuildResult{}, errors.New("fetched source checksum does not match reviewed source")
 		}
-		if err := copyFile(source.Path, filepath.Join(workdir, source.Name)); err != nil {
+		if err := copyFile(ctx, source.Path, filepath.Join(workdir, source.Name)); err != nil {
 			return BuildResult{}, fmt.Errorf("stage source %s: %w", source.Name, err)
 		}
 	}
@@ -473,6 +499,9 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		}
 	}
 	dependencies := append(append(append([]string{}, job.Dependencies...), job.RuntimeDependencies...), job.MakeDependencies...)
+	if preserved != nil {
+		dependencies = job.Dependencies
+	}
 	var prepared preparedImage
 	if frozen != nil {
 		prepared, err = r.prepareFrozenEnvironment(ctx, jobName, frozen, "build")
@@ -502,6 +531,9 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		}
 	}
 	for _, directory := range []string{workdir, output} {
+		if preserved != nil && directory == workdir {
+			continue
+		}
 		if err := os.Chmod(directory, 0o777); err != nil {
 			return BuildResult{Log: log}, fmt.Errorf("prepare build directory: %w", err)
 		}
@@ -510,7 +542,7 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 		_ = os.Chmod(workdir, 0o700)
 		_ = os.Chmod(output, 0o700)
 	}()
-	buildLog, err := r.build(ctx, workdir, output, jobName, job.SourceDateEpoch, prepared.ref)
+	buildLog, err := r.build(ctx, workdir, output, jobName, job.SourceDateEpoch, prepared.ref, preserved)
 	log += buildLog
 	if err != nil {
 		return BuildResult{Log: log}, err
@@ -518,6 +550,9 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 	if job.OutputContract != nil {
 		result, err := r.finishOutputs(ctx, job, jobDir, output, jobName, prepared.ref, dependencyDir, buildEnvironment, frozen)
 		result.InputEvidence = inputEvidence
+		if preserved != nil {
+			result.PreservedRecipe = &preserved.Inputs
+		}
 		result.Log = log + result.Log
 		if err != nil {
 			return result, err
@@ -550,7 +585,7 @@ func (r *Runner) execute(ctx context.Context, job Job, fetched []fetchedSource, 
 	runtimeDir := ""
 	if runtimePlan != nil {
 		runtimeDir = filepath.Join(jobDir, "runtime-dependencies")
-		if err := copyRuntimeDependencies(runtimePlan, dependencyDir, runtimeDir); err != nil {
+		if err := copyRuntimeDependencies(ctx, runtimePlan, dependencyDir, runtimeDir); err != nil {
 			return BuildResult{Log: log}, err
 		}
 	}
@@ -606,7 +641,19 @@ func uniqueStrings(values []string) []string {
 	return result
 }
 
-func copyFile(source, destination string) error {
+type contextReader struct {
+	ctx context.Context
+	io.Reader
+}
+
+func (r contextReader) Read(bytes []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(bytes)
+}
+
+func copyFile(ctx context.Context, source, destination string) error {
 	input, err := os.Open(source)
 	if err != nil {
 		return err
@@ -616,7 +663,7 @@ func copyFile(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(output, input); err != nil {
+	if _, err := io.Copy(output, contextReader{ctx, input}); err != nil {
 		_ = output.Close()
 		return err
 	}

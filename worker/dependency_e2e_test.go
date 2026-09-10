@@ -67,7 +67,7 @@ EOF
 	if err := writeRecipe(firstWork, firstRecipe); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runner.build(ctx, firstWork, firstOutput, "dependency-e2e-first", 1700000000, imageRef); err != nil {
+	if _, err := runner.build(ctx, firstWork, firstOutput, "dependency-e2e-first", 1700000000, imageRef, nil); err != nil {
 		t.Fatal(err)
 	}
 	firstArtifact, err := findArtifact(firstOutput, "opr-dependency-fixture")
@@ -192,7 +192,7 @@ EOF
 	if err := writeRecipe(secondWork, secondRecipe); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runner.build(ctx, secondWork, secondOutput, "dependency-e2e-second-build", 1700000000, prepared.ref); err != nil {
+	if _, err := runner.build(ctx, secondWork, secondOutput, "dependency-e2e-second-build", 1700000000, prepared.ref, nil); err != nil {
 		t.Fatal(err)
 	}
 	secondArtifact, err := findArtifact(secondOutput, "opr-dependent-fixture")

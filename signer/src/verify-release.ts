@@ -62,6 +62,7 @@ export async function verifyStatementEvidence(input: {
     const subjects = [...report.outputs].sort((a, b) => a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0)
       .map((output) => ({ name: output.filename, digest: { sha256: output.artifactSha256 } }));
     if (parameters.surface !== 'binary' || parameters.inputPolicy !== (report.frozenInputs?.manifest.purpose ?? 'shadow') || parameters.attempt !== report.attempt ||
+        canonicalJson(parameters.preservedRecipe ?? null) !== canonicalJson(report.preservedRecipe ?? null) ||
         canonicalJson(parameters.outputContract) !== canonicalJson(report.outputContract) || canonicalJson(subjects) !== canonicalJson(statement.subject)) {
       throw new Error('V2 statement does not bind the complete reviewed output set');
     }

@@ -51,6 +51,7 @@ export async function releaseAttestation(input: ReleaseAttestationInput): Promis
         externalParameters: {
           revisionId: input.revisionId,
           ...(outputs ? { attempt: outputs.attempt, outputContract: outputs.outputContract, inputPolicy: outputs.frozenInputs?.manifest.purpose ?? 'shadow' } : {}),
+          ...(outputs?.preservedRecipe ? { preservedRecipe: outputs.preservedRecipe } : {}),
           surface: input.surface,
           manifestSha256: input.manifestSha256,
           recipeSha256: input.recipeSha256,

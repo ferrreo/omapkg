@@ -461,6 +461,68 @@ native target qualification and production migration also remain open.
 
 Validation for this slice: 237 application tests / 1,600 assertions, clean Svelte
 and pipeline type checks, production web build, and the source/import authority
-views at D1 expression depth 40. Mobile review history is collapsed so failed or
+source/import views with a 40-level expression test budget. Mobile review history is collapsed so failed or
 cancelled attempts do not obscure current prerequisites. The local asdcontrol
 catalog was restored to both primary targets after browser validation.
+
+### Preserved native source execution
+
+Preserved jobs now carry the reviewed capture and per-target source-bundle roots
+through authenticated delivery, immutable attempts, native worker signatures,
+private signing control, central statements and offline verification. Workers
+require frozen dependency inputs and the complete native output contract. Original
+files and Git modes are verified and mounted read-only; retained mirrors, source
+files, caches and public keys are staged separately. Makepkg checks original
+source hashes/signatures and runs with `--holdver` after native metadata matches
+the signed inspection. Source archives reject traversal, special files, duplicate
+paths, escaping links and false size/entry budgets. Repeated source references
+count toward disk limits, and local reads/copies honor cancellation.
+
+Runtime and make/check relations stay target-specific, including native SONAMEs.
+Sibling outputs and their declared provides satisfy runtime requirements in the
+complete installation transaction; explicit build/check requirements still need
+installed providers. Source authority changes permanently fence active tokens,
+including role, catalog, inspection, helper-image and worker changes. Restored
+authority permits a fresh attempt, with previous attempt references retained.
+
+Native x86 acceptance built original `asdcontrol` at `1:0.6.0-2` from its HTTPS
+archive and captured sudoers file, and original Git-tag-based
+`omarchy-audio-tuner` at `0.1.0-1` as an `any` package. Both passed offline build,
+runtime analysis, installation and smoke commands with frozen package inventories.
+A separate native fixture passed signed Git-tag verification, detached source PGP
+verification, patch application, retained executable/symlink handling, Go/Cargo/npm
+cache mounts and split native/portable output installation. Cache-mount acceptance
+does not claim actual Go/Cargo/npm dependency completeness. Native negative runs
+rejected a substituted Git commit, a secret key and changed inspection metadata
+before producing packages.
+
+The complete local coordinator run used actual retained asdcontrol input bytes,
+browser upload and two labelled local review identities, then a registered daemon
+to claim, download, build, upload and complete. An isolated signer signed the
+package and native statement over the real control endpoints. The independent
+offline verifier accepted both input roots and the complete statement; isolated
+GnuPG verified the package's detached signature. The resulting archive SHA-256
+`5eef999d986c4440bb48e15e923a7283751af8289d6eb2fa4eee8642775b3af8`
+also matches the earlier component run byte-for-byte.
+
+These are local acceptance records. Git review was explicitly seeded locally;
+no external recipe PR was merged, no production admission/build approval was
+created, and nothing was published. The temporary local architecture exception
+was removed, both catalog targets restored, the test worker paused, and preview
+configuration restored. Native ARM qualification and full-catalog preparation
+remain open.
+
+Build pages now link the exact original capture and native source bundle and show
+native failure reasons. Browser checks passed at 320, 375, 414, 768, 1440 and
+1920px with no JavaScript errors; anonymous private-input access was denied.
+Validation: 237 application tests / 1,653 assertions, 13 signer tests / 100
+assertions, Go worker tests, clean Svelte/pipeline/signer type checks, production
+web build, and native SQL compilation at the runtime's 100-level expression limit.
+The latter uses `tests/check-d1-depth.py`; Cloudflare's current
+[SQLite runtime configuration](https://github.com/cloudflare/workerd/blob/main/src/workerd/util/sqlite.c%2B%2B)
+sets that limit to 100. A separate stricter 40-level exploratory check is not the
+platform limit.
+
+Full-catalog source retention, reviewed target adaptations, native ARM builds,
+cohort closure/ABI/reproducibility and system qualification, release/client work
+and controlled production migration remain required for the full plan.

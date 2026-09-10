@@ -1,5 +1,5 @@
 import * as v from 'valibot';
-import type { Revision } from './model';
+import type { Architecture, Revision } from './model';
 import { readOprEvidence } from './server/sbom';
 import { parseArchRelation } from './server/arch';
 
@@ -12,6 +12,21 @@ const schema = v.strictObject({ schemaVersion: v.literal(1), capture: object,
   dependencies: v.strictObject({ x86_64: v.optional(dependencies), aarch64: v.optional(dependencies) }),
   metadataDirectory: v.pipe(v.string(), v.regex(/^\.opr-review-[A-Za-z0-9_-]{8,128}$/)) });
 export type PreservedRecipe = v.InferOutput<typeof schema>;
+const buildSchema = v.strictObject({ capture: object, sourceBundle: object });
+export type PreservedBuildInputs = v.InferOutput<typeof buildSchema>;
+
+export function parsePreservedBuildInputs(value: unknown): PreservedBuildInputs {
+  const inputs = v.parse(buildSchema, value);
+  if (inputs.capture.size > 512 * 1024) throw new Error('Preserved capture exceeds metadata budget');
+  return inputs;
+}
+
+export function preservedBuildInputs(revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json'>, target: Architecture): PreservedBuildInputs | null {
+  const evidence = preservedRecipe(revision);
+  if (!evidence) return null;
+  if (!evidence.sources[target]) throw new Error('Preserved sources omit native target');
+  return { capture: evidence.capture, sourceBundle: evidence.sources[target] };
+}
 
 /** Immutable input references are review scope; live database authority is checked separately. */
 export function preservedRecipe(revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json'>): PreservedRecipe | null {

@@ -4,12 +4,13 @@ import { packageFilename, parseOutputContract, parseOutputMetadata, type OutputC
 import { assertRuntimeEvidence, assertRuntimeAnalysis, preparedEnvironment, type RuntimeException } from './runtime-evidence';
 import { assertFrozenEvidence, type FrozenEvidence } from '../frozen-inputs';
 import { parseDependencyPlan, type DependencyPlan } from './dependency-plan';
+import { parsePreservedBuildInputs, type PreservedBuildInputs } from '../preserved-recipe';
 
 export interface OutputEvidence {
   schemaVersion: 2; attempt: number; outputContract: OutputContract;
   buildId: string; revisionId: string; workerId: string; recipeSha256: string; architecture: Architecture;
   imageDigest: string; sourceDateEpoch: number; sources: Source[]; network: 'disabled'; startedAt: string; finishedAt: string;
-  dependencyPlan?: DependencyPlan | null; frozenInputs?: FrozenEvidence; buildEnvironment: unknown;
+  dependencyPlan?: DependencyPlan | null; frozenInputs?: FrozenEvidence; preservedRecipe?: PreservedBuildInputs; buildEnvironment: unknown;
   outputs: { pkgbase: string; filename: string; artifactSha256: string; packageMetadata: OutputMetadata }[];
   runtimeTests: { outputs: string[]; environment: { baseImage: string; preparedImage: string }; smokePassed: true;
     analyses: { name: string; runtimeAnalysis: { elf: { machine: string }[]; nativeCode: string[]; payloadSha256: string } }[] }[];
@@ -24,7 +25,7 @@ function keys(value: unknown, required: string[], optional: string[] = []): void
 // Shared by ingestion, the isolated signer and the offline verifier; no database authority is inferred here.
 export async function assertOutputEvidence(value: unknown, exceptions: RuntimeException[]): Promise<OutputEvidence> {
   keys(value, ['schemaVersion', 'attempt', 'outputContract', 'buildId', 'revisionId', 'workerId', 'recipeSha256', 'architecture', 'imageDigest',
-    'sourceDateEpoch', 'sources', 'network', 'startedAt', 'finishedAt', 'buildEnvironment', 'runtimeTests', 'outputs'], ['dependencyPlan', 'frozenInputs']);
+    'sourceDateEpoch', 'sources', 'network', 'startedAt', 'finishedAt', 'buildEnvironment', 'runtimeTests', 'outputs'], ['dependencyPlan', 'frozenInputs', 'preservedRecipe']);
   const report = value as OutputEvidence;
   if (report.schemaVersion !== 2 || !Number.isSafeInteger(report.attempt) || report.attempt < 1 ||
       !['x86_64', 'aarch64'].includes(report.architecture) || !hash.test(report.recipeSha256) || !/^sha256:[a-f0-9]{64}$/.test(report.imageDigest) ||
@@ -36,6 +37,10 @@ export async function assertOutputEvidence(value: unknown, exceptions: RuntimeEx
       !Number.isFinite(Date.parse(report.finishedAt)) || Date.parse(report.finishedAt) < Date.parse(report.startedAt)) throw new Error('Invalid build evidence timestamps');
   if (report.dependencyPlan !== undefined && report.dependencyPlan !== null && !parseDependencyPlan(report.dependencyPlan)) throw new Error('Invalid v2 dependency plan');
   const contract = parseOutputContract(report.outputContract, report.architecture);
+  if (report.preservedRecipe !== undefined) {
+    parsePreservedBuildInputs(report.preservedRecipe);
+    if (!report.frozenInputs || report.sources.length || report.dependencyPlan) throw new Error('Preserved recipes require frozen inputs and retained source bundles');
+  }
   if (!Array.isArray(report.outputs) || report.outputs.length !== contract.outputs.length) throw new Error('Build output set is incomplete');
   const metadataByName = new Map<string, OutputMetadata>();
   const pkgbases = new Set<string>();
@@ -85,7 +90,8 @@ export function outputResolvedDependencies(report: OutputEvidence) {
     const { lock, manifest } = report.frozenInputs;
     return [
       ...report.sources.map((source) => ({ name: source.name, uri: source.url, digest: { sha256: source.sha256 } })),
-      ...[{ name: 'input-lock', ...lock }, { name: 'helper-archive', ...manifest.helperArchive }, { name: 'makepkg-config', ...manifest.makepkgConfig },
+      ...[...(report.preservedRecipe ? [{ name: 'recipe-capture', ...report.preservedRecipe.capture }, { name: 'recipe-source-bundle', ...report.preservedRecipe.sourceBundle }] : []),
+        { name: 'input-lock', ...lock }, { name: 'helper-archive', ...manifest.helperArchive }, { name: 'makepkg-config', ...manifest.makepkgConfig },
         ...manifest.environments.flatMap((environment) => environment.chunks.map((ref, index) => ({ name: `${environment.name}-packages-${index}`, ...ref })))].map((ref) => ({
         name: ref.name, uri: `urn:sha256:${ref.sha256}`, digest: { sha256: ref.sha256 }, annotations: { size: String(ref.size) },
       })),

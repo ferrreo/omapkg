@@ -1,5 +1,6 @@
 import { currentNativeBuild } from './native-signing';
 import type { OutputContract } from '../output-contract';
+import { preservedBuildInputs, type PreservedBuildInputs } from '../preserved-recipe';
 import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
 import type { Architecture, Revision } from '../model';
 import type { Env } from './env';
@@ -59,7 +60,7 @@ export interface SigningIntentResponse {
     smokePassed: true;
     attempt?: number;
   };
-  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract; inputLockSha256?: string };
+  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract; inputLockSha256?: string; preservedRecipe?: PreservedBuildInputs };
   attestation: { provenance: string; provenanceSignature: string; workerPublicKey: string };
   statement?: string;
   signature?: { key: string; sha256: string; filename: string };
@@ -391,12 +392,14 @@ async function artifactSize(env: SigningControlEnv, row: IntentRow): Promise<num
 }
 
 async function response(row: IntentRow, fingerprint: string, size: number): Promise<SigningIntentResponse> {
+  const preserved = preservedBuildInputs(row, row.build_architecture);
   const result: SigningIntentResponse = {
     id: row.intent_id, status: row.intent_status === 'signed' ? 'signed' : 'ready', kind: row.object_kind,
     expiresAt: expiry(row), keyFingerprint: fingerprint,
     artifact: { key: row.object_key, sha256: row.intent_artifact_sha256, size, filename: row.intent_artifact_filename },
     build: { id: row.build_id, revisionId: row.revision_id, status: 'succeeded', surface: row.surface, architecture: row.build_architecture, workerId: row.build_worker_id!, smokePassed: true, ...(row.build_output_contract_json ? { attempt: row.build_attempt } : {}) },
-    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json), ...(row.build_output_contract_json ? { outputContract: JSON.parse(row.build_output_contract_json) } : {}), ...(row.build_input_lock_sha256 ? { inputLockSha256: row.build_input_lock_sha256 } : {}) },
+    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json), ...(row.build_output_contract_json ? { outputContract: JSON.parse(row.build_output_contract_json) } : {}), ...(row.build_input_lock_sha256 ? { inputLockSha256: row.build_input_lock_sha256 } : {}),
+      ...(preserved ? { preservedRecipe: preserved } : {}) },
     attestation: { provenance: row.build_provenance!, provenanceSignature: row.build_provenance_signature!, workerPublicKey: row.worker_public_key! },
   };
   if (row.object_kind === 'attestation') result.statement = await statement(row);

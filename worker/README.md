@@ -39,13 +39,16 @@ installer. Do not derive `--sha256` from the same untrusted binary after
 download; copy the value from the signed project release channel. The unit
 template is also available as `opr-worker.service`.
 
-Enroll a host with a single-use token. Reading from stdin avoids exposing the token in the process list:
+Enroll a host with a single-use token. Set `RUNTIME_IMAGE` to the approved,
+digest-pinned minimal runtime image for this host's architecture. Reading the
+token from stdin avoids exposing it in the process list:
 
 ```sh
 printf '%s\n' "$OPR_ENROLLMENT_TOKEN" | ./opr-worker enroll \
   --origin https://omapkg.example \
   --name worker-x86-1 \
   --architecture x86_64 \
+  --runtime-image "$RUNTIME_IMAGE" \
   --state-dir "$HOME/.config/opr-worker" \
   --token-stdin
 ```
@@ -56,9 +59,10 @@ digest-pinned image per architecture; hosts use that claim without local
 reconfiguration.
 
 Enrollment, idle claims, and job heartbeats report the embedded daemon version,
-selected container runtime, and fixed capabilities (`offline-oci`,
-`multipart-upload`, `registry-pull`). These fields are signed request metadata
-and are informational; they do not grant extra job authority.
+selected container runtime, and the capabilities compiled into the daemon.
+Current capabilities include native output/runtime analysis, frozen inputs,
+isolated recipe inspection and preserved recipes. Capability declarations select
+compatible jobs; they do not grant review or release authority.
 
 Run the poller under a dedicated Linux account:
 
@@ -91,3 +95,22 @@ For an approved private registry builder, the daemon requests a short-lived
 pull token only when the exact digest is absent locally. It uses
 an ephemeral private auth directory and sends the password through stdin; no
 registry credential enters worker config, containers, logs, or provenance.
+
+Preserved recipes require a reviewed original capture, a retained source bundle
+for the native target, a cohort output contract and a selected frozen dependency
+lock. The original tree stays read-only; Git refs, source hashes/signatures and
+inspected metadata are verified before the original preparation/build functions
+produce packages. Go, Cargo and npm caches are mounted separately with offline
+settings. Changing `pkgver()` output or missing cached dependencies requires a
+new review/preparation step. See [preserved recipes](../docs/preserved-recipes.md).
+
+Run the preserved native acceptance check with a local `job.json` and its complete
+retained `objects/` directory:
+
+```sh
+OPR_PRESERVED_E2E_CAPTURE=/path/to/native-fixture \
+  go test -run TestRunnerPreservedRecipeNativeOCI -count=1 -v
+```
+
+The daemon config still needs `runtimeImage` for compatible shadow jobs, even
+when this particular job supplies a separately frozen runtime environment.

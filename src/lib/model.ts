@@ -29,6 +29,7 @@ export interface Build {
   dependency_blockers_json?: string | null;
   output_contract_json?: string | null;
   input_lock_sha256?: string | null;
+  preserved_inputs_json?: string | null;
 }
 export interface Worker {
   id: string; name: string; architecture: Architecture; public_key: string;
