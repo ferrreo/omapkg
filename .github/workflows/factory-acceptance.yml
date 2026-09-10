@@ -26,8 +26,11 @@ jobs:
     timeout-minutes: 150
     env:
       FACTORY_REGISTRY_HOST: localhost:5000
-      FACTORY_EVIDENCE: ${{ runner.temp }}/factory-evidence-x86
     steps:
+      - name: Initialize evidence directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/factory-evidence-x86"
+          printf 'FACTORY_EVIDENCE=%s\n' "$RUNNER_TEMP/factory-evidence-x86" >> "$GITHUB_ENV"
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -262,8 +265,11 @@ jobs:
     timeout-minutes: 180
     env:
       FACTORY_REGISTRY_HOST: localhost:5000
-      FACTORY_EVIDENCE: ${{ runner.temp }}/factory-evidence-arm
     steps:
+      - name: Initialize evidence directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/factory-evidence-arm"
+          printf 'FACTORY_EVIDENCE=%s\n' "$RUNNER_TEMP/factory-evidence-arm" >> "$GITHUB_ENV"
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
