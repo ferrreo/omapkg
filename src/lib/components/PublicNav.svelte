@@ -63,6 +63,7 @@
 
   <nav class="public-nav__links" aria-label="Public navigation">
     <a href="/packages">Packages</a>
+    <a href="/releases">System releases</a>
     <a href="/repository">Repository status</a>
     <a href="/docs">Docs</a>
     <a href="/privacy">Privacy</a>

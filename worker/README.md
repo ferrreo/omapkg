@@ -75,6 +75,26 @@ Run the poller under a dedicated Linux account:
 ./opr-worker run --config /var/lib/opr-worker/config.json
 ```
 
+Native installation, upgrade, recovery, boot, and reproduction checks use a
+reviewed immutable plan. A worker can fetch that plan and its exact candidate
+outputs, run bounded checks in a fresh private directory, retain the
+worker-signed report, and submit it through the authenticated worker protocol:
+
+```sh
+./opr-worker qualification \
+  --origin https://omapkg.example \
+  --plan-id PLAN_ID \
+  --config /var/lib/opr-worker/config.json \
+  --output /var/lib/opr-worker/qualification.json \
+  --submit
+```
+
+The coordinator accepts a passing result only when command results, typed
+observations, candidate/input/artifact/environment/profile digests, active
+worker identity, and the reviewed plan digest all match. Reproduction reports
+compare two distinct retained native attempts with the same recipe, selected
+input lock, architecture, signed outputs, and signed native statements.
+
 When using the installed systemd unit, enroll as its service account and pass
 `--state-dir /var/lib/opr-worker` so config lands beside the unit's configured
 state path.

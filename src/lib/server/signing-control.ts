@@ -4,7 +4,7 @@ import { preservedBuildInputs, type PreservedBuildInputs } from '../preserved-re
 import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
 import type { Architecture, Revision } from '../model';
 import type { Env } from './env';
-import { audit, now, sha256 } from './db';
+import { audit, now, query, sha256 } from './db';
 import { PolicyError, revisionImage, validateRevision } from './policy';
 import { archRelationCovers, parsePackageMetadata } from './arch';
 import { dependencyPlansEqual, parseDependencyPlan, type DependencyPlan } from './dependency-plan';
@@ -46,11 +46,11 @@ export class SigningControlError extends Error {
 export interface SigningIntentResponse {
   id: string;
   status: 'ready' | 'signed';
-  kind: 'package' | 'database' | 'attestation';
+  kind: 'package' | 'database' | 'attestation' | 'manifest';
   expiresAt: number;
   keyFingerprint: string;
   artifact: { key: string; sha256: string; size: number; filename: string };
-  build: {
+  build?: {
     id: string;
     revisionId: string;
     status: 'succeeded';
@@ -60,8 +60,9 @@ export interface SigningIntentResponse {
     smokePassed: true;
     attempt?: number;
   };
-  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract; inputLockSha256?: string; preservedRecipe?: PreservedBuildInputs };
-  attestation: { provenance: string; provenanceSignature: string; workerPublicKey: string };
+  review?: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract; inputLockSha256?: string; preservedRecipe?: PreservedBuildInputs };
+  attestation?: { provenance: string; provenanceSignature: string; workerPublicKey: string };
+  manifest?: { candidateId: string; manifestSha256: string };
   statement?: string;
   signature?: { key: string; sha256: string; filename: string };
 }
@@ -69,9 +70,10 @@ export interface SigningIntentResponse {
 export interface SigningEventInput {
   action: 'signing.completed';
   intentId: string;
-  kind: 'package' | 'database' | 'attestation';
+  kind: 'package' | 'database' | 'attestation' | 'manifest';
   buildId: string;
   revisionId: string;
+  candidateId?: string;
   artifactKey: string;
   artifactSha256: string;
   signatureKey: string;
@@ -253,7 +255,7 @@ async function validateEvidence(
   if (!FILENAME.test(row.intent_artifact_filename) || row.intent_artifact_filename.includes('/')) fail(409, 'Signing artifact filename is invalid.');
   if (!(row.build_output_contract_json && row.object_kind === 'package') && row.object_key.split('/').at(-1) !== row.intent_artifact_filename) fail(409, 'Signing artifact filename does not match its key.');
   if (row.build_output_contract_json) {
-    if (row.object_kind === 'database' || row.intent_build_attempt !== row.build_attempt) fail(409, 'Native signing requires the exact completed attempt and cannot sign legacy databases.');
+    if (row.intent_build_attempt !== row.build_attempt) fail(409, 'Native signing requires the exact completed attempt.');
     if (row.object_kind === 'attestation' && (row.object_key !== attestationKey(row.build_id, row.build_attempt) || row.intent_artifact_filename !== 'attestation.json')) fail(409, 'Native attestation key differs from build attempt.');
   } else if (row.object_kind === 'package') {
     if (!row.intent_artifact_filename.endsWith('.pkg.tar.zst') || !row.object_key.startsWith(`packages/${row.build_architecture}/`)) {
@@ -296,7 +298,7 @@ async function validateEvidence(
         if (!artifact || artifact.key !== row.object_key || artifact.sha256 !== row.intent_artifact_sha256 || artifact.size !== artifactSize) {
           fail(409, 'Native signing object does not match registered attempt output.');
         }
-      } else {
+      } else if (row.object_kind === 'attestation') {
         const expected = await statement(row);
         if (await sha256(expected) !== row.intent_artifact_sha256 || new TextEncoder().encode(expected).byteLength !== artifactSize) fail(409, 'Attestation does not match reviewed build evidence.');
       }
@@ -429,9 +431,105 @@ async function resetFailed(env: SigningControlEnv, intentId: string, expiresAt: 
   ]);
 }
 
+interface ManifestIntentRow {
+  id: string;
+  candidate_id: string;
+  object_key: string;
+  artifact_sha256: string;
+  artifact_filename: string;
+  manifest_sha256: string;
+  status: 'pending' | 'signed' | 'failed' | 'expired';
+  signature_key: string | null;
+  signature_sha256: string | null;
+  created_at: number;
+  expires_at: number;
+  key_fingerprint: string;
+}
+
+async function assertManifestCandidateCurrent(env: SigningControlEnv, row: ManifestIntentRow): Promise<void> {
+  const candidate = await env.DB.prepare('SELECT id,kind,status,manifest_json,manifest_sha256,created_by FROM distribution_release_candidates WHERE id=?')
+    .bind(row.candidate_id).first<{ id: string; kind: 'system' | 'opr' | 'resolved-transaction'; status: string; manifest_json: string; manifest_sha256: string; created_by: string }>();
+  if (!candidate || candidate.manifest_sha256 !== row.manifest_sha256 || candidate.status !== 'candidate') fail(409, 'Manifest candidate is no longer pending current approval.');
+  let manifest: { approvals?: { baseOwners?: unknown[] }; systemManifest?: { digest?: unknown } | null; oprManifest?: { digest?: unknown } | null };
+  try { manifest = JSON.parse(candidate.manifest_json) as typeof manifest; } catch { fail(409, 'Manifest candidate is invalid.'); }
+  if (candidate.kind === 'resolved-transaction') {
+    const creator = candidate.created_by.startsWith('github:') ? candidate.created_by.slice(7) : '';
+    if (!creator || !await env.DB.prepare("SELECT 1 FROM team_memberships WHERE github_id=? AND team='release'").bind(creator).first()) fail(409, 'Resolved transaction creator no longer has release authority.');
+    for (const [kind, ref] of [['system', manifest.systemManifest], ['opr', manifest.oprManifest]] as const) {
+      const digest = ref && typeof ref.digest === 'string' ? ref.digest : '';
+      if (!SHA256.test(digest) || !await env.DB.prepare("SELECT 1 FROM distribution_release_candidates WHERE kind=? AND manifest_sha256=? AND status IN ('signed','active') LIMIT 1").bind(kind, digest).first()) {
+        fail(409, 'Resolved transaction references are not current signed or active manifests.');
+      }
+    }
+    return;
+  }
+  const approvals = await query<{ kind: 'release' | 'base'; actor: string; area: string | null }>(env.DB,
+    'SELECT kind,actor,area FROM distribution_release_approvals WHERE candidate_id=? AND manifest_sha256=?', row.candidate_id, row.manifest_sha256);
+  const release = approvals.find((approval) => approval.kind === 'release');
+  const releaseActor = release?.actor.startsWith('github:') ? release.actor.slice(7) : '';
+  if (!releaseActor || !await env.DB.prepare("SELECT 1 FROM team_memberships WHERE github_id=? AND team='release'").bind(releaseActor).first()) fail(409, 'Current release-team approval is required.');
+  const areas = Array.isArray(manifest.approvals?.baseOwners) ? manifest.approvals!.baseOwners.filter((area): area is string => typeof area === 'string') : [];
+  for (const area of areas) {
+    const approval = approvals.find((item) => item.kind === 'base' && item.area === area);
+    const actor = approval?.actor.startsWith('github:') ? approval.actor.slice(7) : '';
+    if (!actor || !await env.DB.prepare("SELECT 1 FROM team_memberships WHERE github_id=? AND (team=? OR team IN ('security','admin'))").bind(actor, area).first()) fail(409, `Current base-owner approval is required for ${area}.`);
+  }
+}
+
+async function loadManifestIntent(env: SigningControlEnv, intentId: string): Promise<ManifestIntentRow | null> {
+  try {
+    return await env.DB.prepare('SELECT * FROM distribution_manifest_signing_intents WHERE id=?').bind(intentId).first<ManifestIntentRow>();
+  } catch (cause) {
+    if (cause instanceof Error && /no such table/i.test(cause.message)) return null;
+    throw cause;
+  }
+}
+
+async function manifestArtifactSize(env: SigningControlEnv, row: ManifestIntentRow): Promise<number> {
+  if (!SAFE_KEY.test(row.object_key) || !row.object_key.startsWith('distribution/releases/')) fail(409, 'Manifest signing object is outside the distribution namespace.');
+  if (row.artifact_filename !== 'manifest.json' || !SHA256.test(row.artifact_sha256) || row.manifest_sha256 !== row.artifact_sha256) fail(409, 'Manifest signing evidence is invalid.');
+  const object = await env.ARTIFACTS.get(row.object_key);
+  if (!object || object.size <= 0 || object.size > 4 * 1024 * 1024) fail(409, 'Manifest object is unavailable.');
+  const bytes = new Uint8Array(await object.arrayBuffer());
+  if (await sha256(bytes) !== row.artifact_sha256) fail(409, 'Manifest bytes changed before signing.');
+  return bytes.byteLength;
+}
+
+async function manifestResponse(env: SigningControlEnv, row: ManifestIntentRow, fingerprint: string, size: number): Promise<SigningIntentResponse> {
+  const response: SigningIntentResponse = {
+    id: row.id, status: row.status === 'signed' ? 'signed' : 'ready', kind: 'manifest', expiresAt: row.expires_at, keyFingerprint: fingerprint,
+    artifact: { key: row.object_key, sha256: row.artifact_sha256, size, filename: row.artifact_filename },
+    manifest: { candidateId: row.candidate_id, manifestSha256: row.manifest_sha256 },
+  };
+  if (row.status === 'signed') {
+    if (!row.signature_key || !row.signature_sha256 || row.signature_key !== `${row.object_key}.sig` || !SHA256.test(row.signature_sha256)) fail(409, 'Signed manifest intent has incomplete signature evidence.');
+    response.signature = { key: row.signature_key, sha256: row.signature_sha256, filename: `${row.artifact_filename}.sig` };
+  }
+  return response;
+}
+
+async function claimManifestIntent(env: SigningControlEnv, row: ManifestIntentRow, fingerprint: string): Promise<SigningIntentResponse> {
+  if (row.key_fingerprint !== fingerprint) fail(409, 'Signing key fingerprint changed.');
+  if (row.status === 'expired') fail(409, 'Signing intent has expired.');
+  const timestamp = now();
+  if (row.expires_at <= timestamp) {
+    await env.DB.prepare("UPDATE distribution_manifest_signing_intents SET status='expired' WHERE id=? AND status='pending'").bind(row.id).run();
+    fail(409, 'Signing intent has expired.');
+  }
+  if (row.status !== 'signed') await assertManifestCandidateCurrent(env, row);
+  const size = await manifestArtifactSize(env, row);
+  if (row.status === 'signed') {
+    if (row.signature_key && row.signature_sha256) await verifySignatureObject(env, row.signature_key, row.signature_sha256);
+    return manifestResponse(env, row, fingerprint, size);
+  }
+  return manifestResponse(env, row, fingerprint, size);
+}
+
 export async function claimSigningIntent(env: SigningControlEnv, intentId: string): Promise<SigningIntentResponse> {
   if (!ID.test(intentId)) fail(400, 'Invalid intent ID.');
   const fingerprint = configuredFingerprint(env);
+  const manifest = await loadManifestIntent(env, intentId);
+  if (manifest) return claimManifestIntent(env, manifest, fingerprint);
   let row = await load(env, intentId);
   const timestamp = now();
   const expiresAt = expiry(row);
@@ -480,24 +578,24 @@ function parseEvent(value: unknown): SigningEventInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'Signing event must be an object.');
   const input = value as Record<string, unknown>;
   const action = input.action === 'signing.completed' ? input.action : null;
-  const kind = input.kind === 'package' || input.kind === 'database' || input.kind === 'attestation' ? input.kind : null;
+  const kind = input.kind === 'package' || input.kind === 'database' || input.kind === 'attestation' || input.kind === 'manifest' ? input.kind : null;
   const mode = input.mode === 'cloudflare-worker-secret' || input.mode === 'managed-kms' ? input.mode : null;
   const result = {
     action, kind, mode,
-    intentId: text(input.intentId, 128, 'Intent ID'), buildId: text(input.buildId, 128, 'Build ID'), revisionId: text(input.revisionId, 128, 'Revision ID'),
+    intentId: text(input.intentId, 128, 'Intent ID'), buildId: typeof input.buildId === 'string' ? input.buildId : '', revisionId: typeof input.revisionId === 'string' ? input.revisionId : '', candidateId: typeof input.candidateId === 'string' ? input.candidateId : '',
     artifactKey: text(input.artifactKey, 1024, 'Artifact key'), artifactSha256: text(input.artifactSha256, 64, 'Artifact digest'),
     signatureKey: text(input.signatureKey, 1024, 'Signature key'), signatureSha256: text(input.signatureSha256, 64, 'Signature digest'),
     signatureFilename: text(input.signatureFilename, 256, 'Signature filename'), publicKeyKey: text(input.publicKeyKey, 1024, 'Public key object key'),
     fingerprint: text(input.fingerprint, 64, 'Signing fingerprint'), keyId: text(input.keyId, 128, 'Signing key ID'),
   };
-  if (!action || !kind || !mode || !ID.test(result.intentId) || !ID.test(result.buildId) || !ID.test(result.revisionId) ||
+  if (!action || !kind || !mode || !ID.test(result.intentId) || (kind !== 'manifest' && (!ID.test(result.buildId) || !ID.test(result.revisionId))) || (kind === 'manifest' && !ID.test(result.candidateId)) ||
       !SHA256.test(result.artifactSha256) || !SHA256.test(result.signatureSha256) || !FINGERPRINT.test(result.fingerprint.toLowerCase()) ||
       !SAFE_KEY.test(result.artifactKey) || !SAFE_KEY.test(result.signatureKey) || !SAFE_KEY.test(result.publicKeyKey) ||
       !result.signatureKey.endsWith('.sig') || result.signatureFilename !== `${result.signatureFilename.replace(/\.sig$/, '')}.sig` ||
       /[\/]/.test(result.signatureFilename) || !FILENAME.test(result.signatureFilename)) {
     fail(400, 'Signing event evidence is invalid.');
   }
-  return { ...result, action, kind, mode, fingerprint: result.fingerprint.toLowerCase() };
+  return { ...result, action, kind, mode, fingerprint: result.fingerprint.toLowerCase(), buildId: result.buildId, revisionId: result.revisionId, candidateId: result.candidateId || undefined };
 }
 
 async function verifySignatureObject(env: SigningControlEnv, key: string, expected: string): Promise<void> {
@@ -513,6 +611,7 @@ export async function completeSigningIntent(env: SigningControlEnv, input: Signi
   if (input.fingerprint !== fingerprint) fail(409, 'Signing key fingerprint mismatch.');
   if (env.SIGNING_KEY_ID && input.keyId !== env.SIGNING_KEY_ID) fail(409, 'Signing key ID mismatch.');
   if (input.publicKeyKey !== publicKeyKey(env)) fail(409, 'Public key object mismatch.');
+  if (input.kind === 'manifest') return completeManifestSigningIntent(env, input, fingerprint);
   const row = await load(env, input.intentId);
   if (row.build_id !== input.buildId || row.revision_id !== input.revisionId || row.object_kind !== input.kind ||
       row.object_key !== input.artifactKey || row.intent_artifact_sha256 !== input.artifactSha256 ||
@@ -545,6 +644,38 @@ export async function completeSigningIntent(env: SigningControlEnv, input: Signi
     const current = await load(env, input.intentId);
     if (current.intent_status === 'signed' && current.signature_key === input.signatureKey && current.signature_sha256 === input.signatureSha256) return { idempotent: true };
     fail(409, 'Signing intent changed during completion.');
+  }
+  return { idempotent: false };
+}
+
+async function completeManifestSigningIntent(env: SigningControlEnv, input: SigningEventInput, fingerprint: string): Promise<{ idempotent: boolean }> {
+  const row = await loadManifestIntent(env, input.intentId);
+  if (!row) fail(404, 'Signing intent not found.');
+  if (row.key_fingerprint !== fingerprint) fail(409, 'Signing key fingerprint changed.');
+  if (!input.candidateId || input.candidateId !== row.candidate_id || input.artifactKey !== row.object_key || input.artifactSha256 !== row.artifact_sha256 ||
+      input.signatureKey !== `${row.object_key}.sig` || input.signatureFilename !== `${row.artifact_filename}.sig`) fail(409, 'Manifest signing event does not match intent.');
+  if (row.status === 'signed') {
+    if (row.signature_key === input.signatureKey && row.signature_sha256 === input.signatureSha256) {
+      await verifySignatureObject(env, input.signatureKey, input.signatureSha256);
+      return { idempotent: true };
+    }
+    fail(409, 'Manifest signing intent already has different signature evidence.');
+  }
+  if (row.status !== 'pending' && row.status !== 'failed') fail(409, 'Manifest signing intent is no longer active.');
+  if (row.expires_at <= now()) fail(409, 'Signing intent has expired.');
+  await manifestArtifactSize(env, row);
+  await verifySignatureObject(env, input.signatureKey, input.signatureSha256);
+  const timestamp = now();
+  const result = await env.DB.batch([
+    env.DB.prepare(`UPDATE distribution_manifest_signing_intents SET status='signed',signature_key=?,signature_sha256=?,consumed_at=?,key_fingerprint=?
+      WHERE id=? AND status IN ('pending','failed') AND expires_at>?`).bind(input.signatureKey, input.signatureSha256, timestamp, fingerprint, input.intentId, timestamp),
+    env.DB.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at)
+      SELECT 'signer','signing.completed',?,?,? WHERE changes()=1`).bind(row.candidate_id, JSON.stringify(input), timestamp),
+  ]);
+  if (!(result[0] as { meta?: { changes?: number } })?.meta?.changes) {
+    const current = await loadManifestIntent(env, input.intentId);
+    if (current?.status === 'signed' && current.signature_key === input.signatureKey && current.signature_sha256 === input.signatureSha256) return { idempotent: true };
+    fail(409, 'Manifest signing intent changed during completion.');
   }
   return { idempotent: false };
 }

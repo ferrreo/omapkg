@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { navigating } from '$app/stores';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import PackageRow from '$lib/components/PackageRow.svelte';
@@ -19,15 +20,19 @@
     surface = data.surface || '';
     architecture = data.architecture || '';
   }
-  $: filtered = packages.filter((release) => {
-    const matchesQuery = !query || release.name.toLowerCase().includes(query.toLowerCase());
-    const matchesChannel = !channel || release.channel === channel;
-    const matchesSurface = !surface || release.surface === surface;
-    const matchesArch = !architecture || release.architecture === architecture;
-    return matchesQuery && matchesChannel && matchesSurface && matchesArch;
-  });
+  $: loading = Boolean($navigating);
   $: user = data?.user || null;
   $: role = data?.role || 'public';
+
+  function nextPageHref() {
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    if (channel) params.set('channel', channel);
+    if (surface) params.set('surface', surface);
+    if (architecture) params.set('architecture', architecture);
+    if (data.nextCursor) params.set('cursor', data.nextCursor);
+    return `/packages?${params}`;
+  }
 </script>
 
 <svelte:head>
@@ -54,7 +59,7 @@
       <div class="field">
         <label for="channel">Channel</label>
         <select id="channel" name="channel" bind:value={channel}>
-          <option value="">All channels</option>
+          <option value="all">All channels</option>
           <option value="stable">Stable</option>
           <option value="dev">Dev</option>
           <option value="withdrawn">Withdrawn</option>
@@ -79,31 +84,27 @@
       <button class="button button--primary" type="submit"><Icon name="search" size={15} />Filter</button>
     </form>
 
-    {#if packages.length && filtered.length}
+    {#if data.systemVersion}<p class="field__hint">Published system context: Omarchy {data.systemVersion}. Package compatibility still requires an exact release record.</p>{/if}
+    {#if loading}<p class="catalog-loading" role="status" aria-live="polite">Loading published package records…</p>{/if}
+
+    {#if packages.length}
       <div class="section__head section__head--results">
-        <p>{filtered.length} release{filtered.length === 1 ? '' : 's'} in current view.</p>
+        <p>Showing {packages.length} published release record{packages.length === 1 ? '' : 's'}{data.hasNext ? ' on this page' : ''}.</p>
         <a href="/request">Request a package<Icon name="arrow" size={14} /></a>
       </div>
-      <div class="package-list">
-        {#each filtered as release}
+      <div class="package-list" aria-busy={loading}>
+        {#each packages as release}
           <PackageRow {release} />
         {/each}
       </div>
-    {:else if packages.length}
-      <EmptyState
-        title="No releases match those filters."
-        description="Change a filter or request a package that is not in the catalogue yet."
-        actionLabel="Clear filters"
-        actionHref="/packages"
-        icon="search"
-      />
+      {#if data.nextCursor}<nav class="catalog-pagination" aria-label="Package catalogue pages"><a class="button" href={nextPageHref()}>Next page<Icon name="arrow" size={14} /></a></nav>{/if}
     {:else}
       <EmptyState
-        title="No public releases yet."
-        description="A release appears here after its generated recipe is reviewed and its channel state is recorded."
-        actionLabel="Request a package"
-        actionHref="/request"
-        icon="package"
+        title={query || channel !== 'stable' || surface || architecture ? 'No releases match those filters.' : 'No public releases yet.'}
+        description={query || channel !== 'stable' || surface || architecture ? 'Change a filter or request a package that is not in the catalogue yet.' : 'A release appears here after its generated recipe is reviewed and its channel state is recorded.'}
+        actionLabel={query || channel !== 'stable' || surface || architecture ? 'Clear filters' : 'Request a package'}
+        actionHref={query || channel !== 'stable' || surface || architecture ? '/packages' : '/request'}
+        icon={query || channel !== 'stable' || surface || architecture ? 'search' : 'package'}
       />
     {/if}
   </section>
@@ -113,3 +114,8 @@
     <nav class="site-footer__links" aria-label="Footer navigation"><a href="/">Home</a><a href="/docs">Docs</a><a href="/request">Request</a></nav>
   </footer>
 </main>
+
+<style>
+  .catalog-loading { color: var(--color-text-muted); font-family: var(--font-body); margin-block: var(--space-md); }
+  .catalog-pagination { display: flex; justify-content: center; margin-top: var(--space-xl); }
+</style>

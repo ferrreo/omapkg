@@ -102,10 +102,6 @@
 }
 
 @media (max-width: 39.99rem) {
-  .public-nav__links a:not(.button) {
-    display: none;
-  }
-
   .section__head,
   .maintainer-page__head,
   .notice-bar,

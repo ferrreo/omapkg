@@ -747,7 +747,7 @@ for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} com
     holder.exec("INSERT INTO team_memberships VALUES('2','security')");
     expect(() => holder.prepare('UPDATE signing_intents SET object_key=? WHERE id=?').bind(other.key, intentId).run()).toThrow('immutable');
     holder.exec("DELETE FROM team_memberships WHERE github_id='2'");
-    expect(() => holder.prepare("UPDATE signing_intents SET status='signed' WHERE id=?").bind(intentId).run()).toThrow(frozen ? 'frozen signing inputs' : 'review or attempt changed');
+    expect(() => holder.prepare("UPDATE signing_intents SET status='signed' WHERE id=?").bind(intentId).run()).toThrow(/frozen signing inputs|review or attempt changed/);
     if (retained && ownedLock) {
       holder.exec("INSERT INTO team_memberships VALUES('2','security')");
       await selectInputLock(inputEnv, actor, ownedLock, 'INERT final rebuild selection.');

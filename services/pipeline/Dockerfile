@@ -68,6 +68,7 @@ RUN set -eux; \
   rm -rf "$work_dir" /var/lib/apt/lists/*
 
 COPY worker/*.go worker/go.mod /tmp/omapkg-tools/
+COPY worker/qualification /tmp/omapkg-tools/qualification
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local /opt/go/bin/go build -C /tmp/omapkg-tools -trimpath -ldflags="-s -w" -o /opt/omapkg-tools . \
     && rm -rf /tmp/omapkg-tools
 

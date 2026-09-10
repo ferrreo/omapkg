@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+settings=${OMARCHY_CLIENT_CONFIG:-/etc/omarchy/manifest-client.conf}
+if [[ -r "$settings" ]]; then
+  # This file is installed by the local administrator, never fetched from a manifest.
+  source "$settings"
+fi
+
+channel=${OMARCHY_CHANNEL:-}
+manifest_url=${OMARCHY_MANIFEST_URL:-}
+discovery_url=${OMARCHY_MANIFEST_DISCOVERY_URL:-}
+origin=${OMARCHY_MANIFEST_ORIGIN:-}
+case "${1:-}" in
+  stable|rc|edge) channel=$1; shift ;;
+esac
+if [[ -n "${1:-}" && "${1#--}" == "$1" ]]; then
+  manifest_url=$1
+  shift
+fi
+if [[ -z "$channel" || ( -z "$manifest_url" && -z "$discovery_url" && -z "$origin" ) ]]; then
+  echo 'usage: omarchy-refresh-pacman [stable|rc|edge] [IMMUTABLE_MANIFEST_OR_DISCOVERY_URL] [--apply]' >&2
+  exit 2
+fi
+
+client=${OMARCHY_MANIFEST_CLIENT:-/usr/lib/omarchy/omapkg-manifest-client}
+key=${OMARCHY_RELEASE_KEY:-/etc/omarchy/omapkg-release-key.asc}
+fingerprint=${OMARCHY_RELEASE_FINGERPRINT:-}
+config=${OMARCHY_PACMAN_CONFIG:-/etc/pacman.conf}
+state=${OMARCHY_MANIFEST_STATE:-/var/lib/omarchy/manifest-state.json}
+stage=${OMARCHY_MANIFEST_STAGE:-/var/lib/omarchy/manifest-stage}
+pacman=${OMARCHY_PACMAN:-pacman}
+
+if [[ -z "$fingerprint" ]]; then
+  echo 'OMARCHY_RELEASE_FINGERPRINT must pin trusted release key' >&2
+  exit 2
+fi
+args=(stage --channel "$channel" --key "$key" --fingerprint "$fingerprint" --config "$config" --state "$state" --stage-dir "$stage" --pacman "$pacman")
+[[ -n "$manifest_url" ]] && args+=(--manifest "$manifest_url")
+[[ -n "$discovery_url" ]] && args+=(--discovery "$discovery_url")
+[[ -n "$origin" ]] && args+=(--origin "$origin")
+exec "$client" "${args[@]}" "$@"

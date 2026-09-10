@@ -5,6 +5,7 @@ import { cohortPhases, requiredArchitectures } from '../distribution';
 import type { Actor, Build } from '../model';
 import { cohortConflict, getCohort, scopeAuthority } from './cohorts';
 import { evaluateCohortGate, type CohortGate, type CohortMatrixRow } from './cohort-gates';
+import { storeQualificationRun } from './cohort-qualification';
 import { readCohortManifest } from './cohort-members';
 import { now, query, sha256 } from './db';
 import type { Env } from './env';
@@ -38,6 +39,7 @@ export async function checkCohortPage(env: Env, actor: Actor | null, cohortId: s
   if (!Number.isSafeInteger(page) || page < 0 || page * pageSize >= cohortMemberCount(manifest)) throw new PolicyError(400, 'Choose an existing member page.');
   const epoch = await evidenceEpoch(env.DB, cohortId);
   const gate = await evaluateCohortGate(env, current, true, page);
+  for (const result of gate.qualification) await storeQualificationRun(env.DB, result);
   const report: PageReport = { schemaVersion: 1, cohortId, revision, manifestSha256, phase: current.phase, epoch, page,
     memberCount: Math.min(pageSize, cohortMemberCount(manifest) - page * pageSize), checkedAt: now(), checkedBy: reviewer.id, blockers: gate.blockers, matrix: gate.matrix };
   const json = canonicalJson(report); const digest = await sha256(json);
@@ -89,7 +91,7 @@ export async function aggregateCohortGate(db: D1Database, current: CohortRow): P
       WHERE p.cohort_id=? AND p.revision=? AND p.phase=? AND p.epoch=? AND p.blocker_count=0 AND p.page<?
       AND p.member_count=MIN(?,?-p.page*?) AND ${latestPage}`)
       .bind(pages.pages, current.id, current.current_revision, current.phase, pages.epoch, pages.pages, pages.pageSize, pages.memberCount, pages.pageSize)];
-  return { next, blockers, matrix: [], fences, pages };
+  return { next, blockers, matrix: [], fences, qualification: [], pages };
 }
 
 export async function currentCohortPage(db: D1Database, current: CohortRow, page: number) {

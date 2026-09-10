@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+channel=${1:-}
+case "$channel" in
+  stable|rc|edge) ;;
+  dev)
+    echo 'dev is local Omarchy development mode; it cannot select a mutable distribution manifest' >&2
+    exit 2
+    ;;
+  *)
+    echo 'usage: omarchy-channel-set stable|rc|edge [IMMUTABLE_MANIFEST_OR_DISCOVERY_URL] [--apply]' >&2
+    exit 2
+    ;;
+esac
+shift || true
+manifest_url=
+if [[ -n "${1:-}" && "${1#--}" == "$1" ]]; then manifest_url=$1; shift; fi
+export OMARCHY_CHANNEL=$channel
+if [[ -n "$manifest_url" ]]; then
+  exec "${OMARCHY_REFRESH_PACMAN:-$(dirname "$0")/omarchy-refresh-pacman}" "$channel" "$manifest_url" "$@"
+fi
+exec "${OMARCHY_REFRESH_PACMAN:-$(dirname "$0")/omarchy-refresh-pacman}" "$channel" "$@"

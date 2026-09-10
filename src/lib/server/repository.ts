@@ -30,6 +30,24 @@ type BinaryRelease = ReleaseRow & {
   artifact_sha256: string; artifact_size: number; artifact_filename: string;
 };
 
+export type RepositoryDatabasePackage = {
+  id: string;
+  name: string;
+  version: string;
+  architecture: Architecture | 'any';
+  artifactKey: string;
+  signatureKey: string;
+  artifactSha256: string;
+  artifactSize: number;
+  artifactFilename: string;
+  installedSize: number | null;
+  sourceDateEpoch: number;
+  license: string;
+  upstreamUrl: string;
+  description: string;
+  metadata: PackageMetadata;
+};
+
 export function binaryReleases(rows: ReleaseRow[]): BinaryRelease[] {
   return rows.filter((row) => row.surface === 'binary').map((row) => {
     const { artifact_key, signature_key, artifact_sha256, artifact_size, artifact_filename } = row;
@@ -196,29 +214,27 @@ function field(name: string, values: string | string[]): string {
   return `%${name}%\n${list.filter(Boolean).join('\n')}\n\n`;
 }
 
-async function repositoryDatabase(env: Env, rows: BinaryRelease[]): Promise<Uint8Array> {
+export async function repositoryDatabaseForPackages(env: Env, packages: readonly RepositoryDatabasePackage[]): Promise<Uint8Array> {
   const entries: Array<{ path: string; body: Uint8Array }> = [];
-  for (const row of [...rows].sort((a, b) => `${a.name}-${a.version}-${a.architecture}`.localeCompare(`${b.name}-${b.version}-${b.architecture}`))) {
-    if (!row.artifact_filename || !PACKAGE_FILENAME.test(row.artifact_filename) || !SHA256.test(row.artifact_sha256) || !Number.isSafeInteger(row.artifact_size) || row.artifact_size < 1) {
-      fail(409, `Release ${row.id} has incomplete artifact metadata.`);
+  for (const item of [...packages].sort((a, b) => `${a.name}-${a.version}-${a.architecture}`.localeCompare(`${b.name}-${b.version}-${b.architecture}`))) {
+    if (!item.artifactFilename || !PACKAGE_FILENAME.test(item.artifactFilename) || !SHA256.test(item.artifactSha256) || !Number.isSafeInteger(item.artifactSize) || item.artifactSize < 1) {
+      fail(409, `Release ${item.id} has incomplete artifact metadata.`);
     }
-    const signature = await env.ARTIFACTS.get(row.signature_key);
-    if (!signature) fail(409, `Release ${row.id} has no package signature.`);
+    const signature = await env.ARTIFACTS.get(item.signatureKey);
+    if (!signature) fail(409, `Release ${item.id} has no package signature.`);
     const signatureBytes = new Uint8Array(await signature.arrayBuffer());
-    if (!signatureBytes.length || signatureBytes.length > 16_384) fail(409, `Release ${row.id} has invalid package signature.`);
-    if (row.installed_size !== null && (!Number.isSafeInteger(row.installed_size) || row.installed_size < 1)) {
-      fail(409, `Release ${row.id} has invalid installed package size.`);
+    if (!signatureBytes.length || signatureBytes.length > 16_384) fail(409, `Release ${item.id} has invalid package signature.`);
+    if (item.installedSize !== null && (!Number.isSafeInteger(item.installedSize) || item.installedSize < 1)) {
+      fail(409, `Release ${item.id} has invalid installed package size.`);
     }
-    const packageDir = `${row.name}-${row.version}`;
-    const metadata = row.package_metadata ?? packageMetadataFromProvenance(row.provenance, {
-      name: row.name, version: row.version, architecture: row.architecture, installedSize: row.installed_size,
-    });
+    const packageDir = `${item.name}-${item.version}`;
+    const metadata = item.metadata;
     const desc = [
-      field('FILENAME', row.artifact_filename), field('NAME', row.name), field('BASE', row.name), field('VERSION', row.version),
-      field('DESC', finalDescription(row, row.name)), field('CSIZE', String(row.artifact_size)),
-      row.installed_size === null ? '' : field('ISIZE', String(row.installed_size)),
-      field('SHA256SUM', row.artifact_sha256), field('PGPSIG', base64(signatureBytes)), field('URL', row.upstream_url),
-      field('LICENSE', textValue(row.license, 'unknown')), field('ARCH', row.architecture), field('BUILDDATE', String(row.source_date_epoch)),
+      field('FILENAME', item.artifactFilename), field('NAME', item.name), field('BASE', item.name), field('VERSION', item.version),
+      field('DESC', item.description), field('CSIZE', String(item.artifactSize)),
+      item.installedSize === null ? '' : field('ISIZE', String(item.installedSize)),
+      field('SHA256SUM', item.artifactSha256), field('PGPSIG', base64(signatureBytes)), field('URL', item.upstreamUrl),
+      field('LICENSE', textValue(item.license, 'unknown')), field('ARCH', item.architecture), field('BUILDDATE', String(item.sourceDateEpoch)),
       field('PACKAGER', 'omapkg'), metadata.depends.length ? field('DEPENDS', metadata.depends) : '',
       metadata.provides.length ? field('PROVIDES', metadata.provides) : '',
       metadata.conflicts.length ? field('CONFLICTS', metadata.conflicts) : '',
@@ -227,6 +243,21 @@ async function repositoryDatabase(env: Env, rows: BinaryRelease[]): Promise<Uint
     entries.push({ path: `${packageDir}/desc`, body: new TextEncoder().encode(desc) });
   }
   return gzip(tar(entries));
+}
+
+async function repositoryDatabase(env: Env, rows: BinaryRelease[]): Promise<Uint8Array> {
+  return repositoryDatabaseForPackages(env, rows.map((row) => {
+    const metadata = row.package_metadata ?? packageMetadataFromProvenance(row.provenance, {
+      name: row.name, version: row.version, architecture: row.architecture, installedSize: row.installed_size,
+    });
+    return {
+      id: row.id, name: row.name, version: row.version, architecture: row.architecture,
+      artifactKey: row.artifact_key, signatureKey: row.signature_key, artifactSha256: row.artifact_sha256,
+      artifactSize: row.artifact_size, artifactFilename: row.artifact_filename, installedSize: row.installed_size,
+      sourceDateEpoch: row.source_date_epoch, license: row.license, upstreamUrl: row.upstream_url,
+      description: finalDescription(row, row.name), metadata,
+    };
+  }));
 }
 
 export async function currentStable(env: Env): Promise<ReleaseRow[]> {

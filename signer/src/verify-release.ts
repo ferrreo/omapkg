@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { assertRuntimeEvidence, runtimeExceptions } from '../../src/lib/server/runtime-evidence';
 import { assertOutputEvidence, outputResolvedDependencies } from '../../src/lib/server/output-evidence';
 import { canonicalJson } from '../../src/lib/canonical-json';
+import { isReleaseManifest, releaseManifestBytes, releaseManifestDigest, type ReleaseManifest } from '../../src/lib/distribution-release';
 
 const digest = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 
@@ -27,6 +28,28 @@ export async function verifyReleaseEvidence(input: {
   if (verified.signatures.length !== 1) throw new Error('Expected one release signature');
   await verified.signatures[0].verified;
   return verifyStatementEvidence(input);
+}
+
+/** Verify a signed distribution root against an independently trusted OpenPGP key. */
+export async function verifyDistributionManifest(input: {
+  manifest: Uint8Array;
+  signature: Uint8Array;
+  trustedPublicKey: string;
+  trustedFingerprint: string;
+}): Promise<{ manifest: ReleaseManifest; digest: string }> {
+  if (input.manifest.byteLength > 4 * 1024 * 1024 || input.signature.byteLength > 1024 * 1024) throw new Error('Distribution manifest exceeds size limit');
+  const key = await openpgp.readKey({ armoredKey: input.trustedPublicKey });
+  if (!/^[a-f0-9]{40}$/i.test(input.trustedFingerprint) || key.getFingerprint() !== input.trustedFingerprint.toLowerCase()) throw new Error('Release key does not match independently trusted fingerprint');
+  const verified = await openpgp.verify({ message: await openpgp.createMessage({ binary: input.manifest }), signature: await openpgp.readSignature({ binarySignature: input.signature }), verificationKeys: key });
+  if (verified.signatures.length !== 1) throw new Error('Expected one distribution manifest signature');
+  await verified.signatures[0].verified;
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(input.manifest);
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { throw new Error('Distribution manifest is not valid JSON'); }
+  if (!isReleaseManifest(value) || releaseManifestBytes(value) !== text || value.policy.version !== 'distribution-release-v1' ||
+      (value.kind === 'system' && value.lane !== 'system') || (value.kind === 'opr' && value.lane !== 'opr') ||
+      (value.kind === 'resolved-transaction' && value.lane !== 'transaction')) throw new Error('Distribution manifest contract is invalid');
+  return { manifest: value, digest: await releaseManifestDigest(value) };
 }
 
 export async function verifyStatementEvidence(input: {

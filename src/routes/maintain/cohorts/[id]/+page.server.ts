@@ -11,6 +11,7 @@ import { getCatalogPackage, listCatalogPackages } from '$lib/server/catalog-owne
 import { query, sha256 } from '$lib/server/db';
 import { environment, field, formAction, maintainer } from '$lib/server/http';
 import { PolicyError } from '$lib/server/policy';
+import { createQualificationPlan, reviewQualificationPlan } from '$lib/server/native-qualification';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
@@ -50,6 +51,13 @@ export const load: PageServerLoad = async (event) => {
   const packages = event.url.searchParams.has('search') ? await listCatalogPackages(env.DB, { search: event.url.searchParams.get('search') ?? '', limit: 25 }) : [];
   const existingMembers = await query<{ pkgbase: string }>(env.DB, 'SELECT pkgbase FROM cohort_members WHERE cohort_id=? AND revision=? AND pkgbase IN (SELECT value FROM json_each(?))',
     record.id, record.current_revision, JSON.stringify(packages.map((item) => item.pkgbase)));
+  const qualificationPlans = await query<any>(env.DB, `SELECT p.id,p.operation,p.architecture,p.coverage_kind,p.coverage_pkgbase,p.coverage_root_sha256,p.coverage_release_id,p.coverage_sha256,p.plan_sha256,p.plan_json,p.created_by,p.created_at,
+    (SELECT COUNT(DISTINCT r.kind) FROM native_qualification_plan_reviews r WHERE r.plan_id=p.id) AS review_kinds,
+    (SELECT COUNT(DISTINCT r.actor) FROM native_qualification_plan_reviews r WHERE r.plan_id=p.id) AS review_actors
+    FROM native_qualification_plans p WHERE p.cohort_id=? AND p.revision=? ORDER BY p.created_at DESC,p.rowid DESC LIMIT 100`, record.id, record.current_revision);
+  const qualificationEvidence = await query<any>(env.DB, `SELECT e.id,e.plan_id,e.operation,e.architecture,e.coverage_kind,e.coverage_pkgbase,e.coverage_root_sha256,e.status,e.reproducibility_status,e.worker_id,e.created_at,
+    (SELECT COUNT(*) FROM native_qualification_exceptions x WHERE x.evidence_id=e.id AND x.expires_at>unixepoch()) AS exception_count
+    FROM native_qualification_evidence e WHERE e.cohort_id=? AND e.revision=? ORDER BY e.created_at DESC,e.rowid DESC LIMIT 256`, record.id, record.current_revision);
   return { record, manifest, gate: { next: gate.next, blockers: gate.blockers, matrix: gate.matrix }, facts,
     members, memberCount, page, pageCount: Math.ceil(memberCount / cohortPageSize), progress: progress?.pages ?? null,
     memberSearch, memberFound: location >= 0,
@@ -64,6 +72,7 @@ export const load: PageServerLoad = async (event) => {
       'SELECT revision,manifest_sha256,created_at,title FROM cohort_revisions WHERE cohort_id=? ORDER BY revision DESC LIMIT 50', record.id),
     search: event.url.searchParams.get('search') ?? '',
     packages, existingMembers: existingMembers.map((item) => item.pkgbase),
+    qualificationPlans, qualificationEvidence,
     tab: ['overview', 'changes', 'phases', 'tests', 'history'].includes(event.url.searchParams.get('tab') ?? '') ? event.url.searchParams.get('tab')! : 'overview',
   };
 };
@@ -99,4 +108,18 @@ export const actions: Actions = {
     Number(field(form, 'revision')), field(form, 'factsDigest'), field(form, 'narrative'))),
   approveChangelog: (event) => formAction(event, async (form) => approveCohortChangelog(environment(event).DB, event.locals.actor, event.params.id,
     Number(field(form, 'revision')), field(form, 'digest'), field(form, 'reason'))),
+  qualificationPlan: (event) => formAction(event, async (form) => {
+    const raw = field(form, 'planJson');
+    let plan: unknown; try { plan = JSON.parse(raw); } catch { throw new PolicyError(400, 'Qualification plan JSON is invalid.'); }
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || (plan as { cohortId?: unknown }).cohortId !== event.params.id || (plan as { revision?: unknown }).revision !== (await getCohort(environment(event).DB, event.params.id)).current_revision) throw new PolicyError(409, 'Qualification plan must target this current cohort revision.');
+    const result = await createQualificationPlan(environment(event), event.locals.actor, plan);
+    return { qualificationPlanId: result.id, qualificationPlanSha256: result.planSha256 };
+  }),
+  qualificationReview: (event) => formAction(event, async (form) => {
+    const DB = environment(event).DB; const planId = field(form, 'planId');
+    const plan = await DB.prepare('SELECT cohort_id,revision FROM native_qualification_plans WHERE id=?').bind(planId).first<{ cohort_id: string; revision: number }>();
+    const current = await getCohort(DB, event.params.id);
+    if (!plan || plan.cohort_id !== event.params.id || plan.revision !== current.current_revision) throw new PolicyError(409, 'Qualification plan is not part of this current cohort revision.');
+    return reviewQualificationPlan(environment(event), event.locals.actor, planId, field(form, 'kind') as 'area' | 'security', field(form, 'reason'));
+  }),
 };

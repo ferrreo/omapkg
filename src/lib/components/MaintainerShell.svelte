@@ -16,6 +16,7 @@
   const sections: Record<string, Array<{ href: string; label: string; key: string }>> = {
     queue: [{ href: '/maintain', label: 'Review queue', key: 'queue' }, { href: '/maintain/dependencies', label: 'Dependency proposals', key: 'dependencies' }],
     catalog: [{ href: '/maintain/catalog', label: 'Ownership policies', key: 'catalog' }, { href: '/maintain/imports', label: 'Imports and matching', key: 'imports' }, { href: '/maintain/inputs', label: 'Frozen build inputs', key: 'inputs' }],
+    cohorts: [{ href: '/maintain/cohorts', label: 'Cohort scopes', key: 'cohorts' }, { href: '/maintain/rebuilds', label: 'Rebuild planning', key: 'rebuilds' }],
     operations: [{ href: '/maintain/workers', label: 'Workers', key: 'workers' }, { href: '/maintain/images', label: 'Images', key: 'images' }, { href: '/maintain/team', label: 'Team access', key: 'team' }],
   };
 
@@ -25,6 +26,7 @@
     inputs: 'Frozen build inputs',
     dependencies: 'Dependency admission',
     cohorts: 'Build cohorts',
+    rebuilds: 'Rebuild planning',
     audit: 'Audit log',
     images: 'Build images',
     queue: 'Maintainer workspace',
@@ -34,7 +36,7 @@
     team: 'Maintainer team'
   };
 
-  $: activeKey = ['requests', 'dependencies'].includes(active) ? 'queue' : ['imports', 'inputs'].includes(active) ? 'catalog' : ['workers', 'images', 'team'].includes(active) ? 'operations' : active;
+  $: activeKey = ['requests', 'dependencies'].includes(active) ? 'queue' : ['imports', 'inputs'].includes(active) ? 'catalog' : ['workers', 'images', 'team'].includes(active) ? 'operations' : ['rebuilds'].includes(active) ? 'cohorts' : active;
   $: title = titles[active] || 'Maintainer workspace';
   $: userLabel = user?.githubUsername ? `@${user.githubUsername}` : user?.name || 'Signed-in maintainer';
 </script>

@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"opr/worker/qualification"
 )
 
 var workerVersion = "dev"
@@ -39,6 +41,8 @@ func main() {
 		err = analyzePackageCommand(os.Args[2:])
 	case "capture-catalog":
 		err = captureCatalogCommand(os.Args[2:])
+	case "qualification":
+		err = qualification.Run(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -57,6 +61,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       opr-worker run [--config PATH] [--once]")
 	fmt.Fprintln(os.Stderr, "       opr-worker version")
 	fmt.Fprintln(os.Stderr, "       opr-worker capture-catalog --source arch|omarchy|opr --output DIRECTORY [--channel CHANNEL --arch ARCH]")
+	fmt.Fprintln(os.Stderr, "       opr-worker qualification (--plan FILE | --origin URL --plan-id ID) (--key-file FILE | --config PATH) --output FILE [--submit]")
 }
 
 func enrollCommand(args []string) error {

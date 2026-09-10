@@ -187,7 +187,7 @@ test('claims only current reviewed evidence and completes signing idempotently',
       const claimed = await claimSigningIntent(env, intentId);
       expect(claimed.kind).toBe('attestation');
       expect(claimed.statement).toBe(statement);
-      expect(claimed.build.surface).toBe(surface);
+      expect(claimed.build?.surface).toBe(surface);
       const substituted = statement.replace(buildId, `x${buildId.slice(1)}`);
       artifacts.objects.set(key, { body: new TextEncoder().encode(substituted), customMetadata: { sha256: await sha256(substituted) } });
       db.prepare('UPDATE signing_intents SET artifact_sha256=? WHERE id=?').bind(await sha256(substituted), intentId).run();

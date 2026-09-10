@@ -34,7 +34,7 @@ export interface Env {
   OPR_SIGNING_FINGERPRINT?: string;
 }
 
-type SignKind = 'package' | 'database' | 'attestation';
+type SignKind = 'package' | 'database' | 'attestation' | 'manifest';
 
 interface SignIntent {
   id: string;
@@ -48,7 +48,7 @@ interface SignIntent {
     size: number;
     filename: string;
   };
-  build: {
+  build?: {
     id: string;
     revisionId: string;
     status: string;
@@ -58,7 +58,7 @@ interface SignIntent {
     smokePassed: boolean;
     attempt?: number;
   };
-  review: {
+  review?: {
     manifestSha256: string;
     areaApproved: boolean;
     securityApproved: boolean;
@@ -67,12 +67,13 @@ interface SignIntent {
     inputLockSha256?: string;
     preservedRecipe?: import('../../src/lib/preserved-recipe').PreservedBuildInputs;
   };
-  attestation: {
+  attestation?: {
     provenance: string;
     provenanceSignature: string;
     workerPublicKey: string;
   };
   statement?: string;
+  manifest?: { candidateId: string; manifestSha256: string };
   signature?: { key: string; sha256: string; filename: string };
 }
 
@@ -214,7 +215,7 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
   if (!intent || intent.id === undefined || !ID.test(intent.id)) throw new Error('invalid signing intent identity');
   if (intent.status !== 'ready' && intent.status !== 'signed') throw new Error('signing intent is not active');
   if (intent.status === 'ready' && (!Number.isSafeInteger(intent.expiresAt) || intent.expiresAt <= now)) throw new Error('signing intent expired');
-  if (intent.kind !== 'package' && intent.kind !== 'database' && intent.kind !== 'attestation') throw new Error('invalid signing object kind');
+  if (intent.kind !== 'package' && intent.kind !== 'database' && intent.kind !== 'attestation' && intent.kind !== 'manifest') throw new Error('invalid signing object kind');
   if (!intent.keyFingerprint || intent.keyFingerprint.toLowerCase() !== identity.fingerprint) {
     throw new Error('signing key fingerprint mismatch');
   }
@@ -234,6 +235,16 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
   }
   if (intent.kind === 'attestation' && (artifact.filename !== 'attestation.json' || artifact.size > 1024 * 1024)) {
     throw new Error('invalid attestation object');
+  }
+  if (intent.kind === 'manifest') {
+    if (artifact.filename !== 'manifest.json' || !artifact.key.startsWith('distribution/releases/') || artifact.size > 4 * 1024 * 1024 ||
+        !intent.manifest || !ID.test(intent.manifest.candidateId) || !SHA256.test(intent.manifest.manifestSha256) || artifact.sha256 !== intent.manifest.manifestSha256) {
+      throw new Error('invalid distribution manifest signing subject');
+    }
+    if (intent.status === 'signed') {
+      if (!intent.signature || !SHA256.test(intent.signature.sha256) || intent.signature.key !== `${artifact.key}.sig` || intent.signature.filename !== `${artifact.filename}.sig`) throw new Error('signed intent has incomplete signature evidence');
+    }
+    return;
   }
   const build = intent.build;
   if (!build || !ID.test(build.id) || !build.revisionId || build.status !== 'succeeded' ||
@@ -262,7 +273,7 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
       !Number.isFinite(Date.parse(provenance.startedAt)) || !Number.isFinite(Date.parse(provenance.finishedAt))) {
     throw new Error('build provenance does not match reviewed inputs');
   }
-  if (provenance.schemaVersion === 2 && (intent.kind === 'database' || !intent.review.outputContract || !Number.isSafeInteger(build.attempt))) throw new Error('native signing requires reviewed output contract and attempt');
+  if (provenance.schemaVersion === 2 && (!intent.review.outputContract || !Number.isSafeInteger(build.attempt))) throw new Error('native signing requires reviewed output contract and attempt');
   if (provenance.schemaVersion !== 2 && ((build.surface === 'binary' && !SHA256.test(provenance.artifactSha256)) || (intent.kind === 'package' && provenance.artifactSha256 !== artifact.sha256))) {
     throw new Error('build provenance artifact digest does not match reviewed inputs');
   }
@@ -270,24 +281,24 @@ function assertIntentShape(intent: SignIntent, now: number, maxBytes: number, id
 }
 
 async function verifyAttestation(intent: SignIntent): Promise<void> {
+  if (intent.kind === 'manifest') return;
+  if (!intent.attestation || !intent.review || !intent.build) throw new Error('build signing evidence is missing');
   const publicKey = decodeBase64(intent.attestation.workerPublicKey, 'workerPublicKey');
   const signature = decodeBase64(intent.attestation.provenanceSignature, 'provenanceSignature');
   if (publicKey.byteLength !== 32 || signature.byteLength !== 64) throw new Error('invalid worker attestation key or signature');
   const key = await crypto.subtle.importKey('raw', publicKey as unknown as BufferSource, { name: 'Ed25519' }, false, ['verify']);
   const valid = await crypto.subtle.verify('Ed25519', key, signature as unknown as BufferSource, new TextEncoder().encode(intent.attestation.provenance) as unknown as BufferSource);
   if (!valid) throw new Error('worker provenance signature is invalid');
-  if (intent.kind !== 'database') {
-    const provenance = JSON.parse(intent.attestation.provenance);
-    if (provenance.schemaVersion === 2) {
-      const report = await assertOutputEvidence(provenance, intent.review.runtimeExceptions ?? []);
-      if (report.frozenInputs?.lock.sha256 !== intent.review.inputLockSha256) throw new Error('Native frozen inputs differ from reviewed signing lock');
-      if (canonicalJson(report.preservedRecipe ?? null) !== canonicalJson(intent.review.preservedRecipe ?? null)) throw new Error('Native preserved sources differ from reviewed signing inputs');
-      if (report.attempt !== intent.build.attempt || canonicalJson(report.outputContract) !== canonicalJson(intent.review.outputContract) ||
-          (intent.kind === 'package' && !report.outputs.some((output) => output.filename === intent.artifact.filename && output.artifactSha256 === intent.artifact.sha256))) {
-        throw new Error('Native signing subject or output contract differs from reviewed attempt');
-      }
-    } else await assertRuntimeEvidence(provenance, provenance.imageDigest, intent.review.runtimeExceptions ?? []);
-  }
+  const provenance = JSON.parse(intent.attestation.provenance);
+  if (provenance.schemaVersion === 2) {
+    const report = await assertOutputEvidence(provenance, intent.review.runtimeExceptions ?? []);
+    if (report.frozenInputs?.lock.sha256 !== intent.review.inputLockSha256) throw new Error('Native frozen inputs differ from reviewed signing lock');
+    if (canonicalJson(report.preservedRecipe ?? null) !== canonicalJson(intent.review.preservedRecipe ?? null)) throw new Error('Native preserved sources differ from reviewed signing inputs');
+    if (report.attempt !== intent.build.attempt || canonicalJson(report.outputContract) !== canonicalJson(intent.review.outputContract) ||
+        (intent.kind === 'package' && !report.outputs.some((output) => output.filename === intent.artifact.filename && output.artifactSha256 === intent.artifact.sha256))) {
+      throw new Error('Native signing subject or output contract differs from reviewed attempt');
+    }
+  } else if (intent.kind !== 'database') await assertRuntimeEvidence(provenance, provenance.imageDigest, intent.review.runtimeExceptions ?? []);
   if (intent.kind === 'attestation') {
     if (!intent.statement || createHash('sha256').update(intent.statement).digest('hex') !== intent.artifact.sha256) {
       throw new Error('release statement does not match signing intent');
@@ -618,8 +629,9 @@ async function recordAudit(env: Env, intent: SignIntent, identity: Identity, sig
       action: 'signing.completed',
       intentId: intent.id,
       kind: intent.kind,
-      buildId: intent.build.id,
-      revisionId: intent.build.revisionId,
+      buildId: intent.build?.id ?? `manifest-${intent.manifest?.candidateId ?? intent.id}`,
+      revisionId: intent.build?.revisionId ?? intent.manifest?.candidateId ?? intent.id,
+      ...(intent.manifest ? { candidateId: intent.manifest.candidateId } : {}),
       artifactKey: intent.artifact.key,
       artifactSha256: intent.artifact.sha256,
       signatureKey: signature.key,

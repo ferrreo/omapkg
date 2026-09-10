@@ -18,12 +18,14 @@ import type { FrozenEvidence } from '../frozen-inputs';
 import { selectedInputLock } from './input-locks';
 import { cohortMembers, readCohortManifest } from './cohort-members';
 import { assertRetainedAbiEvidence } from './build-abi-evidence';
+import { qualifyCohort, qualificationBlockers, type QualificationResult } from './cohort-qualification';
+import { qualificationEvidenceForGate } from './native-qualification';
 
 export interface CohortMatrixRow {
   pkgbase: string; architecture: Architecture; required: boolean; status: string;
   buildId: string | null; attempt: number | null; reason: string | null;
 }
-export type CohortGate = { next: CohortPhase | null; blockers: CohortBlocker[]; matrix: CohortMatrixRow[]; fences: D1PreparedStatement[] };
+export type CohortGate = { next: CohortPhase | null; blockers: CohortBlocker[]; matrix: CohortMatrixRow[]; fences: D1PreparedStatement[]; qualification: QualificationResult[] };
 const message = (cause: unknown) => cause instanceof Error ? cause.message : 'Evidence could not be verified.';
 
 async function reviewAuthority(env: Env, actorId: string, kind: string, area: string) {
@@ -38,7 +40,7 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
   if (page !== undefined && (!Number.isSafeInteger(page) || page < 0 || page * pageSize >= cohortMemberCount(manifest))) throw new PolicyError(400, 'Choose an existing cohort member page.');
   if (manifest.schemaVersion === 2 && page === undefined) throw new PolicyError(400, 'Check each member page before advancing this complete cohort.');
   const members = manifest.schemaVersion === 1 && page === undefined ? manifest.members : await cohortMembers(env.DB, current, (page ?? 0) * pageSize, pageSize);
-  const gate: CohortGate = { next: cohortPhases[cohortPhases.indexOf(current.phase) + 1] ?? null, blockers: [], matrix: [], fences: [] };
+  const gate: CohortGate = { next: cohortPhases[cohortPhases.indexOf(current.phase) + 1] ?? null, blockers: [], matrix: [], fences: [], qualification: [] };
   const block = (code: string, reason: string, pkgbase: string | null = null, architecture: Architecture | null = null, href: string | null = null) => {
     gate.blockers.push({ code, reason, pkgbase, architecture, href });
   };
@@ -169,11 +171,29 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
     }
   }
   if (phaseIndex >= 3) {
-    const kinds = phaseIndex === 3 ? ['dependency-closure', 'abi', 'reproducibility']
-      : ['dependency-closure', 'abi', 'reproducibility', 'install', 'upgrade', 'recovery', ...(manifest.lane === 'system' ? ['boot'] : [])];
+    const kinds = phaseIndex === 3 ? ['reproducibility']
+      : ['reproducibility', 'install', 'upgrade', 'recovery', ...(manifest.lane === 'system' ? ['boot'] : [])];
     const targets = manifest.schemaVersion === 2 ? manifest.architectures : requiredArchitectures.filter((target) => manifest.members.some((member) => member.policy.architectures.includes(target)));
+    const pageMembers = new Set(members.map((member) => member.pkgbase));
     for (const architecture of targets) {
-      for (const kind of kinds) block(`check-${kind}`, `Verified ${kind} evidence bound to this candidate is required.`, null, architecture);
+      try {
+        const result = await qualifyCohort(env, current, architecture);
+        gate.qualification.push(result);
+        gate.blockers.push(...qualificationBlockers(result, pageMembers));
+        gate.fences.push(...result.fences);
+      } catch (cause) {
+        block('candidate-qualification', message(cause), null, architecture, `/maintain/cohorts/${encodeURIComponent(current.id)}?tab=tests`);
+      }
+      for (const kind of kinds) {
+        const operation = kind as 'install' | 'upgrade' | 'recovery' | 'boot' | 'reproducibility';
+        const scopes = manifest.lane === 'system' && operation !== 'reproducibility' ? [{ coverageKind: 'system' as const, pkgbase: undefined }] : members.map((member) => ({ pkgbase: member.pkgbase, coverageKind: 'member' as const }));
+        for (const scope of scopes) {
+          const evidence = await qualificationEvidenceForGate(env.DB, { cohortId: current.id, revision: current.current_revision, operation, architecture, ...scope });
+          if (evidence?.candidate_sha256 === current.manifest_sha256 && (evidence.status === 'passed' || operation === 'reproducibility' && Boolean(evidence.exception_id))) {
+            gate.fences.push(qualificationFence(env.DB, evidence.id, current.id, current.current_revision, operation, architecture, scope.coverageKind, scope.pkgbase));
+          } else block(`check-${kind}`, `Verified ${kind} evidence bound to this ${scope.coverageKind === 'system' ? 'final system universe' : `member ${scope.pkgbase}`} is required.`, scope.pkgbase ?? null, architecture);
+        }
+      }
     }
     if (manifest.lane === 'opr' && !manifest.compatibleSystems.length) block('supported-systems', 'Choose exact supported system snapshots for the independent OPR cohort.');
   }
@@ -189,4 +209,26 @@ function authorityFence(db: D1Database, actorId: string, kind: string, area: str
   return db.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 1,CASE WHEN EXISTS(
     SELECT 1 FROM team_memberships WHERE github_id=? AND (team IN ('security','admin') OR (?='area' AND team=?))) THEN 1 ELSE 0 END`)
     .bind(actorId.slice(7), kind, area);
+}
+
+function qualificationFence(db: D1Database, evidenceId: string, cohortId: string, revision: number, operation: string, architecture: Architecture, coverageKind: 'member' | 'system', pkgbase?: string) {
+  return db.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*) FROM native_qualification_evidence e
+    WHERE e.id=? AND e.cohort_id=? AND e.revision=? AND e.operation=? AND e.architecture=?
+      AND e.candidate_sha256=(SELECT manifest_sha256 FROM cohort_revisions WHERE cohort_id=? AND revision=?)
+      AND e.coverage_kind=? AND (? IS NULL AND e.coverage_pkgbase IS NULL OR e.coverage_kind='member' AND e.coverage_pkgbase=?)
+      AND (e.coverage_kind='member' OR EXISTS(SELECT 1 FROM owned_repository_universes u WHERE u.lane='system' AND u.release_id=e.coverage_release_id AND u.root_sha256=e.coverage_root_sha256 AND u.status IN ('prepared','published')))
+      AND EXISTS(SELECT 1 FROM native_qualification_plans p WHERE p.id=e.plan_id AND p.cohort_id=e.cohort_id AND p.revision=e.revision
+        AND p.operation=e.operation AND p.architecture=e.architecture AND p.candidate_sha256=e.candidate_sha256
+        AND p.input_sha256=e.input_sha256 AND p.artifact_sha256=e.artifact_sha256
+        AND p.coverage_kind=e.coverage_kind AND p.coverage_pkgbase IS e.coverage_pkgbase AND p.coverage_root_sha256 IS e.coverage_root_sha256 AND p.coverage_release_id IS e.coverage_release_id AND p.coverage_sha256=e.coverage_sha256)
+      AND EXISTS(SELECT 1 FROM workers w WHERE w.id=e.worker_id AND w.public_key=e.worker_public_key AND w.status='active' AND w.architecture=e.architecture)
+      AND EXISTS(SELECT 1 FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
+        WHERE s.lock_sha256=e.input_sha256 AND s.cohort_id=e.cohort_id AND s.cohort_revision=e.revision AND s.architecture=e.architecture AND l.purpose='owned')
+      AND (e.operation='reproducibility' OR EXISTS(SELECT 1 FROM build_artifacts a JOIN builds b ON b.id=a.build_id AND b.attempt=a.attempt
+        JOIN workers w ON w.id=b.worker_id AND w.status='active' AND w.architecture=e.architecture
+        JOIN revisions r ON r.id=b.revision_id JOIN cohort_members m ON m.recipe_revision_id=r.id
+        WHERE a.sha256=e.artifact_sha256 AND b.architecture=e.architecture AND b.status='succeeded'
+          AND m.cohort_id=e.cohort_id AND m.revision=e.revision))
+      AND (e.status='passed' OR (e.operation='reproducibility' AND EXISTS(SELECT 1 FROM native_qualification_exceptions x WHERE x.evidence_id=e.id AND x.expires_at>unixepoch())))`)
+    .bind(evidenceId, cohortId, revision, operation, architecture, cohortId, revision, coverageKind, pkgbase ?? null, pkgbase ?? null);
 }

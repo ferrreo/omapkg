@@ -116,6 +116,13 @@ and does not block comparison merely because Omarchy lacks an ARM repository.
 - Workspace navigation now groups Inbox, Catalog, Cohorts, Releases, Operations
   and Audit; import and worker/image/team deep links remain accessible within
   their sections.
+- `/maintain/rebuilds` now previews a local full-catalog planner report against
+  current admitted catalog policies and the selected cohort's exact reviewed
+  recipe bindings. It shows unresolved mappings, target/source gaps and cyclic
+  bootstrap blockers, and only creates an explicit plan-phase scope revision;
+  no build or release is queued. Its operations panel derives queue age, target
+  parity and persisted cohort-check counts from D1, marking empty evidence as
+  unmeasured.
 - The complete application suite now passes 225 tests; Svelte and pipeline
   type checks report no errors. Native lease tests cover held and unreviewed
   cohort scope as well as both-target omission gates.
@@ -762,6 +769,31 @@ and qualification continue in subsequent batches; this is not release cutover.
 
 See [native analysis](../native-analysis.md) for protocol, limits and checks.
 
+## Versioned release engine and owned repository staging
+
+Release roots now use one canonical signed JSON contract for system, OPR and
+resolved transactions. System channels are explicit `edge`, `rc` and `stable`;
+OPR channels are `quarantine` and `stable`. Activation pointers and compare-
+and-swap parents are keyed by lane and channel, while the stable channel remains
+the default public alias. Resolved transactions have short configurable expiry
+and an audited renewal action; immutable system and OPR snapshots have a longer
+support lifetime.
+
+Maintainers can prepare named owned repository databases, package chunks and
+universe roots from current cohorts before final qualification through the
+`prepare-repositories` action. Final preparation requires exact owned artifact,
+signature, attestation, changelog and qualification evidence; release-team
+approval, signer evidence, compatibility and activation parent are rechecked at
+activation. System candidates require both `omarchy` and `omarchy-settings` on
+both architectures with one reviewed upstream commit. Stable final outputs must
+reuse the exact final-version bytes qualified in an RC; RC metadata relabels and
+untested final bytes remain blocked.
+
+No imports, admissions, production release publication or cutover were run.
+Local validation: 279 application tests and 14,513 assertions passed; Svelte
+reported zero errors/warnings. Channel migration is additive after release
+schema migration 0047.
+
 
 ## Production rollout: Go runtime batch
 
@@ -785,3 +817,56 @@ The registry's manifest digest differed from Docker's local cached digest. The
 remote manifest was checked against the tested image configuration before the
 correct digest was activated. Release-engine, client and final-universe
 qualification integration continues in the next verified batch.
+
+## Release implementation integration
+
+The release lifecycle now separates repository staging, candidate preparation,
+human approval, signing, and activation. Signing returns the final immutable
+manifest digest before an OPR counterpart is prepared against it. Coupled system
+and OPR activation fences both channel pointers in one transaction; independent
+OPR activation preserves the selected system. Transaction renewal retains the
+exact active pair. RC and stable can carry the same final package version without
+sharing a channel identity, and public views no longer label final-version RC
+bytes as stable or expose unsigned superseded drafts.
+
+Native qualification plans and signed observations bind the exact release ID,
+owned-universe root, cohort revision, architecture, profile, input lock, and
+artifact set. Reproducibility exceptions remain security-authorized and scoped
+to the exact failed subject. New release gates require the current owned schema;
+legacy test-fixture fallbacks were removed. The central signer verifies native
+schema-2 database context as well as package and attestation context. A real
+OpenPGP/Ed25519 regression exercises `core.db` signing and idempotent retry.
+
+The manifest-aware Go client verifies transaction and lane signatures, expiry,
+channel sequence, immutable repository databases, and recovery authorization.
+The image-lock command also verifies the package chunks used by native image
+recipes. [System image profiles](../../system-images/README.md) provide native
+x86_64/aarch64 UEFI image and KVM boot commands. Image construction resolves only
+the profile's dependency closure from signed owned databases, verifies exact
+archives/signatures and firmware bytes, and records release provenance. Contract,
+cryptographic fixture, shell syntax, and ShellCheck validation ran; no system
+image was built or booted.
+
+Maintainer release controls cover preparation, base/release review, signing and
+activation. The cohort Tests tab exposes exact native plans, reviews and signed
+evidence; pasted plans and reviews must belong to the displayed current cohort.
+Rebuild planning reads proposals and current admission/recipe scope. Local browser
+checks covered public releases, maintainer releases, cohort tests and rebuild
+planning at 320, 375, 414, 768, 1440 and 1920px. Missing-cohort staging, invalid
+candidate JSON, cross-cohort qualification plans and invalid rebuild reports were
+rejected with drafts retained. Mobile public navigation remains available, and
+keyboard focus is visible. These checks do not substitute for human workflow or
+screen-reader sign-off before cutover.
+
+Native pacman parsed all five generated database names (`core`, `extra`,
+`multilib`, `omarchy`, `omapkg`) in an offline read-only container. The check
+performed repository synchronization/listing only, with isolated temporary state
+and no package installation. The preceding Go runtime batch also passed fresh
+[native ARM regression 34484138741](https://github.com/ferrreo/omapkg/actions/runs/34484138741)
+on `ubuntu-24.04-arm`; the pull-only registry credential was removed afterward.
+
+Imports, admissions, bulk captures, full-catalog builds, production release
+publication and cutover remain stopped at the requester's direction. Native
+system installation/upgrade/recovery/boot acceptance requires an authorized owned
+release and remains an enforced release gate. Service deployment is recorded
+separately below; deploying implementation does not activate a distribution.

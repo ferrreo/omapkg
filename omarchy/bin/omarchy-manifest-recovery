@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+settings=${OMARCHY_CLIENT_CONFIG:-/etc/omarchy/manifest-client.conf}
+if [[ -r "$settings" ]]; then source "$settings"; fi
+
+client=${OMARCHY_MANIFEST_CLIENT:-/usr/lib/omarchy/omapkg-manifest-client}
+state=${OMARCHY_MANIFEST_STATE:-/var/lib/omarchy/manifest-state.json}
+exec "$client" recovery --state "$state"

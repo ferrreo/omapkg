@@ -35,6 +35,7 @@ test('catalog bounds latest rows in SQL and preserves cursor order across releas
     seed(db, 'alpha-1', 'alpha');
     seed(db, 'alpha-2', 'alpha');
     seed(db, 'alpha-arm', 'alpha', 'aarch64');
+    seed(db, 'alpha-dev', 'alpha', 'x86_64', 'dev');
     seed(db, 'beta', 'beta');
     seed(db, 'delta', 'delta', 'x86_64', 'dev');
     seed(db, 'gamma', 'gamma', 'x86_64', 'stable', 'recipe');
@@ -50,8 +51,12 @@ test('catalog bounds latest rows in SQL and preserves cursor order across releas
     expect(offsetPage.map((row) => row.id)).toEqual(['beta', 'gamma']);
     expect((await page(db, 'q=alpha&architecture=x86_64')).items.map((item) => item.id)).toEqual(['alpha-3']);
     expect((await page(db, 'surface=recipe')).items.map((item) => item.id)).toEqual(['gamma']);
-    expect((await page(db, 'channel=dev')).items.map((item) => item.id)).toEqual(['delta']);
+    expect((await page(db, 'channel=dev')).items.map((item) => item.id)).toEqual(['alpha-dev', 'delta']);
     expect((await page(db, 'limit=1.5')).nextCursor).not.toBeNull();
+    const allFirst = await catalogPage(asD1(db), { channel: 'all', search: '', limit: 2 });
+    expect(allFirst.map((row) => row.id)).toEqual(['alpha-arm', 'alpha-3']);
+    const allSecond = await catalogPage(asD1(db), { channel: 'all', search: '', limit: 2, after: { name: allFirst[1]!.name, architecture: allFirst[1]!.architecture, id: allFirst[1]!.id, channel: allFirst[1]!.channel } });
+    expect(allSecond.map((row) => row.id)).toEqual(['alpha-dev', 'beta']);
   } finally { db.close(); }
 });
 

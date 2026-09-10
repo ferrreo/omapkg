@@ -56,6 +56,21 @@ undeclared static/bundled dependencies, native `vercmp`/pacman validation,
 admitted owned providers and system tests are additional required evidence.
 The proposal grants no release readiness or authority.
 
+## Maintainer workbench
+
+`/maintain/rebuilds` accepts a local report and an existing unpublished cohort
+scope. The server maps every report member to the current admitted catalog
+revision and the selected cohort's exact current recipe binding. It never uses
+report-supplied policy or recipe identity, and stale or unreviewed mappings stay
+visible as blockers. The preview retains missing native targets, unavailable
+sources, unresolved providers and cyclic bootstrap groups, then allows one
+explicit plan-phase scope revision through the existing chunked scope upload.
+That action creates no build or release.
+
+The same page reports persisted queue age, scoped native target parity and
+immutable cohort-check records. Empty measurements are labelled unmeasured; a
+successful build count is not release or full-catalog qualification.
+
 Run the graph regression with `bun test tests/rebuild-plan.test.ts`; it includes
 a 15,000-package dependency chain, split outputs, old-provider removal, virtual
 provider ambiguity, native target separation and a cyclic build component.
