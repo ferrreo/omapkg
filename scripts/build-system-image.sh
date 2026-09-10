@@ -98,16 +98,17 @@ archive_metadata_checked=0
 timestamp_ownership_order_checked=0
 declare -A allowed_owners=()
 inspect_package_archive() {
-  local archive=$1 listing mtree entries sorted
+  local archive=$1 listing mtree entries duplicate
   listing=$(bsdtar --list --file "$archive")
-  [[ "$listing" == "$(printf '%s\n' "$listing" | LC_ALL=C sort)" ]] || die "package archive member order is not deterministic: $(basename "$archive")"
+  duplicate=$(printf '%s\n' "$listing" | LC_ALL=C sort | uniq -d | head -n1)
+  [[ -z "$duplicate" ]] || die "package archive contains duplicate member $duplicate: $(basename "$archive")"
   awk '$0 ~ /^\// || $0 ~ /(^|\/)\.\.(\/|$)/ { bad=1 } END { exit bad+0 }' <<<"$listing" || die "package archive contains an unsafe path: $(basename "$archive")"
   archive_paths_checked=1
   mtree=$(bsdtar --extract --to-stdout --file "$archive" .MTREE | gzip --decompress)
   entries=$(grep '^\.' <<<"$mtree" || true)
   [[ -n "$entries" ]] || die "package archive has no mtree entries: $(basename "$archive")"
-  sorted=$(printf '%s\n' "$entries" | LC_ALL=C sort)
-  [[ "$entries" == "$sorted" ]] || die "package archive mtree order is not deterministic: $(basename "$archive")"
+  duplicate=$(printf '%s\n' "$entries" | LC_ALL=C sort | uniq -d | head -n1)
+  [[ -z "$duplicate" ]] || die "package archive mtree contains duplicate entry $duplicate: $(basename "$archive")"
   awk '/^\./ { if ($0 !~ /time=[0-9]+(\.0)?/ || ($0 ~ /uid=/ && $0 !~ /uid=[0-9]+/) || ($0 ~ /gid=/ && $0 !~ /gid=[0-9]+/)) bad=1 } END { exit bad+0 }' <<<"$entries" || die "package archive timestamp or ownership metadata is not deterministic: $(basename "$archive")"
   default_uid=$(sed -n 's#^/set.*uid=\([0-9][0-9]*\).*#\1#p' <<<"$mtree" | head -n1)
   default_gid=$(sed -n 's#^/set.*gid=\([0-9][0-9]*\).*#\1#p' <<<"$mtree" | head -n1)

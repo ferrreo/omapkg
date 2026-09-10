@@ -63,13 +63,14 @@ make_package() {
 
 if [[ -n "$real_package_dir" ]]; then
   mkdir -p "$fixture/signatures"
-  for source_package in "$real_package_dir"/*.pkg.tar.zst; do
+  for source_package in "$real_package_dir"/*.pkg.tar.zst "$real_package_dir"/*.pkg.tar.xz; do
+    [[ -f "$source_package" || -L "$source_package" ]] || continue
     filename=$(basename "$source_package")
     ln -s "$source_package" "$fixture/packages/$filename"
     gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" --output "$fixture/signatures/$filename.sig" "$source_package"
     ln -s "$fixture/signatures/$filename.sig" "$fixture/packages/$filename.sig"
   done
-  firmware_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) -name "$firmware_package_name-*.pkg.tar.zst" | head -n1)
+  firmware_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) \( -name "$firmware_package_name-*.pkg.tar.zst" -o -name "$firmware_package_name-*.pkg.tar.xz" \) | head -n1)
   [[ -n "$firmware_package" ]] || { echo "incomplete: real package fixture has no $firmware_package_name archive" >&2; exit 3; }
   bsdtar -xOf "$firmware_package" "${firmware_code_path#/}" >"$firmware_code_path"
   bsdtar -xOf "$firmware_package" "${firmware_vars_path#/}" >"$firmware_vars_path"
@@ -80,7 +81,10 @@ else
   grub_package=$(make_package grub grub)
   firmware_package=$(make_package edk2-ovmf firmware)
 fi
-package_files=("$fixture/packages"/*.pkg.tar.zst)
+shopt -s nullglob
+package_files=("$fixture/packages"/*.pkg.tar.zst "$fixture/packages"/*.pkg.tar.xz)
+shopt -u nullglob
+(( ${#package_files[@]} > 0 )) || { echo 'incomplete: filesystem fixture has no package archives' >&2; exit 3; }
 repo_db="$fixture/packages/fixture.db.tar.gz"
 for package in "${package_files[@]}"; do
   gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" "$package"
@@ -163,7 +167,7 @@ exit 0
 EOF
 chmod +x "$fixture/bin/grub-install"
 else
-  grub_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) -name 'grub-*.pkg.tar.zst' | head -n1)
+  grub_package=$(find "$fixture/packages" -maxdepth 1 \( -type f -o -type l \) \( -name 'grub-*.pkg.tar.zst' -o -name 'grub-*.pkg.tar.xz' \) | head -n1)
   [[ -n "$grub_package" ]] || { echo 'incomplete: real package fixture has no grub archive' >&2; exit 3; }
   bsdtar -xOf "$grub_package" usr/bin/grub-install >"$fixture/bin/grub-install"
   chmod +x "$fixture/bin/grub-install"
