@@ -304,7 +304,7 @@ async function currentPlan(db: D1Database, planId: string): Promise<{ plan: Qual
 async function assertPlanReview(db: D1Database, planId: string): Promise<void> {
   const reviews = await query<{ kind: string; actor: string }>(db, 'SELECT kind,actor FROM native_qualification_plan_reviews WHERE plan_id=?', planId);
 
-  if (new Set(reviews.map((review) => review.kind)).size !== 2 || new Set(reviews.map((review) => review.actor)).size !== 2) throw new PolicyError(409, 'Independent area and security review of the qualification plan is required.');
+  if (new Set(reviews.map((review) => review.kind)).size !== 2) throw new PolicyError(409, 'Area and security review of the qualification plan is required.');
 
   for (const review of reviews) {
     const githubId = review.actor.startsWith('github:') ? review.actor.slice(7) : '';

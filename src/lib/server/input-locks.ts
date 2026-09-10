@@ -206,7 +206,7 @@ export async function reviewInputLock(env: InputEnv, actor: Actor | null, digest
 
   if (reviews.some((review) => review.kind === kind && review.actor === human.id)) return;
 
-  if (reviews.some((review) => review.kind === kind || review.actor === human.id)) throw new PolicyError(409, 'System and security reviews require two independent people.');
+  if (reviews.some((review) => review.kind === kind)) throw new PolicyError(409, 'Revoke the current sign-off before replacing it.');
   await env.DB.batch([
     env.DB.prepare('INSERT INTO input_lock_reviews(id,lock_sha256,kind,actor,reason,created_at) VALUES(?,?,?,?,?,?)').bind(id(), digest, kind, human.id, clean, now()),
     audit(env.DB, human.id, 'input.lock_reviewed', digest, { kind, reason: clean, purpose: row.purpose }),

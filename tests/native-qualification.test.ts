@@ -32,7 +32,7 @@ async function fixture() {
   const second = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKey = base64(await crypto.subtle.exportKey('raw', first.publicKey)); const secondPublicKey = base64(await crypto.subtle.exportKey('raw', second.publicKey));
   await db.batch([
-    db.prepare("INSERT INTO team_memberships(github_id,team) VALUES('1','system'),('2','security')"),
+    db.prepare("INSERT INTO team_memberships(github_id,team) VALUES('1','system'),('1','security'),('2','security')"),
     db.prepare("INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,last_seen_at) VALUES('worker-1','x86','x86_64',?,'active',?,?)").bind(publicKey, timestamp, timestamp),
     db.prepare("INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,last_seen_at) VALUES('worker-2','x86-other','x86_64',?,'active',?,?)").bind(secondPublicKey, timestamp, timestamp),
     db.prepare("INSERT INTO cohorts(id,current_revision,event_sequence,phase,condition,created_at,updated_at) VALUES('cohort-1',1,0,'build','ready',?,?)").bind(timestamp, timestamp),
@@ -44,9 +44,9 @@ async function fixture() {
     db.prepare("INSERT INTO cohort_members(cohort_id,revision,pkgbase,catalog_revision,recipe_revision_id) VALUES('cohort-1',1,'demo',1,?)").bind('revision-1'),
     db.prepare("INSERT INTO input_objects(sha256,size,object_key,created_by,created_at) VALUES(? ,1,'inputs/c','github:1',?)").bind(inputSha256, timestamp),
     db.prepare("INSERT INTO input_locks(sha256,recipe_revision_id,cohort_id,cohort_revision,architecture,purpose,manifest_json,object_count,package_count,transfer_bytes,status,created_by,created_at,reason) VALUES(?,'revision-1','cohort-1',1,'x86_64','owned',?,0,0,0,'ready','github:1',?,'fixture')").bind(inputSha256, JSON.stringify({ recipeSha256: 'd', cohortSha256: candidateSha256 }), timestamp),
-    db.prepare("INSERT INTO catalog_reviews(pkgbase,revision,kind,actor,manifest_sha256,reason,created_at) VALUES('demo',1,'area','github:1','b','fixture',?),('demo',1,'security','github:2','b','fixture',?)").bind(timestamp, timestamp),
-    db.prepare("INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES('approval-area','revision-1','github:1','area','a',?),('approval-security','revision-1','github:2','security','a',?)").bind(timestamp, timestamp),
-    db.prepare("INSERT INTO input_lock_reviews(id,lock_sha256,kind,actor,reason,created_at) VALUES('lock-review-area',?,'area','github:1','fixture',?),('lock-review-security',?,'security','github:2','fixture',?)").bind(inputSha256, timestamp, inputSha256, timestamp),
+    db.prepare("INSERT INTO catalog_reviews(pkgbase,revision,kind,actor,manifest_sha256,reason,created_at) VALUES('demo',1,'area','github:1','b','fixture',?),('demo',1,'security','github:1','b','fixture',?)").bind(timestamp, timestamp),
+    db.prepare("INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES('approval-area','revision-1','github:1','area','a',?),('approval-security','revision-1','github:1','security','a',?)").bind(timestamp, timestamp),
+    db.prepare("INSERT INTO input_lock_reviews(id,lock_sha256,kind,actor,reason,created_at) VALUES('lock-review-area',?,'area','github:1','fixture',?),('lock-review-security',?,'security','github:1','fixture',?)").bind(inputSha256, timestamp, inputSha256, timestamp),
     db.prepare("INSERT INTO build_input_selections(recipe_revision_id,architecture,cohort_id,cohort_revision,lock_sha256,selected_by,selected_at) VALUES('revision-1','x86_64','cohort-1',1,?,'github:1',?)").bind(inputSha256, timestamp),
     db.prepare("INSERT INTO builds(id,revision_id,architecture,status,worker_id,attempt,artifact_sha256,artifact_size,created_at) VALUES('build-1','revision-1','x86_64','succeeded','worker-1',1,?,1,?)").bind(artifactSha256, timestamp),
     db.prepare("INSERT INTO build_attempts(build_id,attempt,revision_id,architecture,worker_id,worker_public_key,started_at,input_lock_sha256) VALUES('build-1',1,'revision-1','x86_64','worker-1',?,?,?)").bind(publicKey, timestamp, inputSha256),
@@ -110,7 +110,7 @@ test('worker qualification endpoint stores only signed plan-bound observations a
     input.environmentSha256 = await sha256(canonicalJson({ machine, details }));
     const planRecord = await createQualificationPlan(state.env, { id: 'github:1', role: 'maintainer', areas: ['system'] }, input);
     await reviewQualificationPlan(state.env, { id: 'github:1', role: 'maintainer', areas: ['system'] }, planRecord.id, 'area', 'fixture');
-    await reviewQualificationPlan(state.env, { id: 'github:2', role: 'security', areas: [] }, planRecord.id, 'security', 'fixture');
+    await reviewQualificationPlan(state.env, { id: 'github:1', role: 'security', areas: [] }, planRecord.id, 'security', 'fixture');
     const worker = await state.db.prepare('SELECT * FROM workers WHERE id=?').bind('worker-1').first<any>();
     const auth = { worker, timestamp: Math.floor(Date.now() / 1000), nonce: 'a'.repeat(32) };
     const planResponse = await workerQualificationGet({ request: await workerPlanRequest(state, planRecord.id), platform: { env: state.env }, url: new URL(`https://opr.test/api/worker/qualification?planId=${planRecord.id}`) } as any);
@@ -144,5 +144,10 @@ test('worker qualification endpoint stores only signed plan-bound observations a
     const failed = await recordNativeQualification(state.env, auth, await signedEvidence(state, planRecord, { observed: failedObserved, observedSha256: await sha256(canonicalJson(failedObserved)) }));
     expect(failed.status).toBe('not-checked');
     await expect(addQualificationException(state.env, { id: 'github:2', role: 'security', areas: [] }, { evidenceId: failed.id, subjectSha256: '8'.repeat(64), reason: 'fixture exception', expiresAt: Math.floor(Date.now() / 1000) + 60 })).rejects.toThrow('cannot be waived');
+    await state.db.prepare("DELETE FROM team_memberships WHERE github_id='1' AND team='security'").run();
+    expect(await state.db.prepare("SELECT 1 FROM authorized_catalog_inputs WHERE pkgbase='demo'").first()).toBeNull();
+    expect(await state.db.prepare("SELECT 1 FROM authorized_recipe_inputs WHERE revision_id='revision-1'").first()).toBeNull();
+    expect(await state.db.prepare('SELECT 1 FROM authorized_input_reviews').first()).toBeNull();
+    await expect(workerQualificationGet({ request: await workerPlanRequest(state, planRecord.id), platform: { env: state.env }, url: new URL(`https://opr.test/api/worker/qualification?planId=${planRecord.id}`) } as any)).rejects.toMatchObject({ status: 409 });
   } finally { state.holder.close(); }
 });

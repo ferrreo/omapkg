@@ -245,15 +245,14 @@ async function catalogRows(db: D1Database, names: string[]) {
   return rows;
 }
 
-type RecipeRecord = { id: string; manifest_sha256: string; name: string; upstream_url: string; source_kind: string; area: string; status: string; latest_id: string; kinds: number; actors: number };
+type RecipeRecord = { id: string; manifest_sha256: string; name: string; upstream_url: string; source_kind: string; area: string; status: string; latest_id: string; kinds: number };
 
 async function recipeRows(db: D1Database, ids: string[]) {
   const rows: RecipeRecord[] = [];
 
   for (let offset = 0; offset < ids.length; offset += 500) rows.push(...await query<RecipeRecord>(db, `SELECT r.id,r.manifest_sha256,q.name,q.upstream_url,q.source_kind,q.area,q.status,
       (SELECT latest.id FROM revisions latest WHERE latest.request_id=q.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) AS latest_id,
-      COUNT(DISTINCT CASE WHEN a.revoked_at IS NULL THEN a.kind END) AS kinds,
-      COUNT(DISTINCT CASE WHEN a.revoked_at IS NULL THEN a.actor END) AS actors
+      COUNT(DISTINCT CASE WHEN a.revoked_at IS NULL THEN a.kind END) AS kinds
     FROM revisions r JOIN requests q ON q.id=r.request_id LEFT JOIN approvals a ON a.revision_id=r.id AND a.manifest_sha256=r.manifest_sha256
     WHERE r.id IN (SELECT value FROM json_each(?)) GROUP BY r.id`, JSON.stringify(ids.slice(offset, offset + 500))));
 
@@ -318,7 +317,7 @@ export async function previewRebuildCohort(db: D1Database, cohortId: string, inp
 
       const reviews = recipeMatches ? recipe : null;
 
-      if (!recipeMatches || !reviews || reviews.kinds < 2 || reviews.actors < 2) blockers.push({ code: 'recipe-mapping', pkgbase, architecture: null, reason: `${pkgbase}: current recipe binding is stale or lacks independent area and security review.` });
+      if (!recipeMatches || !reviews || reviews.kinds < 2) blockers.push({ code: 'recipe-mapping', pkgbase, architecture: null, reason: `${pkgbase}: current recipe binding is stale or lacks area and security sign-offs.` });
     }
 
     blockers.push(...targetBlockers(report, pkgbase, policy.architectures, policy.architectureExceptions.map((item) => item.architecture)));

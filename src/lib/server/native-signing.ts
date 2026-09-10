@@ -48,7 +48,7 @@ export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, bui
     await query<{ kind: string; actor: string }>(env.DB, 'SELECT kind,actor FROM catalog_reviews WHERE pkgbase=? AND revision=? AND manifest_sha256=?', member.pkgbase, member.catalogRevision, member.catalogSha256),
     await query<{ kind: string; actor: string }>(env.DB, 'SELECT kind,actor FROM approvals WHERE revision_id=? AND manifest_sha256=? AND revoked_at IS NULL', revision.id, revision.manifest_sha256),
   ]) {
-    if (new Set(reviews.map((review) => review.kind)).size !== 2 || new Set(reviews.map((review) => review.actor)).size !== 2) throw new PolicyError(409, 'Independent current native reviews are required.');
+    if (new Set(reviews.map((review) => review.kind)).size !== 2) throw new PolicyError(409, 'Current area and security sign-offs are required.');
 
     for (const review of reviews) {
       const actor = await actorForGithubId(env.DB, review.actor.startsWith('github:') ? review.actor.slice(7) : '');

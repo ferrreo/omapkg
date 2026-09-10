@@ -64,3 +64,5 @@ the server rejects any changed package ref or channel.
 The server verifies every provenance field against the leased, reviewed inputs and uploaded bytes before marking the build complete. `imageDigest` in provenance uses the digest-only `sha256:<64 lowercase hex>` form. A successful build is not necessarily signed or published. A separate signing service verifies the attestation and returns an OpenPGP detached signature before dev publication. Do not retain or upload nonredistributable artifacts. Surface B publishes the recipe after isolated validation is recorded.
 
 Revoked workers cannot claim, heartbeat, upload, complete, or sign. Expired leases can be retried with a new token. A stale worker cannot mutate the new attempt.
+
+Catalog, recipe, input-lock, and qualification approval require separate area and security sign-offs. The same GitHub account may record both when it has the permissions for each responsibility. Every sign-off remains bound to the exact reviewed inputs, and current permissions are rechecked at execution and signing time.

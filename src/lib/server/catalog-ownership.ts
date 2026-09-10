@@ -169,16 +169,15 @@ export async function approveCatalogPackage(db: D1Database, actor: Actor | null,
   try { results = await db.batch([
     db.prepare(`INSERT INTO catalog_reviews(pkgbase,revision,kind,actor,manifest_sha256,reason,created_at)
       SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM catalog_packages WHERE pkgbase=? AND current_revision=?)
-        AND NOT EXISTS (SELECT 1 FROM catalog_reviews WHERE pkgbase=? AND revision=? AND kind<>? AND actor=?)
       ON CONFLICT(pkgbase,revision,kind) DO UPDATE SET actor=excluded.actor,reason=excluded.reason,created_at=excluded.created_at`)
-      .bind(pkgbase, revision, kind, reviewer.id, digest, clean, timestamp, pkgbase, revision, pkgbase, revision, kind, reviewer.id),
+      .bind(pkgbase, revision, kind, reviewer.id, digest, clean, timestamp, pkgbase, revision),
     db.prepare('INSERT INTO distribution_assertions(expected,actual) VALUES(1,changes())'),
     db.prepare(`UPDATE catalog_packages SET admitted_revision=?,updated_at=? WHERE pkgbase=? AND current_revision=?
-      AND (SELECT COUNT(DISTINCT actor) FROM catalog_reviews WHERE pkgbase=? AND revision=? AND manifest_sha256=?)=2`)
+      AND (SELECT COUNT(DISTINCT kind) FROM catalog_reviews WHERE pkgbase=? AND revision=? AND manifest_sha256=?)=2`)
       .bind(revision, timestamp, pkgbase, revision, pkgbase, revision, digest),
     audit(db, reviewer.id, 'catalog.reviewed', pkgbase, { revision, kind, manifestSha256: digest, reason: clean }),
   ]); } catch (cause) {
-    if (cause instanceof Error && /constraint/i.test(cause.message)) throw new PolicyError(409, 'Catalog changed or independent reviewers are required.');
+    if (cause instanceof Error && /constraint/i.test(cause.message)) throw new PolicyError(409, 'Catalog changed. Refresh and review the current policy.');
     throw cause;
   }
 

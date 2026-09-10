@@ -44,7 +44,7 @@ test('catalog pins identity, requires both targets and keeps external packaging 
   }
 });
 
-test('catalog admission is immutable, independently reviewed, collision-safe and fenced against stale decisions', async () => {
+test('catalog admission requires both permitted sign-offs, preserves immutable policy and fences stale decisions', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
 
   try {
@@ -52,9 +52,10 @@ test('catalog admission is immutable, independently reviewed, collision-safe and
     const proposed = await proposeCatalogPackage(d1, owner, catalogFixture(), null, 'Import baseline');
     expect((await getCatalogPackage(d1, 'example'))?.admitted_revision).toBeNull();
     await approveCatalogPackage(d1, security, 'example', 1, proposed.manifestSha256, 'area', 'Reviewed ownership and source');
-    await expect(approveCatalogPackage(d1, security, 'example', 1, proposed.manifestSha256, 'security', 'Same reviewer')).rejects.toThrow('independent');
-    await approveCatalogPackage(d1, owner, 'example', 1, proposed.manifestSha256, 'area', 'Area review');
-    expect(await approveCatalogPackage(d1, security, 'example', 1, proposed.manifestSha256, 'security', 'Security review')).toMatchObject({ admitted: true });
+    expect((await getCatalogPackage(d1, 'example'))?.admitted_revision).toBeNull();
+    await expect(approveCatalogPackage(d1, owner, 'example', 1, proposed.manifestSha256, 'security', 'Missing security permission')).rejects.toMatchObject({ status: 403 });
+    expect(await approveCatalogPackage(d1, security, 'example', 1, proposed.manifestSha256, 'security', 'Same account, separate security check')).toMatchObject({ admitted: true });
+    expect(db.prepare('SELECT COUNT(DISTINCT actor) AS actors,COUNT(DISTINCT kind) AS kinds FROM catalog_reviews').first<{ actors: number; kinds: number }>()).toEqual({ actors: 1, kinds: 2 });
     const next = await proposeCatalogPackage(d1, owner, { ...catalogFixture(), description: 'Updated description' }, 1, 'Clarify purpose');
     expect((await getCatalogPackage(d1, 'example', true))?.revision).toBe(1);
     await expect(approveCatalogPackage(d1, security, 'example', 1, proposed.manifestSha256, 'security', 'Stale review')).rejects.toMatchObject({ status: 409 });

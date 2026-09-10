@@ -61,13 +61,13 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
       .bind(member.pkgbase).first<{ current_revision: number; admitted_revision: number | null }>();
 
     if (policy?.current_revision !== member.catalogRevision || policy.admitted_revision !== member.catalogRevision) {
-      block('catalog-review', 'Current catalog policy needs independent area and security admission.', member.pkgbase, null, catalogLink);
+      block('catalog-review', 'Current catalog policy needs area and security admission.', member.pkgbase, null, catalogLink);
     } else {
       const reviews = await query<{ kind: string; actor: string }>(env.DB,
         'SELECT kind,actor FROM catalog_reviews WHERE pkgbase=? AND revision=? AND manifest_sha256=?', member.pkgbase, member.catalogRevision, member.catalogSha256);
 
-      if (new Set(reviews.map((row) => row.kind)).size !== 2 || new Set(reviews.map((row) => row.actor)).size !== 2) {
-        block('catalog-review', 'Independent catalog reviewers are required.', member.pkgbase, null, catalogLink);
+      if (new Set(reviews.map((row) => row.kind)).size !== 2) {
+        block('catalog-review', 'Area and security sign-offs are required.', member.pkgbase, null, catalogLink);
       }
 
       for (const review of reviews) {
@@ -131,8 +131,8 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
     const reviews = await query<{ kind: string; actor: string }>(env.DB,
       'SELECT kind,actor FROM approvals WHERE revision_id=? AND manifest_sha256=? AND revoked_at IS NULL', revision.id, revision.manifest_sha256);
 
-    if (new Set(reviews.map((review) => review.kind)).size !== 2 || new Set(reviews.map((review) => review.actor)).size !== 2) {
-      block('recipe-review', 'Independent area and security approval of exact recipe inputs is required.', member.pkgbase, null, requestLink);
+    if (new Set(reviews.map((review) => review.kind)).size !== 2) {
+      block('recipe-review', 'Area and security approval of exact recipe inputs is required.', member.pkgbase, null, requestLink);
     }
 
     for (const review of reviews) {
