@@ -67,6 +67,8 @@ export interface SourceEvidence {
 }
 
 export interface FactoryCandidate {
+  /** Platform-selected catalog location; never supplied by the model. */
+  catalogPath?: { pkgbase: string; collection: import('../../src/lib/distribution').Collection | null };
   request: FactoryRequest;
   version: string;
   sources: Source[];

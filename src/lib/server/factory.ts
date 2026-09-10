@@ -40,6 +40,7 @@ import {
   persistFactoryRevision,
 } from '../../../services/pipeline/revision';
 import { createFactoryPullRequest } from '../../../services/pipeline/github-pr';
+import { factoryCatalogPath } from './catalog-recipe';
 import { nextPackageRelease } from '../../../services/pipeline/pkgrel';
 import { type SourceHostAuthorizer } from '../../../services/pipeline/source-fetch';
 import { normalizeRedirectSourceUrl, redactText, VENDOR_REGISTRY_HOSTS } from '../../../services/pipeline/security';
@@ -394,6 +395,7 @@ export async function runFactory(
   const pkgrel = await nextPackageRelease(env, request.name, emitted.version);
   const normalizedCandidate = {
     ...emitted,
+    catalogPath: await factoryCatalogPath(env.DB, requestId),
     request: { ...request, buildImages: selected.buildImages },
     architectures: selected.architectures,
     buildImages: selected.buildImages,

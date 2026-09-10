@@ -4,7 +4,7 @@ import { asD1, TestD1 } from './d1';
 
 const schema = `
 CREATE TABLE requests(id TEXT PRIMARY KEY,name TEXT,description TEXT,upstream_url TEXT,source_kind TEXT,area TEXT,status TEXT,created_at INTEGER,updated_at INTEGER);
-CREATE TABLE revisions(id TEXT PRIMARY KEY,request_id TEXT,version TEXT,description TEXT,recipe TEXT,explanation TEXT,dependencies_json TEXT,license TEXT,upstream_commit TEXT,sbom_json TEXT);
+CREATE TABLE revisions(id TEXT PRIMARY KEY,request_id TEXT,version TEXT,description TEXT,recipe TEXT,explanation TEXT,dependencies_json TEXT,license TEXT,upstream_commit TEXT,sbom_json TEXT,commit_sha TEXT);
 CREATE TABLE builds(id TEXT PRIMARY KEY,revision_id TEXT,architecture TEXT,artifact_filename TEXT,artifact_sha256 TEXT,artifact_size INTEGER,provenance TEXT);
 CREATE TABLE releases(id TEXT PRIMARY KEY,build_id TEXT,name TEXT,version TEXT,architecture TEXT,surface TEXT,channel TEXT,published_at INTEGER,stable_at INTEGER,sbom_key TEXT,provenance_key TEXT,attestation_key TEXT);
 CREATE TABLE feedback(id TEXT PRIMARY KEY,release_id TEXT,works INTEGER,comment TEXT,created_at INTEGER);

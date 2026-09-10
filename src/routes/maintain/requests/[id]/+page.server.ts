@@ -8,6 +8,7 @@ import { finalDescription } from '$lib/server/descriptions';
 import { revisionRecipePolicy } from '../../../../../services/pipeline/recipe-policy';
 import { createDependencyRequest, getDependencyBlockers, linkDependencyRequest, resolveDependencyBlockers } from '$lib/server/dependency-blockers';
 import { reviewedRuntimeExceptions } from '$lib/server/runtime-evidence';
+import { recipeGitUrl } from '$lib/server/catalog-recipe';
 import type { Approval, Build, Revision } from '$lib/model';
 import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async (event) => {
@@ -23,7 +24,7 @@ export const load: PageServerLoad = async (event) => {
     listAuditEvents(env.DB, parseAuditQuery(new URLSearchParams({ request: request.id }))).then((page) => page.events),
     query<{ id: number; stage: string; detail: string; created_at: number }>(env.DB, 'SELECT * FROM factory_events WHERE request_id=? ORDER BY id LIMIT 200', request.id)
   ]);
-  const revisions = revisionRows.map((revision) => ({ ...revision, recipePolicy: revisionRecipePolicy(revision.sbom_json), runtimeExceptions: reviewedRuntimeExceptions(revision.sbom_json), description: finalDescription(revision, request.name) }));
+  const revisions = revisionRows.map((revision) => ({ ...revision, recipeUrl: recipeGitUrl(env.GITHUB_REPOSITORY, revision.commit_sha, request.name, revision.sbom_json), recipePolicy: revisionRecipePolicy(revision.sbom_json), runtimeExceptions: reviewedRuntimeExceptions(revision.sbom_json), description: finalDescription(revision, request.name) }));
   const blockers = await getDependencyBlockers(env.DB, request.id);
   const dependencyProposals = await query<{ id: string; blocker_id: string; status: string }>(env.DB,
     `SELECT p.id,l.blocker_id,p.status FROM dependency_proposals p JOIN dependency_proposal_blockers l ON l.proposal_id=p.id

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { lintRecipe, renderPublicRecipe, renderRecipe } from '../services/pipeline/recipe';
 import { createFactoryRevision, normalizeCandidate } from '../services/pipeline/revision';
+import { revisionPackagePath } from '../src/lib/server/catalog-recipe';
 import type { FactoryCandidate } from '../services/pipeline/types';
 import { factoryCandidateInputSchema, makeReadSourceFilesTool, makeSourceMaterializer, makeSubmitCandidateTool } from '../services/pipeline/tools';
 
@@ -455,6 +456,14 @@ test('template recipes bind deterministic shell and reject injected values and c
   for (const target of ['-toolexec=attacker', '../outside', './cmd/../../escape', './$(id)', './cmd;id']) {
     expect(() => templateCommands({ id: 'go-v1', binary: 'demo', target })).toThrow();
   }
+});
+
+test('factory paths come from platform scope and ignore model-supplied SBOM paths', async () => {
+  const draft = await createFactoryRevision(candidate({ sbom: { catalogPath: { pkgbase: 'demo', collection: 'core' } } }));
+  expect(revisionPackagePath('demo', draft.revision.sbom_json)).toBe('packages/demo');
+  const owned = await createFactoryRevision(candidate({ catalogPath: { pkgbase: 'demo', collection: 'omapkg' } }));
+  expect(revisionPackagePath('demo', owned.revision.sbom_json)).toBe('packages/omapkg/demo');
+  await expect(createFactoryRevision(candidate({ catalogPath: { pkgbase: 'different', collection: 'core' } }))).rejects.toThrow('reviewed catalog path');
 });
 
 test('factory cannot emit a candidate when deterministic shell analysis fails', async () => {

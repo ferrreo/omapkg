@@ -2,6 +2,7 @@ import { audit, now, sha256 } from '../../src/lib/server/db';
 import { githubFetch } from '../../src/lib/server/github';
 import type { FactoryEnv } from './types';
 import { redactText } from './security';
+import { revisionPackagePath } from '../../src/lib/server/catalog-recipe';
 
 interface Repository {
   default_branch: string;
@@ -140,7 +141,7 @@ function expectedManifest(revision: CanonicalRevision): Record<string, unknown> 
 }
 
 function expectedFiles(revision: CanonicalRevision): Record<string, string> {
-  const packagePath = `packages/${revision.name}`;
+  const packagePath = revisionPackagePath(revision.name, revision.sbom_json);
   const files: Record<string, string> = {
     [`${packagePath}/PKGBUILD`]: revision.public_recipe ?? revision.recipe,
     [`${packagePath}/opr-manifest.json`]: `${JSON.stringify(expectedManifest(revision), null, 2)}\n`,

@@ -20,12 +20,18 @@ export const load: PageServerLoad = async (event) => {
     query<{ version: string; target: string }>(DB, "SELECT json_extract(entry_json,'$.version') AS version,target_architecture AS target FROM catalog_import_entries WHERE import_id=? AND name='omarchy'", event.params.id),
   ]);
   for (const comparison of comparisons) if (await sha256(comparison.report_json) !== comparison.report_sha256) error(409, 'Stored reconciliation integrity check failed.');
+  const recipeLinks = await query<{ source_id: string; pkgbase: string; capture_sha256: string; matches: number; metadata_present: number }>(DB,
+    `SELECT l.source_id,l.pkgbase,l.capture_sha256,json_extract(l.comparison_json,'$.matches') AS matches,
+      json_extract(l.comparison_json,'$.metadataPresent') AS metadata_present FROM recipe_capture_links l WHERE l.import_id=?
+      AND EXISTS(SELECT 1 FROM json_each(?) scope WHERE json_extract(scope.value,'$.source')=l.source_id AND json_extract(scope.value,'$.pkgbase')=l.pkgbase)
+      AND l.rowid=(SELECT latest.rowid FROM recipe_capture_links latest WHERE latest.import_id=l.import_id AND latest.source_id=l.source_id
+        AND latest.pkgbase=l.pkgbase ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)`, event.params.id, JSON.stringify(entries.map((entry) => ({ source: entry.source_id, pkgbase: entry.pkgbase }))));
   const selected = comparisons.find((comparison) => comparison.id === reportId) ?? comparisons[0];
   const summary = selected ? JSON.parse(selected.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] : null;
   const baseline = summary ? await getCatalogImport(DB, summary.baselineId) : null;
   const differences = selected ? await query<{ item_json: string }>(DB, `SELECT item_json FROM catalog_reconciliation_items WHERE report_id=?
     AND (?='' OR kind=?) AND package_key>? ORDER BY package_key LIMIT 50`, selected.id, differenceKind, differenceKind, differenceAfter) : [];
-  return { ...detail, entries: entries.map((entry) => ({ ...entry, metadata: JSON.parse(entry.entry_json) as ImportEntry })),
+  return { ...detail, entries: entries.map((entry) => ({ ...entry, recipeCapture: recipeLinks.find((link) => link.source_id === entry.source_id && link.pkgbase === entry.pkgbase), metadata: JSON.parse(entry.entry_json) as ImportEntry })),
     captures: captures.filter((capture) => capture.id !== event.params.id && capture.status !== 'capturing').map((capture) => ({ ...capture, manifest: parseImportManifest(JSON.parse(capture.manifest_json)) })),
     coverage, comparisons: comparisons.map((comparison) => ({ id: comparison.id, summary: JSON.parse(comparison.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] })),
     selectedReport: selected && summary ? { id: selected.id, summary } : null,

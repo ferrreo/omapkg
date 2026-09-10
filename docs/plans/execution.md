@@ -307,3 +307,36 @@ missing native providers, immutable attempts, ancestor revocation, distinct
 reviewers, stale leases, complete signatures and offline evidence substitution.
 Native ARM execution, independent reproduction, full source/catalog and ABI
 qualification, release/client integration and human cutover remain open.
+
+## Preserved recipe capture and atomic Git writes
+
+Migration 0036 adds immutable recipe captures and inventory mapping records.
+The private import UI uploads original Git directories, verifies their retained
+commit/tree/blob proof and exposes exact files, package metadata differences,
+missing inspection and AUR/ALARM admission work. Captures grant no recipe,
+catalog or release approval. See [preserved recipe captures](../preserved-recipes.md).
+
+The exact captured Omarchy repository commit
+`a44e2d2e49d01faa4d351e047bfa5632c2c21b1b` contains 131 recipe directories,
+477 retained files and 2,060,963 bytes. Every directory passed independent
+server-side proof verification. All 131 lack `.SRCINFO`; 77 identify AUR origin
+in retained Omarchy metadata. Those are inspection/admission requirements,
+not qualified owned packages. This does not imply that all captured binary
+packages have been mapped to those source directories.
+
+The real local browser uploaded the original `1password` directory into local
+D1/R2, retained install-script bytes exactly, rejected out-of-capture downloads
+and anonymous access, and passed viewport checks at 320, 375, 414, 768, 1440 and
+1920 pixels. This used a labelled local test identity, not production approval.
+
+Generated recipes now carry an immutable catalog path in review evidence. Git
+publication writes complete recipe directories in one tree commit with a
+non-forced ref update; byte substitution, stale parents, no-op retries and
+multiple coupled directories have runnable checks. Integrity checks and public
+recipe links share the recorded path. Preserved recipe adaptation, sandbox
+inspection, source archive preparation and full catalog qualification remain
+required before this capture evidence can become executable owned recipes.
+
+Validation passed: 235 application tests, Svelte checks with zero errors or
+warnings, pipeline TypeScript, production web build, the Python capture
+self-check, and the real browser upload/download flow described above.

@@ -386,6 +386,7 @@
 
           <section class="workbench-panel" aria-labelledby="source-title">
             <div class="workbench-panel__head"><h2 id="source-title">Source record</h2><Icon name="git" size={18} /></div>
+            {#if data.recipeUrl}<a class="button" href={data.recipeUrl} rel="noreferrer">Reviewed recipe files<Icon name="external" size={14} /></a>{/if}
             {#if request}
               <div class="detail-list">
                 <div class="detail-list__row"><span class="detail-list__key">Request</span><span class="detail-list__value hash">{request.id}</span></div>

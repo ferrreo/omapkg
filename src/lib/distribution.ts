@@ -50,6 +50,13 @@ export function packagePath(pkgbase: string, collection: Collection | null = nul
   return `packages/${collection ? `${collection}/` : ''}${pkgbase}`;
 }
 
+export function recipeFilePath(value: string, empty = false): string {
+  if (empty && value === '') return value;
+  if (new TextEncoder().encode(value).length > 512 || /[\x00-\x1f\x7f\\]/.test(value) ||
+      value.split('/').some((part) => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) throw new Error('Unsafe recipe file path');
+  return value;
+}
+
 export function externalPackageSource(url: string): boolean {
   const host = new URL(url).hostname.toLowerCase();
   return host === 'aur.archlinux.org' || host === 'archlinuxarm.org' || host.endsWith('.archlinuxarm.org');

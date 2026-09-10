@@ -3,6 +3,7 @@ import { error } from '@sveltejs/kit';
 import { query } from '$lib/server/db';
 import { environment } from '$lib/server/http';
 import { finalDescription } from '$lib/server/descriptions';
+import { recipeGitUrl } from '$lib/server/catalog-recipe';
 import type { Architecture, PackageRequest, CatalogRelease, Release, Revision } from '$lib/model';
 import type { PageServerLoad } from './$types';
 
@@ -13,7 +14,7 @@ type PublicRelease = Pick<Release, 'id' | 'build_id' | 'name' | 'version' | 'arc
   & { sbom_key: string | null; provenance_key: string | null; attestation_key: string | null };
 
 export const load: PageServerLoad = async (event) => {
-  const { DB } = environment(event);
+  const { DB, GITHUB_REPOSITORY } = environment(event);
   const channel = event.url.searchParams.get('channel') === 'dev' ? 'dev' : 'stable';
   const requestedArchitecture = event.url.searchParams.get('architecture');
   if (requestedArchitecture && requestedArchitecture !== 'x86_64' && requestedArchitecture !== 'aarch64') error(400, 'Architecture must be x86_64 or aarch64.');
@@ -36,7 +37,7 @@ export const load: PageServerLoad = async (event) => {
     ORDER BY CASE p.channel WHEN 'stable' THEN 0 WHEN 'dev' THEN 1 ELSE 2 END,p.stable_at DESC,p.published_at DESC`, event.params.name, channel, channel, architecture))
     .map((revision) => ({ ...revision, description: finalDescription(revision, event.params.name) }));
   const request = await DB.prepare('SELECT id,name,description,upstream_url,source_kind,area,status,created_at,updated_at FROM requests WHERE id=?').bind(revisions[0].request_id).first<PublicRequest>();
-  const evidence = await DB.prepare(`SELECT b.provenance,v.sbom_json FROM builds b JOIN revisions v ON v.id=b.revision_id WHERE b.id=?`).bind(scopedReleases[0].build_id).first<{ provenance: string | null; sbom_json: string }>();
+  const evidence = await DB.prepare(`SELECT b.provenance,v.sbom_json,v.commit_sha,q.name AS pkgbase FROM builds b JOIN revisions v ON v.id=b.revision_id JOIN requests q ON q.id=v.request_id WHERE b.id=?`).bind(scopedReleases[0].build_id).first<{ provenance: string | null; sbom_json: string; commit_sha: string | null; pkgbase: string }>();
   let runtimeEvidence: { elfCount: number; findings: number; exceptions: number; buildPackages: number; runtimePackages: number } | null = null;
   try {
     const report = JSON.parse(evidence?.provenance ?? 'null');
@@ -55,5 +56,5 @@ export const load: PageServerLoad = async (event) => {
       LEFT JOIN github_identities confirmer ON ('github:' || confirmer.github_id)=c.confirmed_by
        WHERE c.release_id IN (SELECT value FROM json_each(?)) ORDER BY c.created_at DESC LIMIT 50`, JSON.stringify(releaseIds))
     : [];
-  return { name: event.params.name, channel, architecture, architectures: availableArchitectures, releases: scopedReleases, request, revisions, feedback, crashes, runtimeEvidence, recipePolicy: revisionRecipePolicy(evidence?.sbom_json ?? '{}') };
+  return { name: event.params.name, channel, architecture, architectures: availableArchitectures, releases: scopedReleases, request, revisions, feedback, crashes, runtimeEvidence, recipeUrl: evidence ? recipeGitUrl(GITHUB_REPOSITORY, evidence.commit_sha, evidence.pkgbase, evidence.sbom_json ?? '{}') : null, recipePolicy: revisionRecipePolicy(evidence?.sbom_json ?? '{}') };
 };

@@ -1,6 +1,9 @@
 import type { FactoryEnv, FactoryRevisionDraft } from './types';
 import { githubFetch } from '../../src/lib/server/github';
 import { revisionRecipePolicy } from './recipe-policy';
+import { revisionPackagePath } from '../../src/lib/server/catalog-recipe';
+import { createHash } from 'node:crypto';
+import { packagePath, recipeFilePath, type Collection } from '../../src/lib/distribution';
 
 interface GithubRepository {
   default_branch: string;
@@ -8,15 +11,6 @@ interface GithubRepository {
 
 interface GithubRef {
   object: { sha: string };
-}
-
-interface GithubContent {
-  sha?: string;
-  content?: string;
-}
-
-interface GithubCommitResponse {
-  commit?: { sha?: string };
 }
 
 interface GithubPullRequest {
@@ -28,13 +22,6 @@ interface GithubPullRequest {
 function repositoryPath(value: string): string {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) throw new Error('GITHUB_REPOSITORY must be owner/repository');
   return value;
-}
-
-function encodeBase64(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
 }
 
 function branchName(requestId: string, revisionId: string): string {
@@ -51,34 +38,73 @@ async function github<T>(env: FactoryEnv, url: string, init: RequestInit = {}, e
   return await response.json() as T;
 }
 
-async function putFile(
-  env: FactoryEnv,
-  api: string,
-  repo: string,
-  branch: string,
-  path: string,
-  content: string,
-): Promise<string> {
-  let sha: string | undefined;
-  try {
-    const existing = await github<GithubContent>(env, `${api}/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`);
-    sha = existing.sha;
-    if (sha && existing.content && existing.content.replaceAll(/\s/g, '') === encodeBase64(content)) return sha;
-  } catch (cause) {
-    if (!(cause instanceof Error && /GitHub API 404/.test(cause.message))) throw cause;
+export type RecipeTreeFile = { path: string; bytes: Uint8Array; mode?: '100644' | '100755' | '120000' };
+
+/** Publish all files with one ref update; failed uploads cannot expose a partial recipe. */
+export async function commitRecipeTree(env: FactoryEnv, branch: string, parent: string, files: RecipeTreeFile[], message: string, roots: string[]): Promise<string> {
+  const repo = repositoryPath(env.GITHUB_REPOSITORY ?? '');
+  const api = `https://api.github.com/repos/${repo}/git`;
+  if (!/^[a-f0-9]{40}$/.test(parent) || !files.length || files.length > 4096 ||
+      new Set(files.map((file) => file.path)).size !== files.length ||
+      files.reduce((size, file) => size + file.bytes.length, 0) > 32 * 1024 * 1024) throw new Error('Invalid or oversized recipe tree');
+  if (!roots.length || new Set(roots).size !== roots.length || roots.some((root) => roots.some((other) => root !== other && root.startsWith(other + '/')))) throw new Error('Recipe directories overlap');
+  for (const root of roots) {
+    const parts = root.split('/');
+    if (parts.length < 2 || parts.length > 3 || root !== packagePath(parts.at(-1)!, parts.length === 3 ? parts[1] as Collection : null)) throw new Error('Invalid recipe directory');
   }
-  const result = await github<GithubCommitResponse>(env, `${api}/repos/${repo}/contents/${path}`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      message: `factory: generate ${path.split('/').at(-1) ?? path}`,
-      content: encodeBase64(content),
-      branch,
-      ...(sha ? { sha } : {}),
-    }),
-  }, [200, 201]);
-  const commitSha = result.commit?.sha;
-  if (!commitSha) throw new Error('GitHub did not return the generated commit SHA');
-  return commitSha;
+  for (const file of files) {
+    recipeFilePath(file.path);
+    if (!roots.some((root) => file.path.startsWith(root + '/'))) throw new Error('Recipe file is outside its package directory');
+    if (file.mode !== undefined && file.mode !== '100644' && file.mode !== '100755' && file.mode !== '120000') throw new Error('Unsafe recipe tree mode');
+  }
+  const before = await github<GithubRef>(env, `${api}/ref/heads/${encodeURIComponent(branch)}`);
+  if (before.object.sha !== parent) throw new Error('Recipe branch changed; refresh before retrying');
+  const base = await github<{ tree: { sha: string } }>(env, `${api}/commits/${parent}`);
+  const directories = new Map<string, Array<{ path: string; mode: string; type: string; sha: string }>>();
+  for (const file of [...files].sort((a, b) => a.path < b.path ? -1 : 1)) {
+    const expected = createHash('sha1').update(`blob ${file.bytes.length}\0`).update(file.bytes).digest('hex');
+    const blob = await github<{ sha: string }>(env, `${api}/blobs`, {
+      method: 'POST', body: JSON.stringify({ encoding: 'base64', content: Buffer.from(file.bytes).toString('base64') }),
+    }, 201);
+    if (blob.sha !== expected) throw new Error('GitHub recipe blob differs from retained bytes');
+    const directory = roots.find((root) => file.path.startsWith(root + '/'))!;
+    const entries = directories.get(directory) ?? [];
+    entries.push({ path: file.path.slice(directory.length + 1), mode: file.mode ?? '100644', type: 'blob', sha: blob.sha });
+    directories.set(directory, entries);
+  }
+  const tree = [];
+  for (const [path, entries] of directories) {
+    // Replacing the complete directory also removes obsolete hooks or patches.
+    const directory = await github<{ sha: string }>(env, `${api}/trees`, { method: 'POST', body: JSON.stringify({ tree: entries }) }, 201);
+    if (!/^[a-f0-9]{40}$/.test(directory.sha)) throw new Error('GitHub returned an invalid recipe directory');
+    tree.push({ path, mode: '040000', type: 'tree', sha: directory.sha });
+  }
+  const created = await github<{ sha: string }>(env, `${api}/trees`, {
+    method: 'POST', body: JSON.stringify({ base_tree: base.tree.sha, tree }),
+  }, 201);
+  if (!/^[a-f0-9]{40}$/.test(created.sha)) throw new Error('GitHub returned an invalid tree');
+  // An identical retry returns the commit, never the last file's blob identity.
+  if (created.sha === base.tree.sha) return parent;
+  const commit = await github<{ sha: string }>(env, `${api}/commits`, {
+    method: 'POST', body: JSON.stringify({ message, tree: created.sha, parents: [parent] }),
+  }, 201);
+  if (!/^[a-f0-9]{40}$/.test(commit.sha)) throw new Error('GitHub returned an invalid commit');
+  await github(env, `${api}/refs/heads/${encodeURIComponent(branch)}`, {
+    method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
+  });
+  return commit.sha;
+}
+
+export function factoryRecipeFiles(draft: FactoryRevisionDraft): RecipeTreeFile[] {
+  const path = revisionPackagePath(draft.manifest.packageName, draft.revision.sbom_json);
+  const contents: Record<string, string> = {
+    PKGBUILD: draft.revision.public_recipe ?? draft.revision.recipe,
+    'opr-manifest.json': JSON.stringify(draft.manifest, null, 2) + '\n',
+    'opr-lint.json': draft.revision.lint_json + '\n',
+    'opr-sbom.json': draft.revision.sbom_json + '\n',
+  };
+  if (draft.revision.public_recipe && draft.revision.public_recipe !== draft.revision.recipe) contents['opr-build.PKGBUILD'] = draft.revision.recipe;
+  return Object.entries(contents).map(([name, content]) => ({ path: `${path}/${name}`, bytes: new TextEncoder().encode(content) }));
 }
 
 export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRevisionDraft): Promise<{ url: string; commitSha: string; branch: string }> {
@@ -101,20 +127,16 @@ export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRe
     headSha = baseRef.object.sha;
   }
 
-  const packagePath = `packages/${draft.manifest.packageName}`;
-  if (draft.revision.public_recipe && draft.revision.public_recipe !== draft.revision.recipe) {
-    headSha = await putFile(env, api, repo, branch, `${packagePath}/PKGBUILD`, draft.revision.public_recipe);
-    headSha = await putFile(env, api, repo, branch, `${packagePath}/opr-build.PKGBUILD`, draft.revision.recipe);
-  } else {
-    headSha = await putFile(env, api, repo, branch, `${packagePath}/PKGBUILD`, draft.revision.recipe);
-  }
-  headSha = await putFile(env, api, repo, branch, `${packagePath}/opr-manifest.json`, JSON.stringify(draft.manifest, null, 2) + '\n');
-  headSha = await putFile(env, api, repo, branch, `${packagePath}/opr-lint.json`, draft.revision.lint_json + '\n');
-  headSha = await putFile(env, api, repo, branch, `${packagePath}/opr-sbom.json`, draft.revision.sbom_json + '\n');
+  headSha = await commitRecipeTree(env, branch, headSha, factoryRecipeFiles(draft),
+    `Update ${draft.manifest.packageName} ${draft.manifest.version}-${draft.manifest.pkgrel}`,
+    [revisionPackagePath(draft.manifest.packageName, draft.revision.sbom_json)]);
 
   const openPulls = await github<GithubPullRequest[]>(env, `${api}/repos/${repo}/pulls?state=open&head=${encodeURIComponent(repo.split('/')[0] + ':' + branch)}`);
   const existing = openPulls[0];
-  if (existing) return { url: existing.html_url, commitSha: existing.head.sha, branch };
+  if (existing) {
+    if (existing.head.sha !== headSha) throw new Error('Recipe pull request changed during creation');
+    return { url: existing.html_url, commitSha: headSha, branch };
+  }
 
   const pull = await github<GithubPullRequest>(env, `${api}/repos/${repo}/pulls`, {
     method: 'POST',
@@ -136,5 +158,6 @@ export async function createFactoryPullRequest(env: FactoryEnv, draft: FactoryRe
       ].join('\n'),
     }),
   }, 201);
-  return { url: pull.html_url, commitSha: pull.head.sha || headSha, branch };
+  if (pull.head.sha !== headSha) throw new Error('Recipe pull request changed during creation');
+  return { url: pull.html_url, commitSha: headSha, branch };
 }

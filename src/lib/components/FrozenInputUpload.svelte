@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import type { FrozenManifest, InputObject } from '$lib/frozen-inputs';
+  import { postCaptureRequest, uploadCaptureObjects } from '$lib/input-upload';
   export let candidates: { id: string; pkgbase: string; title: string; cohort_sha256: string; recipe_sha256: string }[];
   let files: FileList | undefined;
   let manifest: FrozenManifest | null = null;
@@ -21,38 +22,13 @@
       revisionId = candidates.find((item) => item.recipe_sha256 === parsed.recipeSha256 && item.cohort_sha256 === parsed.cohortSha256)?.id ?? '';
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Could not read capture.'; }
   }
-  async function request(path: string, input: unknown) {
-    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
-    const result = await response.json() as { error?: string; completed?: InputObject; uploadId?: string; partSize?: number; parts?: { part_number: number }[]; sha256?: string };
-    if (!response.ok) throw new Error(result.error ?? 'Input upload failed.');
-    return result;
-  }
   async function upload() {
     if (busy || !manifest || !reference || !revisionId) return;
     busy = true; error = ''; completed = 0;
     try {
-      const objects = Array.from(files ?? []).filter((file) => /\/objects\/[a-f0-9]{64}$/.test(file.webkitRelativePath));
-      if (!objects.length || objects.length > 32768 || new Set(objects.map((file) => file.name)).size !== objects.length) throw new Error('Capture objects are missing, duplicated or exceed the upload limit.');
-      total = objects.reduce((bytes, file) => bytes + file.size, 0);
-      for (const [index, file] of objects.entries()) {
-        const path = `/api/maintain/inputs/objects/${file.name}`;
-        message = `Retaining object ${index + 1} of ${objects.length}.`;
-        const started = await request(path, { operation: 'start', size: file.size });
-        if (!started.completed) {
-          if (!Number.isSafeInteger(started.partSize) || started.partSize !== 8 * 1024 * 1024 || typeof started.uploadId !== 'string' || !Array.isArray(started.parts)) throw new Error('Invalid input upload response.');
-          const saved = new Set(started.parts.map((part: { part_number: number }) => part.part_number));
-          for (let offset = 0, part = 1; offset < file.size; offset += started.partSize, part++) {
-            if (saved.has(part)) continue;
-            const response = await fetch(`${path}?uploadId=${encodeURIComponent(started.uploadId)}&part=${part}`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: file.slice(offset, offset + started.partSize) });
-            if (!response.ok) throw new Error((await response.json() as { error?: string }).error ?? 'Input part upload failed.');
-          }
-          message = `Verifying object ${index + 1} of ${objects.length}.`;
-          await request(path, { operation: 'complete', uploadId: started.uploadId });
-        }
-        completed += file.size;
-      }
+      await uploadCaptureObjects(files, (progress) => { completed = progress.completed; total = progress.total; message = progress.message; });
       message = 'Checking complete input closure and retained source evidence…';
-      const result = await request('/api/maintain/inputs/locks', { revisionId, lock: reference, reason });
+      const result = await postCaptureRequest<{ sha256: string }>('/api/maintain/inputs/locks', { revisionId, lock: reference, reason });
       if (typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(result.sha256)) throw new Error('Server returned invalid input lock.');
       await goto(`/maintain/inputs/${result.sha256}`);
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Input capture could not be retained.'; }

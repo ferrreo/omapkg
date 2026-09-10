@@ -19,6 +19,7 @@ import { parseArchDependency } from '../../src/lib/server/arch';
 import { TEMPLATE_DEFINITIONS, templateCommands } from './recipe-template';
 import { validateRecipePolicy } from './recipe-policy';
 import { runtimeExceptions } from '../../src/lib/server/runtime-evidence';
+import { revisionPackagePath } from '../../src/lib/server/catalog-recipe';
 
 function assertSourceName(value: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,150}$/.test(value) || value === '.' || value === '..') {
@@ -189,6 +190,7 @@ export async function createFactoryRevision(input: FactoryCandidate, repairAttem
     publicOptions: candidate.publicRecipeOptions,
   } : { version: 1, mode: 'custom-shell' };
   const sbom = standardSbom({ ...candidate, sbom: { ...candidate.sbom, recipePolicy } }, stableRevisionId, createdAt);
+  revisionPackagePath(candidate.request.name, JSON.stringify(sbom));
   const revision: Revision = {
     id: stableRevisionId,
     request_id: candidate.request.id,
@@ -328,6 +330,8 @@ function standardSbom(candidate: FactoryCandidate, revisionId: string, createdAt
   const candidateLicense = typeof candidate.license === 'string' ? candidate.license.trim() : '';
   const evidence = {
     ...(supplied ?? {}),
+    // Ignore model-supplied paths. The coordinator selects the immutable location.
+    catalogPath: candidate.catalogPath,
     runtimeExceptions: candidate.runtimeExceptions ?? [],
     dependencyEvidence: {
       declaredRuntime: candidate.dependencies,
