@@ -227,6 +227,10 @@ func (r *Runner) checkShell(ctx context.Context, job Job, name, image string) (s
 		if err := os.WriteFile(filename, []byte(file.contents), 0o644); err != nil {
 			return "", err
 		}
+		// The service umask is private; the isolated lint user still needs read access.
+		if err := os.Chmod(filename, 0o644); err != nil {
+			return "", err
+		}
 		target := "/opr-" + file.name
 		mounts = append(mounts, mount{Source: filename, Target: target, ReadOnly: true})
 		fmt.Fprintf(&script, "/bin/%s -n %s\n/usr/bin/shellcheck --norc --shell=%s --severity=error %s\n", file.shell, target, file.shell, target)
