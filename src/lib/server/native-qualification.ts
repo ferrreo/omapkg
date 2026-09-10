@@ -1,4 +1,4 @@
-import type { Actor, Architecture, Worker } from '../model';
+import type { Actor, Architecture } from '../model';
 import { canonicalJson } from '../canonical-json';
 import type { Env } from './env';
 import { audit, id, now, query, sha256 } from './db';

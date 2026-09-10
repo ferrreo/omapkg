@@ -102,7 +102,7 @@ archive_metadata_checked=0
 timestamp_ownership_order_checked=0
 declare -A allowed_owners=()
 inspect_package_archive() {
-  local archive=$1 listing mtree entries duplicate
+  local archive=$1 listing mtree entries duplicate owners owner
   listing=$(bsdtar --list --file "$archive")
   duplicate=$(printf '%s\n' "$listing" | LC_ALL=C sort | uniq -d | head -n1)
   [[ -z "$duplicate" ]] || die "package archive contains duplicate member $duplicate: $(basename "$archive")"
@@ -114,14 +114,26 @@ inspect_package_archive() {
   duplicate=$(printf '%s\n' "$entries" | LC_ALL=C sort | uniq -d | head -n1)
   [[ -z "$duplicate" ]] || die "package archive mtree contains duplicate entry $duplicate: $(basename "$archive")"
   awk '/^\./ { if ($0 !~ /time=[0-9]+(\.0)?/ || ($0 ~ /uid=/ && $0 !~ /uid=[0-9]+/) || ($0 ~ /gid=/ && $0 !~ /gid=[0-9]+/)) bad=1 } END { exit bad+0 }' <<<"$entries" || die "package archive timestamp or ownership metadata is not deterministic: $(basename "$archive")"
-  default_uid=$(sed -n 's#^/set.*uid=\([0-9][0-9]*\).*#\1#p' <<<"$mtree" | head -n1)
-  default_gid=$(sed -n 's#^/set.*gid=\([0-9][0-9]*\).*#\1#p' <<<"$mtree" | head -n1)
-  [[ -n "$default_uid" && -n "$default_gid" ]] && allowed_owners["$default_uid:$default_gid"]=1
-  while IFS= read -r entry; do
-    uid=$(sed -n 's/.* uid=\([0-9][0-9]*\).*/\1/p' <<<"$entry")
-    gid=$(sed -n 's/.* gid=\([0-9][0-9]*\).*/\1/p' <<<"$entry")
-    [[ -n "$uid" && -n "$gid" ]] && allowed_owners["$uid:$gid"]=1
-  done <<<"$entries"
+  owners=$(awk '
+    $1 == "/unset" {
+      for (i=2; i<=NF; i++) {
+        if ($i == "all" || $i == "uid") default_uid=""
+        if ($i == "all" || $i == "gid") default_gid=""
+      }
+      next
+    }
+    $1 == "/set" || /^\./ {
+      uid=default_uid; gid=default_gid
+      for (i=2; i<=NF; i++) {
+        if ($i ~ /^uid=/) uid=substr($i,5)
+        if ($i ~ /^gid=/) gid=substr($i,5)
+      }
+      if ($1 == "/set") { default_uid=uid; default_gid=gid; next }
+      if (uid !~ /^[0-9]+$/ || gid !~ /^[0-9]+$/) exit 1
+      print uid ":" gid
+    }
+  ' <<<"$mtree") || die "package archive has incomplete ownership metadata: $(basename "$archive")"
+  while IFS= read -r owner; do allowed_owners["$owner"]=1; done <<<"$owners"
   archive_metadata_checked=1
   timestamp_ownership_order_checked=1
 }

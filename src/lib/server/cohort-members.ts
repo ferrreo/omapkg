@@ -77,15 +77,20 @@ export async function* cohortMemberStream(db: D1Database, record: CohortScopeRec
 export async function cohortRecipeMember(db: D1Database, record: CohortScopeRecord, recipeId: string) {
   const manifest = await readCohortManifest(record);
 
-  if (manifest.schemaVersion === 1) return manifest.members.find((member) => member.recipe?.id === recipeId);
-  const rows = await query<{ ordinal: number }>(db, 'SELECT ordinal FROM cohort_members WHERE cohort_id=? AND revision=? AND recipe_revision_id=?', record.id, record.current_revision, recipeId);
+  const binding = await db.prepare('SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=?').bind(recipeId).first<{ source_revision_id: string }>();
+  const sourceId = binding?.source_revision_id ?? recipeId;
+  if (manifest.schemaVersion === 1) {
+    const member = manifest.members.find((item) => item.recipe?.id === sourceId);
+    return member && binding ? { ...member, recipe: member.recipe ? { ...member.recipe, id: recipeId } : member.recipe } : member;
+  }
+  const rows = await query<{ ordinal: number }>(db, 'SELECT ordinal FROM cohort_members WHERE cohort_id=? AND revision=? AND recipe_revision_id=?', record.id, record.current_revision, sourceId);
 
   if (rows.length !== 1) return undefined;
   const member = (await cohortMembers(db, record, rows[0].ordinal, 1))[0];
 
-  if (member?.recipe?.id !== recipeId) throw new PolicyError(409, 'Cohort recipe membership integrity check failed.');
+  if (member?.recipe?.id !== sourceId) throw new PolicyError(409, 'Cohort recipe membership integrity check failed.');
 
-  return member;
+  return member && binding ? { ...member, recipe: member.recipe ? { ...member.recipe, id: recipeId } : member.recipe } : member;
 }
 
 export async function namedCohortMembers(db: D1Database, record: CohortScopeRecord, names: string[]) {

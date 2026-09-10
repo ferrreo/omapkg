@@ -52,7 +52,7 @@ CREATE TABLE factory_image_uploads (
   filename TEXT NOT NULL,
   object_key TEXT NOT NULL UNIQUE,
   r2_upload_id TEXT NOT NULL,
-  expected_size INTEGER NOT NULL CHECK(expected_size>0 AND expected_size<=4294967296),
+  expected_size INTEGER NOT NULL CHECK(expected_size>0 AND expected_size<=68719476736),
   expected_sha256 TEXT NOT NULL CHECK(length(expected_sha256)=64),
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed','aborted','failed')),
   actual_size INTEGER,
@@ -64,7 +64,7 @@ CREATE UNIQUE INDEX factory_image_uploads_active_job ON factory_image_uploads(jo
 CREATE INDEX factory_image_uploads_worker ON factory_image_uploads(worker_id,status,created_at);
 CREATE TABLE factory_image_upload_parts (
   upload_id TEXT NOT NULL REFERENCES factory_image_uploads(id) ON DELETE CASCADE,
-  part_number INTEGER NOT NULL CHECK(part_number>0 AND part_number<=512),
+  part_number INTEGER NOT NULL CHECK(part_number>0 AND part_number<=8192),
   sha256 TEXT NOT NULL CHECK(length(sha256)=64),
   size INTEGER NOT NULL CHECK(size>0 AND size<=8388608),
   etag TEXT NOT NULL,

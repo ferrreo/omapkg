@@ -1,5 +1,5 @@
 import { frozenFixture } from './frozen-fixtures';
-import { proposeInputLock, reviewInputLock, selectInputLock, revokeInputReview } from '../src/lib/server/input-locks';
+import { fenceFrozenLeases, proposeInputLock, reviewInputLock, selectInputLock, revokeInputReview } from '../src/lib/server/input-locks';
 import { retainNativeInput, revokeNativeInput } from '../src/lib/server/input-owned';
 import { cohortOutputContract } from '../src/lib/server/build-outputs';
 import { POST as downloadInput } from '../src/routes/api/worker/jobs/[id]/inputs/[digest]/+server';
@@ -319,6 +319,42 @@ test('private factory candidate claim bypasses distributable approvals only with
   } finally { holder.close(); }
 });
 
+test('expired private worker lease stops factory attempt instead of reclaiming same build', async () => {
+  const { holder, db, worker } = await fixture();
+  try {
+    const candidate = await seedBuild(db, { requestStatus: 'review', approved: false, surface: 'recipe' });
+    const policy = { network: 'disabled', source: candidate.source[0].sha256 };
+    const run = await startFactoryRun(db, { id: `expired-private-${candidate.buildId}`, targetKind: 'generated', targetId: candidate.requestId, unitKey: 'request', policy, createdBy: 'factory' });
+    const attempt = await reserveFactoryAttempt(db, { runId: run.id, reservationKey: 'attempt:1', candidateSha256: candidate.manifest, inputSha256: candidate.manifest, candidateRevisionId: candidate.revisionId, policy });
+    const expiredAt = Math.floor(Date.now() / 1000) - 1;
+    await db.prepare(`UPDATE builds SET private_candidate=1,factory_run_id=?,factory_attempt=?,status='leased',worker_id=?,lease_token=?,lease_expires_at=?,attempt=1,started_at=? WHERE id=?`)
+      .bind(run.id, attempt.attempt, worker.id, 'expired-worker-lease', expiredAt, expiredAt, candidate.buildId).run();
+    expect(await claimJob(db, worker, { version: 'v-expired', runtime: 'podman', capabilities: ['offline-oci', 'single-build-reproducibility-v1'] })).toBeNull();
+    expect((await db.prepare('SELECT status FROM builds WHERE id=?').bind(candidate.buildId).first<{ status: string }>())?.status).toBe('cancelled');
+    expect((await db.prepare('SELECT status FROM factory_runs WHERE id=?').bind(run.id).first<{ status: string }>())?.status).toBe('needs-human-intervention');
+    expect((await db.prepare('SELECT status FROM factory_run_attempts WHERE run_id=? AND attempt=1').bind(run.id).first<{ status: string }>())?.status).toBe('failed');
+  } finally { holder.close(); }
+});
+
+test('manual retry cannot reset a failed private factory build', async () => {
+  const { holder, db } = await fixture();
+  try {
+    const candidate = await seedBuild(db, { requestStatus: 'queued', approved: true, surface: 'recipe' });
+    await db.prepare("UPDATE builds SET private_candidate=1,status='failed',factory_run_id='private-run',factory_attempt=3 WHERE id=?").bind(candidate.buildId).run();
+    await expect(retryBuild(db, { id: 'maintainer-1', role: 'maintainer', areas: ['system'] }, candidate.buildId, 'manual retry')).rejects.toThrow('Private factory attempts require an audited factory successor');
+  } finally { holder.close(); }
+});
+
+test('frozen-input fencing leaves private factory bindings immutable', async () => {
+  const { holder, db } = await fixture();
+  try {
+    const candidate = await seedBuild(db, { requestStatus: 'review', approved: false, surface: 'recipe' });
+    await db.prepare("UPDATE builds SET private_candidate=1,factory_run_id='private-input-run',factory_attempt=1,status='succeeded' WHERE id=?").bind(candidate.buildId).run();
+    await db.batch([fenceFrozenLeases(db)]);
+    expect(await db.prepare('SELECT status,private_candidate,input_lock_sha256 FROM builds WHERE id=?').bind(candidate.buildId).first<{ status: string; private_candidate: number; input_lock_sha256: string | null }>()).toEqual({ status: 'succeeded', private_candidate: 1, input_lock_sha256: null });
+  } finally { holder.close(); }
+});
+
 test('maintainer can retry a failed current build without losing attempt logs', async () => {
   const { holder, db, worker } = await fixture();
 
@@ -365,7 +401,7 @@ test('maintainer can retry a failed current build without losing attempt logs', 
 });
 
 test('failed build retry requires both current approvals', async () => {
-  const { holder, db, worker } = await fixture();
+  const { holder, db } = await fixture();
 
   try {
     const seeded = await seedBuild(db);

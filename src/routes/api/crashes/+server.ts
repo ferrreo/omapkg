@@ -1,5 +1,5 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
-import type { Actor, Release } from '$lib/model';
+import type { Release } from '$lib/model';
 import { id, now, query } from '$lib/server/db';
 import { PolicyError, requireMaintainer } from '$lib/server/policy';
 import { crashRateKeys, crashRateLimit, reviewCrash } from '$lib/server/crashes';
@@ -78,8 +78,7 @@ export const POST: RequestHandler = async (event) => {
 export const GET: RequestHandler = async (event) => {
   if (!event.platform?.env?.DB) return json({ error: 'Crash reporting is unavailable.' }, { status: 503 });
   try {
-    let actor: Actor;
-    try { actor = requireMaintainer(event.locals.actor); }
+    try { requireMaintainer(event.locals.actor); }
     catch (cause) { if (cause instanceof PolicyError) throw cause; throw cause; }
     const releaseId = event.url.searchParams.get('releaseId');
     if (releaseId && !RELEASE_ID.test(releaseId)) throw new PolicyError(400, 'Invalid release ID.');

@@ -285,7 +285,7 @@ test('v2 multipart outputs remain distinct, immutable and fenced to their attemp
 
   try {
     const body = new Uint8Array([1, 2, 3, 4]); const digest = await sha256(body);
-    const seeded = await buildFixture(db, body.length, digest);
+    await buildFixture(db, body.length, digest);
     const job = (await claimJob(db, worker))!;
 
     const contract = { schemaVersion: 2, cohort: { id: 'upload-cohort', revision: 1, manifestSha256: 'c'.repeat(64) }, outputs: [

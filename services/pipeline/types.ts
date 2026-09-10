@@ -142,6 +142,10 @@ export interface FactoryEnv extends GitHubEnv {
   FACTORY_BUILDER_IMAGE?: string;
   FACTORY_BUILDER_IMAGE_DIGEST?: string;
   PUBLIC_ORIGIN?: string;
+  PACKAGE_SIGNING_FINGERPRINT?: string;
+  SIGNING_FINGERPRINT?: string;
+  PACKAGE_SIGNING_PUBLIC_KEY_R2_KEY?: string;
+  FACTORY_IMAGE_BUILDER_SHA256?: string;
 }
 
 export interface FactoryWorkflowParams {
@@ -156,6 +160,15 @@ export interface FactoryWorkflowParams {
   revisionId?: string;
   policy?: unknown;
   repairReason?: string;
+  cohortRunId?: string;
+  cohortId?: string;
+  cohortRevision?: number;
+  cohortOffset?: number;
+  cohortPageSize?: number;
+  cohortPolicy?: unknown;
+  cohortCoordinator?: { id: string; role: import('../../src/lib/model').Role; areas: string[] };
+  imageCandidate?: import('../../src/lib/server/factory-image-run').FactoryImageCandidate;
+  imageAlternatives?: Array<import('../../src/lib/server/factory-image-run').FactoryImageCandidate>;
 }
 
 export interface FactoryWorkflowBinding {

@@ -1,6 +1,6 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
 import { environment, maintainer } from '$lib/server/http';
-import { factoryDossierPublicCanonicalJson, factoryDossierMarkdown, storedFactoryDossier } from '$lib/server/factory-dossier';
+import { storedFactoryDossier } from '$lib/server/factory-dossier';
 import { PolicyError } from '$lib/server/policy';
 
 const headers = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' };

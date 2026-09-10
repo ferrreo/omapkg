@@ -16,6 +16,7 @@ import { verifyOutputProvenance } from './build-output-evidence';
 import { getBuildForWorker } from './worker-protocol';
 import type { Worker } from '../model';
 import { ownedRepositoryUniversePages } from './owned-repository';
+import { assertFactoryRevisionBindingReviewed } from './preserved-factory';
 
 const MAX_FINDINGS = 256;
 
@@ -975,6 +976,7 @@ async function ownedUniversePackages(env: Env, current: CohortRow, architecture:
 }
 
 async function verifyCandidateBuild(env: Env, build: StoredBuild): Promise<void> {
+  await assertFactoryRevisionBindingReviewed(env.DB, build.revision_id);
   if (!build.worker_id || !build.provenance || !build.provenance_signature) throw new PolicyError(409, `Build ${build.id} lacks signed native output evidence.`);
   const worker = await env.DB.prepare('SELECT * FROM workers WHERE id=?').bind(build.worker_id).first<Worker>();
   const lease = worker ? await getBuildForWorker(env.DB, build.id, worker.id) : null;
@@ -1008,8 +1010,8 @@ async function loadPackages(env: Env, current: CohortRow, architecture: Architec
     }
 
     const selected = build.input_lock_sha256 ? await env.DB.prepare(`SELECT 1 FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
-      WHERE s.recipe_revision_id=? AND s.architecture=? AND s.cohort_id=? AND s.cohort_revision=? AND s.lock_sha256=? AND l.purpose='owned'`)
-      .bind(build.revision_id, architecture, current.id, current.current_revision, build.input_lock_sha256).first() : null;
+      WHERE (s.recipe_revision_id=? OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=?)) AND s.architecture=? AND s.cohort_id=? AND s.cohort_revision=? AND s.lock_sha256=? AND l.purpose='owned'`)
+      .bind(build.revision_id, build.revision_id, architecture, current.id, current.current_revision, build.input_lock_sha256).first() : null;
 
     if (!selected) throw new PolicyError(409, `Build ${build.id} lacks the selected current owned input lock.`);
     await verifyCandidateBuild(env, build);

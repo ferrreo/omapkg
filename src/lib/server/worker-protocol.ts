@@ -40,7 +40,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'preserved-recipe-v1', 'helper-shell-analysis-v1', 'abi-inventory-v1', 'single-build-reproducibility-v1', 'factory-image-v1'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'recipe-inspection-override-v1', 'preserved-recipe-v1', 'helper-shell-analysis-v1', 'abi-inventory-v1', 'single-build-reproducibility-v1', 'factory-image-v1'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 
@@ -155,6 +155,7 @@ export interface WorkerLease extends Build {
   revision_source_date_epoch: number;
   revision_image_digest: string;
   revision_surface: 'binary' | 'recipe';
+  revision_preserved_origin_revision_id?: string | null;
 }
 
 export interface CandidateBuild extends WorkerLease {
@@ -425,7 +426,7 @@ export function parseRevisionForJob(revision: WorkerLease): {
   }
 
   if (!sha256Pattern.test(revision.revision_recipe_sha256)) throw new WorkerProtocolError(500, 'Reviewed recipe checksum is invalid');
-  const preserved = preservedRecipe({ id: revision.revision_id, sbom_json: revision.revision_sbom_json, architectures_json: revision.revision_architectures_json });
+  const preserved = preservedRecipe({ id: revision.revision_id, preserved_origin_revision_id: revision.revision_preserved_origin_revision_id ?? null, sbom_json: revision.revision_sbom_json, architectures_json: revision.revision_architectures_json });
   const target = preserved?.dependencies[revision.architecture];
 
   if (preserved && (!target || revision.revision_public_recipe || revision.revision_sources_json !== '[]')) throw new WorkerProtocolError(500, 'Invalid preserved recipe source scope');
@@ -574,6 +575,7 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
         b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json, b.input_lock_sha256, b.preserved_inputs_json,
         b.factory_run_id, b.factory_attempt, b.private_candidate,
+        (SELECT fa.input_sha256 FROM factory_run_attempts fa WHERE fa.run_id=b.factory_run_id AND fa.attempt=b.factory_attempt) AS factory_input_sha256,
         b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at, b.dependency_blockers_json,
         q.name AS revision_name, r.request_id AS revision_request_id, r.version AS revision_version, r.recipe AS revision_recipe,
         r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,
@@ -581,12 +583,12 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
         r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
         r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
         r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
+        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json, r.preserved_origin_revision_id AS revision_preserved_origin_revision_id
       FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
       WHERE b.id = ? AND b.worker_id = ?
         AND (q.preserved_import_id IS NULL OR EXISTS(SELECT 1 FROM current_preserved_recipe_imports i WHERE i.id=q.preserved_import_id AND (i.revision_id=r.id OR i.revision_id=r.preserved_origin_revision_id)))
         AND (b.input_lock_sha256 IS NULL OR EXISTS(SELECT 1 FROM current_input_locks l JOIN build_input_selections s ON s.lock_sha256=l.sha256
-          WHERE l.sha256=b.input_lock_sha256 AND s.recipe_revision_id=b.revision_id AND s.architecture=b.architecture
+          WHERE l.sha256=b.input_lock_sha256 AND (s.recipe_revision_id=b.revision_id OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=b.revision_id)) AND s.architecture=b.architecture
           AND s.cohort_id=l.cohort_id AND s.cohort_revision=l.cohort_revision))
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
         AND (b.private_candidate=1 AND EXISTS (SELECT 1 FROM factory_runs fr JOIN factory_run_attempts fa ON fa.run_id=fr.id AND fa.attempt=fr.current_attempt

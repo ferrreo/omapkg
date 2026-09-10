@@ -14,6 +14,8 @@ export interface PrivateFactoryBuildResult {
   failure?: { buildId: string; architecture: Architecture; message: string };
 }
 
+export type PrivateFactoryBuildStatus = 'pending' | 'succeeded' | 'failed';
+
 function architecture(value: string): value is Architecture { return value === 'x86_64' || value === 'aarch64'; }
 
 async function savedPrivateBuilds(env: Pick<FactoryEnv, 'DB'>, runId: string, attempt: number) {
@@ -85,15 +87,27 @@ export async function privateFactoryBuildResult(env: Pick<FactoryEnv, 'DB'>, run
   return { status: 'succeeded', builds, artifacts, inputLocks, dependencyPlans };
 }
 
+export async function privateFactoryBuildStatus(env: Pick<FactoryEnv, 'DB'>, runId: string, attempt: number, buildIds: readonly string[]): Promise<PrivateFactoryBuildStatus> {
+  if (!buildIds.length) throw new FactoryRunError('invalid-input', 'Private factory attempt has no builds.');
+  const rows = await env.DB.prepare(`SELECT id,status FROM builds
+    WHERE factory_run_id=? AND factory_attempt=? AND private_candidate=1 AND id IN (SELECT value FROM json_each(?))`)
+    .bind(runId, attempt, JSON.stringify(buildIds)).all<{ id: string; status: 'queued' | 'leased' | 'succeeded' | 'failed' | 'cancelled' }>();
+  if (rows.results.length !== buildIds.length) throw new FactoryRunError('storage', 'Private factory build records are incomplete.');
+  if (rows.results.some((row) => row.status === 'failed' || row.status === 'cancelled')) return 'failed';
+  if (rows.results.some((row) => row.status !== 'succeeded')) return 'pending';
+  return 'succeeded';
+}
+
 export async function waitForPrivateFactoryBuilds(env: Pick<FactoryEnv, 'DB'>, runId: string, attempt: FactoryAttempt, options: { timeoutMs?: number; pollMs?: number } = {}): Promise<PrivateFactoryBuildResult> {
-  const timeoutMs = options.timeoutMs ?? 25 * 60_000, pollMs = options.pollMs ?? 5_000;
+  const timeoutMs = options.timeoutMs ?? 150 * 60_000, pollMs = options.pollMs ?? 30_000;
   if (!attempt.buildIds.length) throw new FactoryRunError('invalid-input', 'Private factory attempt has no queued builds.');
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    const result = await privateFactoryBuildResult(env, runId, attempt.attempt, attempt.buildIds);
-    if (result.status !== 'pending') return result;
+    const status = await privateFactoryBuildStatus(env, runId, attempt.attempt, attempt.buildIds);
+    if (status !== 'pending') return privateFactoryBuildResult(env, runId, attempt.attempt, attempt.buildIds);
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
+  const status = await privateFactoryBuildStatus(env, runId, attempt.attempt, attempt.buildIds);
   const result = await privateFactoryBuildResult(env, runId, attempt.attempt, attempt.buildIds);
-  return result.status === 'pending' ? { ...result, status: 'ambiguous', failure: { buildId: result.builds[0].id, architecture: result.builds[0].architecture, message: 'Private factory build timed out; execution status is ambiguous.' } } : result;
+  return status === 'pending' && result.status === 'pending' ? { ...result, status: 'ambiguous', failure: { buildId: result.builds[0].id, architecture: result.builds[0].architecture, message: 'Private factory build timed out; execution status is ambiguous.' } } : result;
 }

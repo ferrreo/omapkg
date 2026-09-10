@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -88,13 +89,14 @@ var supportedWorkerCapabilities = [...]string{
 	"frozen-inputs-v1",
 	"helper-shell-analysis-v1",
 	"recipe-inspection-v1",
+	"recipe-inspection-override-v1",
 	"preserved-recipe-v1",
 	"abi-inventory-v1",
 	"single-build-reproducibility-v1",
 }
 
 func factoryImageSupported(cfg Config) bool {
-	if !cfg.FactoryImage || cfg.FactoryImageBuilderPath == "" || !sha256Pattern.MatchString(cfg.FactoryImageBuilderSHA256) {
+	if !cfg.FactoryImage || cfg.Image == "" || !digestPattern.MatchString(cfg.ImageDigest) || validateImageReference(cfg.Image, cfg.ImageDigest) != nil || cfg.FactoryImageBuilderPath == "" || !sha256Pattern.MatchString(cfg.FactoryImageBuilderSHA256) {
 		return false
 	}
 	for _, command := range []string{"gpg", cfg.Runtime} {
@@ -103,6 +105,57 @@ func factoryImageSupported(cfg Config) bool {
 		}
 	}
 	return true
+}
+
+func validateFactoryImageConfig(cfg Config) error {
+	if !cfg.FactoryImage {
+		return nil
+	}
+	if !factoryImageSupported(cfg) {
+		return errors.New("factoryImage requires gpg, the container runtime, a pinned builder image and a pinned builder script")
+	}
+	info, err := os.Stat(cfg.FactoryImageBuilderPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o022 != 0 {
+		return errors.New("factory image builder must be a protected regular file")
+	}
+	digest, _, err := hashFile(cfg.FactoryImageBuilderPath)
+	if err != nil || digest != cfg.FactoryImageBuilderSHA256 {
+		return errors.New("factory image builder digest does not match config")
+	}
+	nativeContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := (&Runner{Runtime: cfg.Runtime}).nativeHost(nativeContext, cfg.Architecture); err != nil {
+		return fmt.Errorf("factory image worker is not native: %w", err)
+	}
+	if err := verifyConfiguredImageAvailable(cfg.Runtime, cfg.Image, cfg.ImageDigest, cfg.Architecture); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyConfiguredImageAvailable(runtime, imageRef, imageDigest, target string) error {
+	format := "{{.Digest}}\t{{.Os}}\t{{.Architecture}}"
+	if runtimeKind(runtime) == "docker" {
+		format = "{{json .RepoDigests}}\t{{.Os}}\t{{.Architecture}}"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, runtime, "image", "inspect", "--format", format, imageRef).CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("inspect configured builder image: %w", ctx.Err())
+		}
+		return fmt.Errorf("inspect configured builder image: %w", err)
+	}
+	fields := strings.SplitN(strings.TrimSpace(string(output)), "\t", 3)
+	if len(fields) != 3 || !imageDigestInInspect(fields[0], imageDigest, runtime) {
+		return fmt.Errorf("configured builder image digest does not match: expected %s, got %q", imageDigest, strings.TrimSpace(string(output)))
+	}
+	expectedArchitecture := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[target]
+	if fields[1] != "linux" || fields[2] != expectedArchitecture {
+		return fmt.Errorf("configured builder image platform %s/%s does not match target %s", fields[1], fields[2], target)
+	}
+	return nil
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {
@@ -170,6 +223,7 @@ type Job struct {
 	PreservedRecipe     *preservedBuildInputs `json:"preservedRecipe,omitempty"`
 	Kind                string                `json:"kind,omitempty"`
 	RecipeCapture       *inputObject          `json:"recipeCapture,omitempty"`
+	RecipeOverride      *inputObject          `json:"recipeOverride,omitempty"`
 	InputLock           *inputObject          `json:"inputLock,omitempty"`
 	OutputContract      *outputContract       `json:"outputContract,omitempty"`
 	Attempt             int64                 `json:"attempt,omitempty"`
@@ -374,18 +428,8 @@ func validateConfig(cfg Config) error {
 	if cfg.SourceTimeoutSec < 0 {
 		return errors.New("sourceTimeoutSeconds cannot be negative")
 	}
-	if cfg.FactoryImage {
-		if !factoryImageSupported(cfg) {
-			return errors.New("factoryImage requires gpg, the container runtime and a pinned builder")
-		}
-		info, err := os.Stat(cfg.FactoryImageBuilderPath)
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o022 != 0 {
-			return errors.New("factory image builder must be a protected regular file")
-		}
-		digest, _, err := hashFile(cfg.FactoryImageBuilderPath)
-		if err != nil || digest != cfg.FactoryImageBuilderSHA256 {
-			return errors.New("factory image builder digest does not match config")
-		}
+	if err := validateFactoryImageConfig(cfg); err != nil {
+		return err
 	}
 	return nil
 }

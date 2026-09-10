@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import * as openpgp from 'openpgp';
 import signer from './index';
+import { canonicalJson } from '../../src/lib/canonical-json';
 
 const generatedKey = await openpgp.generateKey({
   type: 'rsa',
@@ -72,6 +73,17 @@ async function drain(value: ReadableStream<Uint8Array>): Promise<void> {
   finally { reader.releaseLock(); }
 }
 
+async function reproducibilityContract(input: { recipeSha256: string; imageDigest: string; sourceDateEpoch: number; filename: string; size: number; sha256: string; sources?: unknown[] }) {
+  const files = [{ filename: input.filename, size: input.size, sha256: input.sha256 }];
+  return {
+    schemaVersion: 1, status: 'reproducibility-contract-verified', mode: 'single-build', target: 'x86_64',
+    inputs: { recipeSha256: input.recipeSha256, sourceManifestSha256: await sha256(new TextEncoder().encode(canonicalJson(input.sources ?? []))), inputLockSha256: '', dependencyPlanSha256: '', imageDigest: input.imageDigest, sourceDateEpoch: input.sourceDateEpoch },
+    controls: { network: 'disabled', locale: 'C', timezone: 'UTC', umask: '022', hostSecrets: 'excluded', writableCaches: 'excluded', nativeTarget: 'x86_64', archivePathsChecked: true, archiveMetadataChecked: true, timestampOwnershipOrderChecked: true },
+    outputs: { setSha256: await sha256(new TextEncoder().encode(canonicalJson(files))), files, unexpected: [], prohibitedPaths: [] },
+    limitations: ['single execution does not establish independent byte reproduction'],
+  };
+}
+
 async function runGPG(args: string[], home: string): Promise<{ status: number; stderr: string }> {
   const process = Bun.spawn(['gpg', '--batch', '--homedir', home, ...args], { stdout: 'pipe', stderr: 'pipe' });
 
@@ -91,7 +103,7 @@ test('signs package bytes and produces a GnuPG-verifiable detached signature', a
     buildId: 'build-1', revisionId: 'revision-1', workerId: 'worker-1',
     recipeSha256: 'a'.repeat(64), artifactSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', sources: [], reproducibility: await reproducibilityContract({ recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, filename: 'foo-1-1-x86_64.pkg.tar.zst', size: artifact.byteLength, sha256: artifactSha256 }), ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
 
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
@@ -204,7 +216,7 @@ test('signs and verifies a streamed artifact larger than 128 MiB without reading
     buildId: 'build-large', revisionId: 'revision-large', workerId: 'worker-large',
     recipeSha256: 'a'.repeat(64), artifactSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', sources: [], reproducibility: await reproducibilityContract({ recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, filename: 'foo-1-1-x86_64.pkg.tar.zst', size: artifactSize, sha256: artifactSha256 }), ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
 
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
@@ -311,7 +323,7 @@ test('rejects a reviewed intent when downloaded bytes do not match its digest', 
     buildId: 'build-2', revisionId: 'revision-2', workerId: 'worker-2',
     recipeSha256: 'a'.repeat(64), artifactSha256: expectedSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', sources: [], reproducibility: await reproducibilityContract({ recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, filename: 'foo-1-1-x86_64.pkg.tar.zst', size: 3, sha256: expectedSha256 }), ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
 
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
@@ -361,7 +373,7 @@ test('managed KMS mode forwards the artifact stream and returns a verified signa
 
   const provenance = JSON.stringify({
     buildId: 'build-3', revisionId: 'revision-3', workerId: 'worker-3', recipeSha256: 'a'.repeat(64), artifactSha256,
-    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)),
+    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled', sources: [], reproducibility: await reproducibilityContract({ recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, filename: 'foo-1-1-x86_64.pkg.tar.zst', size: artifact.byteLength, sha256: artifactSha256 }), ...runtimeEvidence('sha256:' + 'b'.repeat(64)),
     startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
 
@@ -444,7 +456,7 @@ test('cancels a streamed artifact when managed KMS rejects before consuming it',
     buildId: 'build-managed-failure', revisionId: 'revision-managed-failure', workerId: 'worker-managed-failure',
     recipeSha256: 'a'.repeat(64), artifactSha256, architecture: 'x86_64',
     imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1,
-    network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    network: 'disabled', sources: [], reproducibility: await reproducibilityContract({ recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, filename: 'foo-1-1-x86_64.pkg.tar.zst', size: artifact.byteLength, sha256: artifactSha256 }), ...runtimeEvidence('sha256:' + 'b'.repeat(64)), startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
 
   const provenanceSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance)));
@@ -571,7 +583,7 @@ test('reuses an existing valid signature after a transient audit failure', async
 
   const provenance = JSON.stringify({
     buildId: 'build-4', revisionId: 'revision-4', workerId: 'worker-4', recipeSha256: 'a'.repeat(64), artifactSha256,
-    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled', ...runtimeEvidence('sha256:' + 'b'.repeat(64)),
+    architecture: 'x86_64', imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, network: 'disabled', sources: [], reproducibility: await reproducibilityContract({ recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'b'.repeat(64), sourceDateEpoch: 1, filename: 'foo-1-1-x86_64.pkg.tar.zst', size: artifact.byteLength, sha256: artifactSha256 }), ...runtimeEvidence('sha256:' + 'b'.repeat(64)),
     startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   });
 

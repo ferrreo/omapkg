@@ -121,8 +121,8 @@ func singleBuildContract(job Job, outputs []ReproducibilityOutput, observation *
 	archiveInspected := observation != nil && observation.ArchivePathsInspected
 	metadataInspected := observation != nil && observation.ArchiveMetadataInspected
 	timestampOwnershipOrderChecked := observation != nil && observation.TimestampOwnershipOrderChecked
-	unexpected := []string(nil)
-	prohibited := []string(nil)
+	unexpected := []string{}
+	prohibited := []string{}
 	if observation != nil {
 		unexpected = append(unexpected, observation.UnexpectedOutputs...)
 		prohibited = append(prohibited, observation.ProhibitedPaths...)

@@ -7,6 +7,7 @@ import { canonicalJson } from '../canonical-json';
 import type { Env } from './env';
 import { audit, now, query, sha256 } from './db';
 import { inputAuthority, inputObject } from './input-objects';
+import { actorForGithubId } from './auth';
 import { getRecipeCapture } from './recipe-captures';
 import { getCatalogPackage, reviewReason } from './catalog-ownership';
 import { PolicyError } from './policy';
@@ -15,15 +16,17 @@ import { decodeBase64, verifyEd25519, requireExactKeys, requireKeys, requireLeas
 
 type InspectionEnv = Pick<Env, 'DB' | 'ARTIFACTS' | 'GITHUB_REPOSITORY'>;
 
-export type RecipeInspection = { id: string; capture_sha256: string; architecture: Architecture; image_id: string; image_ref: string;
+export type RecipeInspection = { id: string; capture_sha256: string; recipe_override_sha256: string | null; factory_run_id: string | null; factory_attempt: number | null; architecture: Architecture; image_id: string; image_ref: string;
   catalog_revision: number | null; catalog_sha256: string | null; requested_by: string; created_at: number; reason: string;
   status: 'queued' | 'leased' | 'succeeded' | 'failed' | 'cancelled'; attempt: number; worker_id: string | null;
   lease_token: string | null; lease_expires_at: number | null; error: string | null };
 
-export type InspectionJob = { kind: 'recipe-inspection'; id: string; packageName: string; recipeCapture: InputObject; architecture: Architecture;
+export type InspectionJob = { kind: 'recipe-inspection'; id: string; packageName: string; recipeCapture: InputObject; recipeOverride?: InputObject; factoryRunId?: string; factoryAttempt?: number; architecture: Architecture;
   attempt: number; imageRef: string; imageDigest: string; leaseToken: string; leaseExpiresAt: string };
 
-export async function requestRecipeInspection(env: InspectionEnv, actor: Actor | null, captureSha: string, imageId: string, reason: string) {
+type InspectionOptions = { recipeOverride?: InputObject; factoryRunId?: string; factoryAttempt?: number };
+
+export async function requestRecipeInspection(env: InspectionEnv, actor: Actor | null, captureSha: string, imageId: string, reason: string, options: InspectionOptions = {}) {
   const human = await inputAuthority(env.DB, actor), message = reviewReason(reason);
   const capture = await getRecipeCapture(env, captureSha);
   const image = await env.DB.prepare('SELECT image_ref,architecture FROM build_images WHERE id=? AND enabled=1').bind(imageId).first<{ image_ref: string; architecture: Architecture }>();
@@ -50,17 +53,42 @@ export async function requestRecipeInspection(env: InspectionEnv, actor: Actor |
     catalogRevision = catalog.revision; catalogSha = catalog.manifest_sha256;
   }
 
-  const id = await sha256(canonicalJson({ capture: captureSha, image: image.image_ref, architecture: image.architecture, catalogRevision, catalogSha, requestedBy: human.id }));
+  if (options.recipeOverride) {
+    if (!/^[a-f0-9]{64}$/.test(options.recipeOverride.sha256) || !Number.isSafeInteger(options.recipeOverride.size) || options.recipeOverride.size < 1 || options.recipeOverride.size > 2 * 1024 * 1024) {
+      throw new PolicyError(400, 'Recipe inspection override is invalid.');
+    }
+    if ((await inputObject(env.DB, options.recipeOverride.sha256)).size !== options.recipeOverride.size) throw new PolicyError(409, 'Recipe inspection override changed.');
+  }
+  if ((options.factoryRunId === undefined) !== (options.factoryAttempt === undefined) || (options.factoryAttempt !== undefined && (!Number.isSafeInteger(options.factoryAttempt) || options.factoryAttempt < 1 || options.factoryAttempt > 3))) throw new PolicyError(400, 'Factory inspection binding is invalid.');
+  if (options.factoryRunId) {
+    const run = await env.DB.prepare(`SELECT created_by FROM factory_runs WHERE id=? AND (
+      (status='running' AND current_attempt=? AND lease_token IS NOT NULL AND lease_expires_at>?) OR
+      (status='queued' AND attempt_count=?-1 AND current_attempt=?-1 AND lease_token IS NULL AND lease_expires_at IS NULL))`)
+      .bind(options.factoryRunId, options.factoryAttempt, now(), options.factoryAttempt, options.factoryAttempt).first<{ created_by: string }>();
+    if (!run || !/^github:[1-9][0-9]{0,19}$/.test(run.created_by)) throw new PolicyError(409, 'Factory inspection authority is no longer active.');
+  }
+  const id = await sha256(canonicalJson({ capture: captureSha, recipeOverride: options.recipeOverride ?? null, image: image.image_ref, architecture: image.architecture, catalogRevision, catalogSha, requestedBy: human.id, factoryRunId: options.factoryRunId ?? null, factoryAttempt: options.factoryAttempt ?? null }));
   const timestamp = now();
-  await env.DB.batch([
-    env.DB.prepare(`INSERT OR IGNORE INTO recipe_inspections(id,capture_sha256,architecture,image_id,image_ref,catalog_revision,catalog_sha256,requested_by,reason,created_at,status)
-      VALUES(?,?,?,?,?,?,?,?,?,?,'queued')`).bind(id, captureSha, image.architecture, imageId, image.image_ref, catalogRevision, catalogSha, human.id, message, timestamp),
-    env.DB.prepare(`UPDATE recipe_inspections SET status='queued',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=?
-      AND (status IN ('failed','cancelled') OR (status='leased' AND lease_expires_at<=?))`).bind(id, timestamp),
+  const statements = [
+    env.DB.prepare(`INSERT OR IGNORE INTO recipe_inspections(id,capture_sha256,recipe_override_sha256,factory_run_id,factory_attempt,architecture,image_id,image_ref,catalog_revision,catalog_sha256,requested_by,reason,created_at,status)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')`).bind(id, captureSha, options.recipeOverride?.sha256 ?? null, options.factoryRunId ?? null, options.factoryAttempt ?? null, image.architecture, imageId, image.image_ref, catalogRevision, catalogSha, human.id, message, timestamp),
     audit(env.DB, human.id, 'recipe.inspection_requested', id, { captureSha, imageRef: image.image_ref, architecture: image.architecture, reason: message }),
-  ]);
+  ];
+  if (!options.factoryRunId) statements.splice(1, 0, env.DB.prepare(`UPDATE recipe_inspections SET status='queued',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=?
+      AND (status IN ('failed','cancelled') OR (status='leased' AND lease_expires_at<=?))`).bind(id, timestamp));
+  await env.DB.batch(statements);
 
   return { id };
+}
+
+export async function requestFactoryRecipeInspection(env: InspectionEnv, runId: string, attempt: number, captureSha: string, imageId: string, override: InputObject, reason: string) {
+  const run = await env.DB.prepare(`SELECT created_by FROM factory_runs WHERE id=? AND (
+    (status='running' AND current_attempt=? AND lease_token IS NOT NULL AND lease_expires_at>?) OR
+    (status='queued' AND attempt_count=?-1 AND current_attempt=?-1 AND lease_token IS NULL AND lease_expires_at IS NULL))`)
+    .bind(runId, attempt, now(), attempt, attempt).first<{ created_by: string }>();
+  if (!run || !/^github:[1-9][0-9]{0,19}$/.test(run.created_by)) throw new PolicyError(409, 'Factory inspection authority is no longer active.');
+  const actor = await actorForGithubId(env.DB, run.created_by.slice(7));
+  return requestRecipeInspection(env, actor, captureSha, imageId, reason, { recipeOverride: override, factoryRunId: runId, factoryAttempt: attempt });
 }
 
 export async function cancelRecipeInspection(db: D1Database, actor: Actor | null, capture: string, id: string, reason: string) {
@@ -75,10 +103,12 @@ export async function cancelRecipeInspection(db: D1Database, actor: Actor | null
 export async function claimRecipeInspection(db: D1Database, worker: Worker, metadata: WorkerMetadata | null): Promise<InspectionJob | null> {
   if (!(metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]')).includes('recipe-inspection-v1')) return null;
   const timestamp = now(); await refreshWorkerMetadata(db, worker, metadata, timestamp);
+  const overrideCapability = Number((metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]')).includes('recipe-inspection-override-v1'));
 
   const candidate = await db.prepare(`SELECT * FROM current_recipe_inspections WHERE architecture=?
+    AND (recipe_override_sha256 IS NULL OR ?=1)
     AND (status='queued' OR (status='leased' AND lease_expires_at<=? AND attempt<3)) ORDER BY created_at,id LIMIT 1`)
-    .bind(worker.architecture, timestamp).first<RecipeInspection>();
+    .bind(worker.architecture, overrideCapability, timestamp).first<RecipeInspection>();
 
   if (!candidate) return null;
   const token = crypto.randomUUID(), expiry = timestamp + 600, tokenSha = await sha256(token);
@@ -103,12 +133,13 @@ export async function claimRecipeInspection(db: D1Database, worker: Worker, meta
     throw cause;
   }
 
-  const capture = await db.prepare('SELECT c.pkgbase,o.size FROM recipe_captures c JOIN input_objects o ON o.sha256=c.sha256 WHERE c.sha256=?')
-    .bind(candidate.capture_sha256).first<{ pkgbase: string; size: number }>();
+  const capture = await db.prepare('SELECT c.pkgbase,o.size,i.recipe_override_sha256,i.factory_run_id,i.factory_attempt FROM recipe_captures c JOIN input_objects o ON o.sha256=c.sha256 JOIN recipe_inspections i ON i.id=? WHERE c.sha256=?')
+    .bind(candidate.id, candidate.capture_sha256).first<{ pkgbase: string; size: number; recipe_override_sha256: string | null; factory_run_id: string | null; factory_attempt: number | null }>();
 
   if (!capture) throw new WorkerProtocolError(409, 'Retained recipe capture is unavailable');
 
-  return { kind: 'recipe-inspection', id: candidate.id, packageName: capture.pkgbase, recipeCapture: { sha256: candidate.capture_sha256, size: capture.size },
+  const override = capture.recipe_override_sha256 ? await inputObject(db, capture.recipe_override_sha256) : null;
+  return { kind: 'recipe-inspection', id: candidate.id, packageName: capture.pkgbase, recipeCapture: { sha256: candidate.capture_sha256, size: capture.size }, ...(override ? { recipeOverride: { sha256: override.sha256, size: override.size } } : {}), ...(capture.factory_run_id ? { factoryRunId: capture.factory_run_id, factoryAttempt: capture.factory_attempt! } : {}),
     architecture: candidate.architecture, attempt: candidate.attempt + 1, imageRef: candidate.image_ref, imageDigest: candidate.image_ref.split('@')[1],
     leaseToken: token, leaseExpiresAt: leaseExpiryValue(expiry) };
 }
@@ -125,6 +156,7 @@ export async function requireRecipeInspectionLease(db: D1Database, worker: Worke
 }
 
 export async function recipeInspectionObject(db: D1Database, job: RecipeInspection, digest: string) {
+  if (job.recipe_override_sha256 === digest) return inputObject(db, digest);
   const grant = await db.prepare(`SELECT 1 FROM recipe_captures c WHERE c.sha256=? AND (c.sha256=? OR json_extract(c.manifest_json,'$.git.commit.sha256')=? OR
     EXISTS(SELECT 1 FROM json_each(c.manifest_json,'$.git.trees') t WHERE json_extract(t.value,'$.sha256')=?) OR
     EXISTS(SELECT 1 FROM json_each(c.manifest_json,'$.files') f WHERE json_extract(f.value,'$.object.sha256')=?))`)
@@ -149,12 +181,14 @@ export async function completeRecipeInspection(db: D1Database, worker: Worker, i
   if (recorded) return { status: recorded.error === null ? 'succeeded' : 'failed' };
   const job = await requireRecipeInspectionLease(db, worker, id, input.leaseToken);
   const report = parseJsonRequest(new TextEncoder().encode(input.report));
-  const keys = ['schemaVersion', 'kind', 'jobId', 'attempt', 'capture', 'architecture', 'imageRef', 'host', 'sandbox', 'startedAt', 'finishedAt', 'srcinfo', 'srcinfoSha256', 'log', 'error'];
-  requireExactKeys(report, keys); requireKeys(report, keys);
+  const reportedOverride = (Object.prototype.hasOwnProperty.call(report, 'recipeOverride') ? report.recipeOverride : null) as { sha256?: unknown; size?: unknown } | null;
+  const keys = ['schemaVersion', 'kind', 'jobId', 'attempt', 'capture', 'recipeOverride', 'architecture', 'imageRef', 'host', 'sandbox', 'startedAt', 'finishedAt', 'srcinfo', 'srcinfoSha256', 'log', 'error'];
+  requireExactKeys(report, keys); requireKeys(report, keys.filter((key) => key !== 'recipeOverride'));
   const ref = parseInputObject(report.capture, 512 * 1024);
 
   if (report.schemaVersion !== 1 || report.kind !== 'recipe-inspection' || report.jobId !== id || report.attempt !== job.attempt ||
       ref.sha256 !== job.capture_sha256 || ref.size !== (await inputObject(db, ref.sha256)).size || report.architecture !== job.architecture || report.imageRef !== job.image_ref ||
+      (job.recipe_override_sha256 === null ? reportedOverride !== null : !reportedOverride || reportedOverride.sha256 !== job.recipe_override_sha256 || reportedOverride.size !== (await inputObject(db, job.recipe_override_sha256)).size) ||
       canonicalJson(report.sandbox) !== canonicalJson({ network: 'disabled', readOnly: true, user: '65534:65534' }) ||
       typeof report.srcinfo !== 'string' || new TextEncoder().encode(report.srcinfo).length > 1024 * 1024 || report.srcinfoSha256 !== await sha256(report.srcinfo) ||
       typeof report.log !== 'string' || report.log.length > 128 * 1024 || (report.error !== null && (typeof report.error !== 'string' || report.error.length > 4096))) throw new WorkerProtocolError(409, 'Inspection report differs from leased scope');

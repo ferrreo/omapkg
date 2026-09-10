@@ -1,5 +1,4 @@
-import type { Actor } from '../model';
-import type { Revision } from '../model';
+import type { Actor, Area, Revision } from '../model';
 import { canonicalJson } from '../canonical-json';
 import { humanMaintainer } from './catalog-ownership';
 import { audit, id, now, sha256 } from './db';
@@ -16,6 +15,8 @@ import {
 import { queuePrivateFactoryBuilds } from './factory-private-build';
 import { preservedRecipe } from '../preserved-recipe';
 import { assertPreservedImportCurrent } from './preserved-imports';
+import { validateRevision } from './policy';
+import { FACTORY_COHORT_PAGE_SIZE, pipelineFactoryCohortPageQueue, startFactoryCohortPaged, type FactoryCohortPageQueue } from './factory-cohort-dispatch';
 
 export const FACTORY_UNIT_KINDS = ['preserved', 'manual', 'cohort', 'cohort-member', 'bootstrap', 'toolchain'] as const;
 export type FactoryUnitKind = typeof FACTORY_UNIT_KINDS[number];
@@ -45,9 +46,11 @@ export interface FactoryUnitDispatch {
 
 export interface FactoryUnitQueue {
   enqueue(input: FactoryUnitDispatch): Promise<{ workflowId: string }>;
+  enqueuePage?: FactoryCohortPageQueue['enqueuePage'];
 }
 
 export function pipelineFactoryQueue(pipeline: Fetcher): FactoryUnitQueue {
+  const pageQueue = pipelineFactoryCohortPageQueue(pipeline);
   return {
     async enqueue(input) {
       const response = await pipeline.fetch(new Request('https://pipeline.internal/factory-unit', {
@@ -58,6 +61,7 @@ export function pipelineFactoryQueue(pipeline: Fetcher): FactoryUnitQueue {
       if (body.workflowId !== input.workflowId) throw new FactoryRunError('storage', 'Factory workflow returned a different identity.');
       return { workflowId: body.workflowId };
     },
+    enqueuePage: pageQueue.enqueuePage,
   };
 }
 
@@ -93,7 +97,7 @@ function validate(input: FactoryUnitInput): FactoryUnitInput {
   return { ...input, targetId: requireText(input.targetId, 'target id'), unitKey: requireText(input.unitKey, 'unit key'), policy: policy(input.policy) };
 }
 
-type UnitRevision = { id: string; request_id?: string; name?: string; upstream_url?: string; source_kind?: 'git' | 'archive'; license?: string; manifest_sha256: string; architectures_json: string; sources_json?: string; dependencies_json?: string; make_dependencies_json?: string | null; sbom_json?: string; area: string; status: string; latest_id: string };
+type UnitRevision = Revision & { name: string; upstream_url: string; source_kind: 'git' | 'archive'; area: Area; request_status: string; latest_id: string };
 
 async function resolveRevision(db: D1Database, actor: Actor, input: FactoryUnitInput): Promise<UnitRevision> {
   let revisionId = input.requestedRevisionId;
@@ -107,53 +111,32 @@ async function resolveRevision(db: D1Database, actor: Actor, input: FactoryUnitI
     revisionId = member.recipe_revision_id;
   }
   if (!revisionId) throw new FactoryRunError('invalid-input', 'A reviewed revision is required for this factory unit.');
-  let revision: UnitRevision | null = null;
-  try {
-    revision = await db.prepare(`SELECT r.id,r.request_id,r.manifest_sha256,r.architectures_json,r.sources_json,r.dependencies_json,r.make_dependencies_json,r.sbom_json,
-        r.license,q.name,q.upstream_url,q.source_kind,q.area,q.status,
-        (SELECT latest.id FROM revisions latest WHERE latest.request_id=r.request_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) AS latest_id
-      FROM revisions r JOIN requests q ON q.id=r.request_id WHERE r.id=?`).bind(revisionId).first<UnitRevision>();
-  } catch (cause) {
-    if (!(cause instanceof Error && /no such table|no such column|does not exist/i.test(cause.message))) throw new FactoryRunError('storage', 'Factory unit revision could not be read.');
-    revision = await db.prepare(`SELECT r.id,r.manifest_sha256,r.architectures_json,q.area,q.status,
-        (SELECT latest.id FROM revisions latest WHERE latest.request_id=r.request_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) AS latest_id
-      FROM revisions r JOIN requests q ON q.id=r.request_id WHERE r.id=?`).bind(revisionId).first<UnitRevision>();
-  }
+  const revision = await db.prepare(`SELECT r.*,q.name,q.upstream_url,q.source_kind,q.area,q.status AS request_status,
+      (SELECT latest.id FROM revisions latest WHERE latest.request_id=r.request_id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) AS latest_id
+    FROM revisions r JOIN requests q ON q.id=r.request_id WHERE r.id=?`).bind(revisionId).first<UnitRevision>();
   if (!revision || revision.latest_id !== revision.id) throw new FactoryRunError('invalid-input', 'Factory unit must use the current reviewed revision.');
   humanMaintainer(actor, revision.area);
-  if (revision.status === 'rejected' || !['generating', 'review', 'queued', 'building'].includes(revision.status)) throw new FactoryRunError('invalid-input', 'Factory unit revision is not admitted for a private build.');
-  if (input.targetKind === 'preserved' && revision.sbom_json) {
-    const preserved = preservedRecipe(revision as unknown as Revision);
-    if (!preserved) throw new FactoryRunError('invalid-input', 'Preserved factory units require retained recipe evidence.');
-    try { await assertPreservedImportCurrent(db, revision as unknown as Revision); }
-    catch (cause) { throw new FactoryRunError('invalid-input', cause instanceof Error ? cause.message : 'Preserved recipe authority is not current.'); }
-  }
+  if (!['generating', 'review', 'queued', 'building'].includes(revision.request_status)) throw new FactoryRunError('invalid-input', 'Factory unit revision is not admitted for a private build.');
+  await validateRevision(revision);
+  if (preservedRecipe(revision)) await assertPreservedImportCurrent(db, revision);
+  if (input.targetKind === 'preserved' && !preservedRecipe(revision)) throw new FactoryRunError('invalid-input', 'Preserved factory units require retained recipe evidence.');
   return revision;
 }
 
 async function boundExecutionPolicy(db: D1Database, input: FactoryUnitInput, revision: UnitRevision): Promise<unknown> {
   const requested = policy(input.policy) as Record<string, unknown>;
-  if (!revision.request_id || !revision.name || !revision.upstream_url || !revision.source_kind || !revision.license || !revision.sources_json || !revision.dependencies_json) return requested;
   if (requested.network !== undefined && requested.network !== 'disabled') throw new FactoryRunError('invalid-input', 'Factory private builds require disabled network policy.');
   let inputLocks: Array<{ architecture: string; lockSha256: string; cohortId: string; cohortRevision: number }> = [];
-  try {
-    const rows = await db.prepare(`SELECT s.architecture,s.lock_sha256,l.cohort_id,l.cohort_revision
-      FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
-      WHERE s.recipe_revision_id=? ORDER BY s.architecture,s.lock_sha256`).bind(revision.id).all<{ architecture: string; lock_sha256: string; cohort_id: string; cohort_revision: number }>();
-    inputLocks = rows.results.map((row) => ({ architecture: row.architecture, lockSha256: row.lock_sha256, cohortId: row.cohort_id, cohortRevision: row.cohort_revision }));
-  } catch (cause) {
-    // Minimal factory fixtures predate frozen input selection tables.
-    if (!(cause instanceof Error && /no such table|no such column|does not exist/i.test(cause.message))) throw new FactoryRunError('storage', 'Factory input authority could not be read.');
-  }
-  let architectures: unknown, sources: unknown, dependencies: unknown, makeDependencies: unknown;
-  try {
-    architectures = JSON.parse(revision.architectures_json);
-    sources = JSON.parse(revision.sources_json);
-    dependencies = JSON.parse(revision.dependencies_json);
-    makeDependencies = revision.make_dependencies_json ? JSON.parse(revision.make_dependencies_json) : undefined;
-  } catch { throw new FactoryRunError('invalid-input', 'Factory unit revision manifests are invalid.'); }
+  const rows = await db.prepare(`SELECT s.architecture,s.lock_sha256,l.cohort_id,l.cohort_revision
+    FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
+    WHERE s.recipe_revision_id=? ORDER BY s.architecture,s.lock_sha256`).bind(revision.id).all<{ architecture: string; lock_sha256: string; cohort_id: string; cohort_revision: number }>();
+  inputLocks = rows.results.map((row) => ({ architecture: row.architecture, lockSha256: row.lock_sha256, cohortId: row.cohort_id, cohortRevision: row.cohort_revision }));
+  const architectures = JSON.parse(revision.architectures_json) as unknown;
+  const sources = JSON.parse(revision.sources_json) as unknown;
+  const dependencies = JSON.parse(revision.dependencies_json) as unknown;
+  const makeDependencies = revision.make_dependencies_json ? JSON.parse(revision.make_dependencies_json) as unknown : undefined;
   const identity = {
-    requestId: revision.request_id, revisionId: revision.id, packageName: revision.name, area: revision.area,
+    requestId: revision.request_id, packageName: revision.name, area: revision.area,
     upstreamUrl: revision.upstream_url, sourceKind: revision.source_kind, license: revision.license,
     architectures, sources, dependencies, inputLocks,
     ...(makeDependencies === undefined ? {} : { makeDependencies }),
@@ -187,7 +170,7 @@ export async function startFactoryUnit(db: D1Database, actor: Actor | null, queu
   const executionPolicy = await boundExecutionPolicy(db, value, revision);
   const executionValue = { ...value, policy: executionPolicy };
   const run = await startFactoryRun(db, { id: value.runId ?? id(), targetKind: value.targetKind, targetId: value.targetId, unitKey: value.unitKey, policy: executionPolicy, createdBy: reviewer.id, requestedRevisionId: revision.id });
-  if (run.status === 'succeeded' || run.status === 'needs-human-intervention' || run.status === 'cancelled') throw new FactoryRunError('human-intervention', 'Factory unit is not executable in its current state.');
+  if (run.status === 'succeeded' || run.status === 'needs-human-intervention' || run.status === 'cancelled') return { run, workflowId: `factory-unit-${run.id}`, dispatchedAt: now() };
   const existingAttempt = run.currentAttempt ? await getFactoryAttempt(db, run.id, run.currentAttempt) : null;
   const attempt = existingAttempt?.status === 'running' ? existingAttempt : await reserveFactoryAttempt(db, { runId: run.id, reservationKey: `attempt:${run.attemptCount + 1}`, candidateSha256: revision.manifest_sha256, inputSha256: await sha256(canonicalJson({ revisionId: revision.id, policy: executionPolicy })), candidateRevisionId: revision.id, policy: executionPolicy });
   if (!attempt) throw new FactoryRunError('storage', 'Factory attempt was not persisted.');
@@ -233,6 +216,13 @@ export async function startFactoryCohort(db: D1Database, actor: Actor | null, qu
   const current = await db.prepare(`SELECT c.current_revision,c.phase,c.condition FROM cohorts c WHERE c.id=?`).bind(cohortId)
     .first<{ current_revision: number; phase: string; condition: string }>();
   if (!current || !['review', 'build', 'verify', 'stage'].includes(current.phase) || !['ready', 'blocked'].includes(current.condition)) throw new FactoryRunError('invalid-input', 'Cohort is not admitted for a private factory start.');
+  if (queue.enqueuePage) {
+    const count = await db.prepare(`SELECT COUNT(*) AS count FROM cohort_members m WHERE m.cohort_id=? AND m.revision=? AND m.recipe_revision_id IS NOT NULL`).bind(cohortId, current.current_revision).first<{ count: number }>();
+    if (Number(count?.count ?? 0) > FACTORY_COHORT_PAGE_SIZE) {
+      const paged = await startFactoryCohortPaged(db, reviewer, { enqueuePage: queue.enqueuePage }, { cohortId, policy: input.policy });
+      return { cohortId: paged.cohortId, revision: paged.revision, units: [] };
+    }
+  }
   const members = await db.prepare(`SELECT m.pkgbase,m.recipe_revision_id,r.owner_area FROM cohort_members m
     JOIN catalog_revisions r ON r.pkgbase=m.pkgbase AND r.revision=m.catalog_revision
     WHERE m.cohort_id=? AND m.revision=? AND m.recipe_revision_id IS NOT NULL ORDER BY m.pkgbase`).bind(cohortId, current.current_revision)

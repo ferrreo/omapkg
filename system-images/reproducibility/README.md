@@ -38,8 +38,8 @@ system-images/reproducibility/run.sh --boot \
 For a real disposable native fixture, first fetch the pinned x86_64 kernel,
 grub, firmware, and dependency closure into a private directory, then run the
 production builder with those exact bytes. The fetch step uses network only to
-prepare private test inputs; image builds use a loopback HTTPS server and the
-container's isolated build path:
+prepare private test inputs; image builds use the retained package cache and
+the container's isolated build path:
 
 ```sh
 export SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE=registry.example/omapkg-builder@sha256:...
@@ -53,8 +53,9 @@ SYSTEM_IMAGE_REPRO_REAL_PACKAGE_DIR="$pkgdir" \
   system-images/reproducibility/run.sh --filesystem-fixture
 ```
 
-`prepare-tool-image.sh` installs exact `qemu-img`, `gptfdisk`, and `dosfstools`
-inside a disposable digest-identified fixture image; no host tools or host
+`prepare-tool-image.sh` installs exact `buildah`, `crun`, `mtools`,
+`e2fsprogs`, `util-linux`, `qemu-img`, `gptfdisk`, and `dosfstools` packages inside a
+disposable digest-identified fixture image; no host tools or host
 libraries are mounted into the build. Use the exact manifest reference emitted
 by the script; its tagless `repo@sha256` form is intentional. The filesystem-controls mode needs
 rootful loop/filesystem capacity; rootless Docker is reported as incomplete. It runs
@@ -65,6 +66,30 @@ kernel, grub, firmware, and dependency packages plus the builder's real
 filesystem-controls shim fixture and cannot establish real bootloader
 reproducibility. `scripts/boot-system-image.sh` remains the separate native
 KVM boot check.
+
+The filesystem fixture exports the retained context bundle and system-worker
+inputs. Native CI runs `TestFactoryImageSystemNativeExecution` on the host
+with the rootful Docker daemon and same digest-pinned tool image. It exercises
+worker input streaming, context-lock placement, production builder mounts,
+streamed image upload, and worker-signed completion evidence.
+
+For native ARM image-build acceptance, pass the reviewed ARM profile on an
+aarch64 runner; the fixture copies that profile and derives package roots,
+kernel paths, firmware paths, boot target, and architecture from it:
+
+```sh
+system-images/reproducibility/run.sh --fetch-real-packages "$pkgdir" \
+  --profile system-images/profiles/aarch64-uefi.json
+SYSTEM_IMAGE_REPRO_REAL_PACKAGE_DIR="$pkgdir" \
+  system-images/reproducibility/run.sh --filesystem-fixture \
+  --profile system-images/profiles/aarch64-uefi.json
+```
+
+The host and builder container architecture must match profile. Missing ARM
+package or firmware names remain incomplete until reviewed profile and
+retained package set agree. Set `SYSTEM_IMAGE_REPRO_ARCH=aarch64` when
+preparing the ARM tool image; x86 pins Buildah 1.45 for OCI acceptance, while
+both images retain resolved package versions and archive hashes in metadata.
 
 Public manifest mode uses `SYSTEM_IMAGE_REPRO_MANIFEST` instead and may set
 `SYSTEM_IMAGE_REPRO_SIGNATURE`, `SYSTEM_IMAGE_REPRO_RELEASE_LOCK`, and

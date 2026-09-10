@@ -12,6 +12,10 @@ import { assertOutputEvidence, assertStandaloneReproducibilityContract, requireR
 import { buildArtifacts } from './build-outputs';
 import { verifyR2Object } from './release-storage';
 import { canonicalJson } from '../canonical-json';
+import { preservedRecipe } from '../preserved-recipe';
+import { pipelineFactoryQueue, startFactoryUnit } from './factory-entrypoints';
+import { FactoryRunError, factoryRunErrorStatus } from './factory-runs';
+import { assertFactoryRevisionBindingReviewed } from './preserved-factory';
 
 export function pendingRequestStatements(db: D1Database, actor: Actor, value: ReturnType<typeof parseRequest>, requestId: string, timestamp: number): D1PreparedStatement[] {
   const rateKey = `request:${actor.id}`;
@@ -140,6 +144,7 @@ async function privateArtifactPromotion(env: Env, revision: Revision): Promise<D
     'SELECT id,attempt,architecture,status,factory_run_id,factory_attempt,input_lock_sha256,output_contract_json FROM builds WHERE revision_id=? AND private_candidate=1', revision.id);
 
   if (!builds.length) return [];
+  await assertFactoryRevisionBindingReviewed(env.DB, revision.id);
   const targets = [...new Set(JSON.parse(revision.architectures_json) as Architecture[])].sort();
 
   if (canonicalJson(builds.map((build) => build.architecture).sort()) !== canonicalJson(targets)) throw new PolicyError(409, 'Private factory outputs do not cover every required target.');
@@ -192,6 +197,7 @@ async function privateArtifactPromotion(env: Env, revision: Revision): Promise<D
     statements.push(env.DB.prepare(`UPDATE builds SET private_candidate=0 WHERE id=? AND private_candidate=1 AND status='succeeded' AND attempt=?
       AND provenance=? AND provenance_signature=? AND input_lock_sha256 IS ? AND output_contract_json IS ?
       AND EXISTS (SELECT 1 FROM workers w WHERE w.id=builds.worker_id AND w.public_key=? AND w.status='active')
+      AND NOT EXISTS (SELECT 1 FROM factory_revision_bindings binding WHERE binding.revision_id=builds.revision_id AND binding.status<>'reviewed')
       AND EXISTS (SELECT 1 FROM requests q JOIN revisions v ON v.request_id=q.id WHERE v.id=builds.revision_id AND q.status='queued'
         AND v.id=(SELECT latest.id FROM revisions latest WHERE latest.request_id=q.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)
         AND (q.preserved_import_id IS NULL OR EXISTS(SELECT 1 FROM current_preserved_recipe_imports i WHERE i.id=q.preserved_import_id AND (i.revision_id=v.id OR i.revision_id=v.preserved_origin_revision_id))))
@@ -270,6 +276,24 @@ export async function approveRevision(env: Env, actor: Actor | null, requestId: 
 
   if (approvals.length === 2) {
     const privatePromotion = await privateArtifactPromotion(env, revision);
+    const existingBuild = await env.DB.prepare('SELECT id FROM builds WHERE revision_id=? LIMIT 1').bind(revisionId).first<{ id: string }>();
+    if (!privatePromotion.length && !existingBuild) {
+      if (!env.PIPELINE) throw new PolicyError(503, 'Factory workflow service is not configured.');
+      const cohort = await env.DB.prepare(`SELECT c.id,m.pkgbase FROM cohort_recipe_ownership o JOIN cohorts c ON c.id=o.cohort_id
+        JOIN cohort_members m ON m.cohort_id=c.id AND m.revision=c.current_revision AND m.recipe_revision_id=o.recipe_revision_id
+        WHERE o.recipe_revision_id=?`).bind(revisionId).first<{ id: string; pkgbase: string }>();
+      try {
+        const started = await startFactoryUnit(env.DB, reviewer, pipelineFactoryQueue(env.PIPELINE), {
+          targetKind: cohort ? 'cohort-member' : preservedRecipe(revision) ? 'preserved' : 'manual',
+          targetId: cohort?.id ?? requestId, unitKey: cohort?.pkgbase ?? 'request', requestedRevisionId: revisionId,
+          policy: { network: 'disabled' },
+        });
+        return { factoryRunId: started.run.id };
+      } catch (cause) {
+        if (cause instanceof FactoryRunError) throw new PolicyError(factoryRunErrorStatus(cause), cause.message);
+        throw cause;
+      }
+    }
     // Lock review finalization before the external GitHub merge. No normal reject or regenerate action accepts queued state.
     const finalizingAt = now();
 

@@ -13,6 +13,7 @@ import { assertReviewed, joinedBuild, signingRequest } from './release-evidence'
 import { attestationKey, releaseAttestation } from './release-attestation';
 import { selectedInputLock } from './input-locks';
 import { assertRetainedAbiEvidence } from './build-abi-evidence';
+import { assertFactoryRevisionBindingReviewed } from './preserved-factory';
 
 export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, buildId: string) {
   const joined = await joinedBuild(env as Env, buildId);
@@ -25,6 +26,7 @@ export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, bui
 
   await assertReviewed(joined, env as Env);
   const revision = (await env.DB.prepare('SELECT * FROM revisions WHERE id=?').bind(build.revision_id).first<Revision>())!;
+  await assertFactoryRevisionBindingReviewed(env.DB, revision.id);
   const contract = storedOutputContract(build);
 
   if (!contract || canonicalJson(contract) !== canonicalJson(await cohortOutputContract(env.DB, { ...revision, pkgrel: revision.pkgrel ?? 1 }, build.architecture))) throw new PolicyError(409, 'Native output contract is no longer current.');

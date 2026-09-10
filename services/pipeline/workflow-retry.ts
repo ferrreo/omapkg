@@ -31,7 +31,7 @@ export async function runFactoryWithRecovery<T>(input: {
     try {
       return await input.step.do(stepName, {
         retries: { limit: 2, delay: '1 minute', backoff: 'exponential' },
-        timeout: '90 minutes',
+        timeout: '3 hours',
       }, input.generate);
     } catch (cause) {
       lastError = cause;

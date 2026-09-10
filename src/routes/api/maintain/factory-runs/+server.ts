@@ -1,10 +1,11 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
 import { environment, jsonBody, sameOrigin } from '$lib/server/http';
 import { humanMaintainer } from '$lib/server/catalog-ownership';
-import { startFactoryCohort, startFactoryUnit, startFactoryUnitIntervention, pipelineFactoryQueue, type FactoryUnitKind } from '$lib/server/factory-entrypoints';
+import { startFactoryUnit, startFactoryUnitIntervention, pipelineFactoryQueue, type FactoryUnitKind } from '$lib/server/factory-entrypoints';
 import { FactoryRunError, factoryRunErrorStatus } from '$lib/server/factory-runs';
 import { PolicyError } from '$lib/server/policy';
-import { startPrivateFactoryImageRun } from '$lib/server/factory-private-image';
+import { startPrivateFactoryImageWorkflow } from '$lib/server/factory-private-image';
+import { pipelineFactoryCohortPageQueue, startFactoryCohortPaged } from '$lib/server/factory-cohort-dispatch';
 
 const headers = { 'Cache-Control': 'private, no-store' };
 
@@ -23,7 +24,8 @@ export const POST: RequestHandler = async (event) => {
         throw new PolicyError(400, 'Image target, execution policy and reviewed image candidate are required.');
       }
       if (operation === 'image-intervene' && typeof input.sourceRunId !== 'string') throw new PolicyError(400, 'Source factory run is required for image intervention.');
-      const result = await startPrivateFactoryImageRun(env, {
+      if (!env.PIPELINE) throw new PolicyError(503, 'Factory workflow service is not configured.');
+      const prepared = await startPrivateFactoryImageWorkflow(env, {
         runId: typeof input.runId === 'string' ? input.runId : undefined,
         sourceRunId: operation === 'image-intervene' ? input.sourceRunId as string : undefined,
         interventionReason: operation === 'image-intervene' && typeof input.reason === 'string' ? input.reason : undefined,
@@ -31,9 +33,10 @@ export const POST: RequestHandler = async (event) => {
         unitKey: input.unitKey,
         policy: input.policy,
         createdBy: actor.id,
-        candidate: input.candidate as Parameters<typeof startPrivateFactoryImageRun>[1]['candidate'],
+        candidate: input.candidate as Parameters<typeof startPrivateFactoryImageWorkflow>[1]['candidate'],
+        alternatives: Array.isArray(input.alternatives) ? input.alternatives as Parameters<typeof startPrivateFactoryImageWorkflow>[1]['alternatives'] : undefined,
       });
-      return json({ ...result, status: 'queued' }, { status: 202, headers });
+      return json({ runId: prepared.run.id, workflowId: prepared.workflowId, status: 'queued' }, { status: 202, headers });
     }
 
     if (!env.PIPELINE) throw new PolicyError(503, 'Factory workflow service is not configured.');
@@ -42,7 +45,7 @@ export const POST: RequestHandler = async (event) => {
     if (operation === 'cohort') {
       if (typeof input.cohortId !== 'string' || !input.policy) throw new PolicyError(400, 'Cohort and execution policy are required.');
 
-      return json(await startFactoryCohort(env.DB, actor, queue, { cohortId: input.cohortId, policy: input.policy }), { status: 202, headers });
+      return json(await startFactoryCohortPaged(env.DB, actor, pipelineFactoryCohortPageQueue(env.PIPELINE), { cohortId: input.cohortId, policy: input.policy }), { status: 202, headers });
     }
 
     if (operation !== 'start' && operation !== 'intervene') throw new PolicyError(400, 'Choose a factory start operation.');

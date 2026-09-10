@@ -1,7 +1,7 @@
 import { canonicalJson } from '../canonical-json';
 import type { Architecture, Revision } from '../model';
 import type { Env } from './env';
-import { audit, query, sha256 } from './db';
+import { audit, now, query, sha256 } from './db';
 import { PolicyError } from './policy';
 import { redactText } from '../../../services/pipeline/security';
 import { assertOutputEvidence, assertStandaloneReproducibilityContract, requireReproducibilityContract, type OutputEvidence } from './output-evidence';
@@ -642,8 +642,9 @@ function dossierAttemptData(rows: Awaited<ReturnType<typeof loadDossierRows>>, r
 
     if (!build || !SHA256.test(artifact.sha256)) continue;
 
+    const factoryAttempt = build.factory_attempt ?? artifact.attempt;
     const output: DossierOutput = { filename: artifact.filename, sha256: artifact.sha256, size: artifact.size, artifactKey: artifact.artifact_key,
-      architecture: build.architecture, attempt: artifact.attempt, buildId: artifact.build_id, evidenceUrl: evidenceLink(artifact.build_id, artifact.attempt, artifact.filename) };
+      architecture: build.architecture, attempt: factoryAttempt, buildId: artifact.build_id, evidenceUrl: evidenceLink(artifact.build_id, artifact.attempt, artifact.filename) };
 
     const list = artifactsByBuild.get(artifact.build_id) ?? []; list.push(output); artifactsByBuild.set(artifact.build_id, list);
   }
@@ -654,10 +655,11 @@ function dossierAttemptData(rows: Awaited<ReturnType<typeof loadDossierRows>>, r
 
     if (!artifactsByBuild.has(build.id) && build.artifact_filename && digest(build.artifact_sha256)) {
       artifactsByBuild.set(build.id, [{ filename: build.artifact_filename, sha256: build.artifact_sha256, size: build.artifact_size, artifactKey: build.artifact_key,
-        architecture: build.architecture, attempt: build.attempt, buildId: build.id, evidenceUrl: evidenceLink(build.id, build.attempt, build.artifact_filename) }]);
+        architecture: build.architecture, attempt: build.factory_attempt ?? build.attempt, buildId: build.id, evidenceUrl: evidenceLink(build.id, build.attempt, build.artifact_filename) }]);
     }
 
-    const attempt = byAttempt.get(build.attempt) ?? { attempt: build.attempt, buildIds: [], architectures: [], revisionIds: [], recipeDigests: [], result: 'unknown', trigger: null,
+    const factoryAttempt = build.factory_attempt ?? build.attempt;
+    const attempt = byAttempt.get(factoryAttempt) ?? { attempt: factoryAttempt, buildIds: [], architectures: [], revisionIds: [], recipeDigests: [], result: 'unknown', trigger: null,
       changedInputs: [], findings: [], workerIds: [], builderImages: [], runtimeImages: [], outputs: [], logs: [], startedAt: null, finishedAt: null };
 
     attempt.buildIds.push(build.id);
@@ -680,13 +682,15 @@ function dossierAttemptData(rows: Awaited<ReturnType<typeof loadDossierRows>>, r
     if (typeof builder.baseImage === 'string') attempt.builderImages.push(builder.baseImage);
 
     if (typeof runtime.baseImage === 'string') attempt.runtimeImages.push(runtime.baseImage);
-    byAttempt.set(build.attempt, attempt);
+    byAttempt.set(factoryAttempt, attempt);
   }
 
   for (const row of rows.attempts) {
     if (row.attempt <= 0 || row.attempt > MAX_ATTEMPTS) continue;
 
-    const attempt = byAttempt.get(row.attempt) ?? { attempt: row.attempt, buildIds: [], architectures: [], revisionIds: [], recipeDigests: [], result: 'unknown', trigger: null,
+    const build = builds.get(row.build_id);
+    const factoryAttempt = build?.factory_attempt ?? row.attempt;
+    const attempt = byAttempt.get(factoryAttempt) ?? { attempt: factoryAttempt, buildIds: [], architectures: [], revisionIds: [], recipeDigests: [], result: 'unknown', trigger: null,
       changedInputs: [], findings: [], workerIds: [], builderImages: [], runtimeImages: [], outputs: [], logs: [], startedAt: row.started_at, finishedAt: null };
 
     if (!attempt.buildIds.includes(row.build_id)) attempt.buildIds.push(row.build_id);
@@ -697,7 +701,7 @@ function dossierAttemptData(rows: Awaited<ReturnType<typeof loadDossierRows>>, r
 
     if (row.input_lock_sha256) attempt.changedInputs.push(row.input_lock_sha256);
     attempt.startedAt = attempt.startedAt ?? row.started_at;
-    byAttempt.set(row.attempt, attempt);
+    byAttempt.set(factoryAttempt, attempt);
   }
 
   for (const row of runAttempts) {
@@ -925,6 +929,14 @@ export async function buildFactoryDossier(env: Env, input: { requestId?: string;
         (attempt.buildIds.length > 0 || attempt.outputs.length > 0 || (attempt.result === 'failed' && (attempt.findings.length > 0 || attempt.trigger !== null)))) },
   };
 
+  if (input.id === undefined) {
+    dossier.id = `dossier-${(await sha256(canonicalJson(dossier))).slice(0, 48)}`;
+    const oldLink = `/maintain/dossiers/${encodeURIComponent(dossierId)}`;
+    const newLink = `/maintain/dossiers/${encodeURIComponent(dossier.id)}`;
+    for (const output of [...dossier.outputs, ...dossier.attempts.flatMap((attempt) => attempt.outputs)]) {
+      if (output.evidenceUrl === oldLink) output.evidenceUrl = newLink;
+    }
+  }
   return dossier;
 }
 
@@ -937,34 +949,21 @@ export async function renderFactoryDossier(env: Env, input: { requestId?: string
 }
 
 export async function createFactoryDossier(env: Env, actor: string, input: { requestId?: string; revisionId: string; runId?: string; id?: string }): Promise<StoredFactoryDossier> {
-  let rendered = await renderFactoryDossier(env, input);
-  for (let collision = 0; collision < 2; collision += 1) {
-    const createdAt = rendered.dossier.identity.createdAt;
-    try {
-      await env.DB.batch([
-        env.DB.prepare(`INSERT INTO factory_dossiers(id,request_id,revision_id,run_id,canonical_json,canonical_sha256,markdown,markdown_sha256,created_by,created_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(rendered.dossier.id, rendered.dossier.identity.requestId, input.revisionId, rendered.dossier.identity.runId, rendered.canonicalJson,
-          rendered.canonicalSha256, rendered.markdown, rendered.markdownSha256, actor, createdAt),
-        audit(env.DB, actor, 'factory.dossier_created', rendered.dossier.id, { requestId: rendered.dossier.identity.requestId, revisionId: input.revisionId, runId: rendered.dossier.identity.runId, canonicalSha256: rendered.canonicalSha256 }),
-      ]);
-      return rendered;
-    } catch (cause) {
-      const existing = await env.DB.prepare(`SELECT id,canonical_json,canonical_sha256,markdown,markdown_sha256 FROM factory_dossiers
-        WHERE request_id=? AND revision_id=? AND run_id=? AND canonical_sha256=? LIMIT 1`).bind(rendered.dossier.identity.requestId, input.revisionId, rendered.dossier.identity.runId, rendered.canonicalSha256)
-        .first<{ id: string; canonical_json: string; canonical_sha256: string; markdown: string; markdown_sha256: string }>();
-      if (existing) {
-        const parsed = parseValue(existing.canonical_json, null);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new PolicyError(409, 'Stored factory dossier is invalid.');
-        return { dossier: parsed as FactoryDossier, canonicalJson: existing.canonical_json, canonicalSha256: existing.canonical_sha256, markdown: existing.markdown, markdownSha256: existing.markdown_sha256 };
-      }
-      if (!(cause instanceof Error && /UNIQUE|constraint/i.test(cause.message)) || input.id || collision === 1) {
-        throw cause instanceof Error && /UNIQUE|constraint/i.test(cause.message) ? new PolicyError(409, 'Factory dossier content is already bound to a different immutable ID.') : cause;
-      }
-      const contentId = `dossier-${rendered.canonicalSha256.slice(0, 48)}`;
-      rendered = await renderFactoryDossier(env, { ...input, id: contentId });
-    }
+  const rendered = await renderFactoryDossier(env, input);
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO factory_dossiers(id,request_id,revision_id,run_id,canonical_json,canonical_sha256,markdown,markdown_sha256,created_by,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(rendered.dossier.id, rendered.dossier.identity.requestId, input.revisionId, rendered.dossier.identity.runId, rendered.canonicalJson,
+        rendered.canonicalSha256, rendered.markdown, rendered.markdownSha256, actor, now()),
+      audit(env.DB, actor, 'factory.dossier_created', rendered.dossier.id, { requestId: rendered.dossier.identity.requestId, revisionId: input.revisionId, runId: rendered.dossier.identity.runId, canonicalSha256: rendered.canonicalSha256 }),
+    ]);
+  } catch (cause) {
+    if (!(cause instanceof Error && /UNIQUE constraint/i.test(cause.message))) throw cause;
+    const existing = await storedFactoryDossier(env, rendered.dossier.id);
+    if (existing.canonicalSha256 !== rendered.canonicalSha256 || existing.markdownSha256 !== rendered.markdownSha256) throw new PolicyError(409, 'Dossier ID is already bound to different evidence.');
+    return existing;
   }
-  throw new PolicyError(409, 'Factory dossier could not be persisted.');
+  return rendered;
 }
 
 export async function storedFactoryDossier(env: Env, id: string): Promise<StoredFactoryDossier> {
@@ -986,5 +985,5 @@ export async function listFactoryDossiers(env: Env, requestId?: string): Promise
   if (requestId && !RUN_ID.test(requestId)) throw new PolicyError(400, 'Request identifier is invalid.');
 
   return query(env.DB, `SELECT id,request_id,revision_id,run_id,canonical_sha256,created_at FROM factory_dossiers
-    ${requestId ? 'WHERE request_id=?' : ''} ORDER BY created_at DESC,id DESC LIMIT 200`, ...(requestId ? [requestId] : []));
+    ${requestId ? 'WHERE request_id=?' : ''} ORDER BY created_at DESC,rowid DESC LIMIT 200`, ...(requestId ? [requestId] : []));
 }

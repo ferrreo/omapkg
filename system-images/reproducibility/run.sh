@@ -122,7 +122,7 @@ filesystem_fixture_acceptance() {
   "$runtime" run --rm --privileged --network none "$builder_image" losetup -f >/dev/null 2>&1 || { incomplete 'builder container has no usable native loop device'; return 3; }
   "$runtime" run --rm --network none "$builder_image" bash -lc 'command -v buildah && command -v mcopy && command -v debugfs && command -v tune2fs && command -v e2fsck && command -v unshare && command -v qemu-img && command -v sgdisk && command -v partx && command -v mkfs.fat' >/dev/null 2>&1 || { incomplete 'digest-pinned builder image lacks a required image/filesystem tool'; return 3; }
   local binary="$output_root/image-repro.test"
-  (cd "$repo_root/worker" && go test -c -o "$binary" $(find . -maxdepth 1 -name '*.go' ! -name '*_test.go' -printf '%f ' ) image_reproducibility_test.go) || return 1
+  (cd "$repo_root/worker" && go test -c -o "$binary" $(find . -maxdepth 1 -name '*.go' ! -name '*_test.go' -printf '%f ' ) image_reproducibility_test.go factory_image_system_e2e_test.go) || return 1
   local fixture_mounts=()
   fixture_mounts+=(-v "$boot_profile:/work/input-profile.json:ro" -e OPR_IMAGE_REPRO_INPUT_PROFILE=/work/input-profile.json -e SYSTEM_IMAGE_REPRO_ARCH="$profile_arch")
   if [[ -n "$real_package_dir" ]]; then

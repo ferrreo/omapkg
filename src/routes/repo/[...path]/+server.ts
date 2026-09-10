@@ -12,8 +12,6 @@ const releaseId = /^[A-Za-z0-9_-]{1,128}$/;
 
 const safeKey = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[\x21-\x7e]{1,1024}$/;
 
-const architectures = new Set<Architecture>(['x86_64', 'aarch64']);
-
 function decodePart(value: string): string {
   try {
     const decoded = decodeURIComponent(value);

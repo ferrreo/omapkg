@@ -20,6 +20,7 @@ import { cohortMembers, readCohortManifest } from './cohort-members';
 import { assertRetainedAbiEvidence } from './build-abi-evidence';
 import { qualifyCohort, qualificationBlockers, type QualificationResult } from './cohort-qualification';
 import { qualificationEvidenceForGate } from './native-qualification';
+import { assertFactoryRevisionBindingReviewed } from './preserved-factory';
 
 export interface CohortMatrixRow {
   pkgbase: string; architecture: Architecture; required: boolean; status: string;
@@ -159,6 +160,7 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
       let ownedInputs = false;
 
       try {
+        await assertFactoryRevisionBindingReviewed(env.DB, revision.id);
         const joined = await joinedBuild(env, build.id);
         await assertReviewed(joined, env);
 
@@ -180,8 +182,8 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
             if (selected?.sha256 !== build.input_lock_sha256) throw new PolicyError(409, 'Native build no longer uses the selected reviewed input lock.');
             gate.fences.push(env.DB.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*)
               FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
-              WHERE s.recipe_revision_id=? AND s.architecture=? AND s.cohort_id=? AND s.cohort_revision=? AND s.lock_sha256=?`)
-              .bind(revision.id, architecture, current.id, current.current_revision, selected.sha256));
+              WHERE (s.recipe_revision_id=? OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=?)) AND s.architecture=? AND s.cohort_id=? AND s.cohort_revision=? AND s.lock_sha256=?`)
+              .bind(revision.id, revision.id, architecture, current.id, current.current_revision, selected.sha256));
           }
 
           const artifacts = await buildArtifacts(env.DB, lease);

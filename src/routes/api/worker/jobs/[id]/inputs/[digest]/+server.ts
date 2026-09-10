@@ -23,8 +23,9 @@ export const POST: RequestHandler = async (event) => {
       EXISTS(SELECT 1 FROM recipe_captures c WHERE c.sha256=? AND (c.sha256=o.sha256 OR
         EXISTS(SELECT 1 FROM json_tree(c.manifest_json) ref WHERE ref.key='sha256' AND ref.value=o.sha256))) OR
       EXISTS(SELECT 1 FROM recipe_source_bundles b WHERE b.sha256=? AND (b.sha256=o.sha256 OR
-        EXISTS(SELECT 1 FROM json_tree(b.manifest_json) ref WHERE ref.key='sha256' AND ref.value=o.sha256))))`)
-      .bind(event.params.digest, build.input_lock_sha256, preserved?.capture.sha256 ?? null, preserved?.sourceBundle.sha256 ?? null)
+        EXISTS(SELECT 1 FROM json_tree(b.manifest_json) ref WHERE ref.key='sha256' AND ref.value=o.sha256))) OR
+      (? IS NOT NULL AND o.sha256=?))`)
+      .bind(event.params.digest, build.input_lock_sha256, preserved?.capture.sha256 ?? null, preserved?.sourceBundle.sha256 ?? null, preserved?.recipe?.sha256 ?? null, preserved?.recipe?.sha256 ?? null)
       .first<{ object_key: string; size: number }>();
 
     if (!ref) throw new WorkerProtocolError(403, 'Object is outside the leased build inputs');

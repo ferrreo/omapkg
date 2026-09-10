@@ -233,12 +233,16 @@ export function fenceFrozenLeases(db: D1Database) {
   return db.prepare(`UPDATE builds SET status='queued',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,input_lock_sha256=NULL,
     artifact_key=NULL,artifact_sha256=NULL,artifact_size=NULL,artifact_filename=NULL,installed_size=NULL,dependency_plan_json=NULL,
     provenance=NULL,provenance_signature=NULL,smoke_passed=0,error='Frozen input authority revoked'
-    WHERE status='leased' AND input_lock_sha256 IS NOT NULL AND NOT EXISTS(SELECT 1 FROM current_input_locks l WHERE l.sha256=builds.input_lock_sha256)`);
+    WHERE private_candidate=0 AND status='leased' AND input_lock_sha256 IS NOT NULL AND NOT EXISTS(SELECT 1 FROM current_input_locks l WHERE l.sha256=builds.input_lock_sha256)`);
 }
 
 export async function selectInputLock(env: InputEnv, actor: Actor | null, digest: string, reason: string) {
   const human = await inputAuthority(env.DB, actor); const clean = reviewReason(reason);
   const row = await requireCurrentInputLock(env, digest);
+  const factoryRun = await env.DB.prepare(`SELECT r.id,r.status FROM factory_runs r
+    WHERE r.requested_revision_id=? OR EXISTS(SELECT 1 FROM factory_run_attempts a WHERE a.run_id=r.id AND a.candidate_revision_id=?)
+    ORDER BY r.created_at DESC LIMIT 1`).bind(row.recipe_revision_id, row.recipe_revision_id).first<{ id: string; status: string }>();
+  const factoryManaged = factoryRun !== null;
 
   try {
     await env.DB.batch([
@@ -246,16 +250,16 @@ export async function selectInputLock(env: InputEnv, actor: Actor | null, digest
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(recipe_revision_id,architecture,cohort_id,cohort_revision)
         DO UPDATE SET lock_sha256=excluded.lock_sha256,selected_by=excluded.selected_by,selected_at=excluded.selected_at`)
         .bind(row.recipe_revision_id, row.architecture, row.cohort_id, row.cohort_revision, row.sha256, human.id, now()),
-      env.DB.prepare(`UPDATE builds SET status='queued',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,input_lock_sha256=NULL,
+      ...(factoryManaged ? [] : [env.DB.prepare(`UPDATE builds SET status='queued',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,input_lock_sha256=NULL,
         artifact_key=NULL,artifact_sha256=NULL,artifact_size=NULL,artifact_filename=NULL,installed_size=NULL,dependency_plan_json=NULL,
         provenance=NULL,provenance_signature=NULL,smoke_passed=0,error=NULL,started_at=NULL,finished_at=NULL
-        WHERE revision_id=? AND architecture=? AND status IN ('succeeded','failed') AND input_lock_sha256 IS NOT ?`)
-        .bind(row.recipe_revision_id, row.architecture, row.sha256),
-      env.DB.prepare(`UPDATE requests SET status=CASE WHEN EXISTS(SELECT 1 FROM builds b WHERE b.revision_id=? AND b.status='leased') THEN 'building' ELSE 'queued' END,
+        WHERE private_candidate=0 AND revision_id=? AND architecture=? AND status IN ('succeeded','failed') AND input_lock_sha256 IS NOT ?`)
+        .bind(row.recipe_revision_id, row.architecture, row.sha256)]),
+      ...(factoryManaged ? [] : [env.DB.prepare(`UPDATE requests SET status=CASE WHEN EXISTS(SELECT 1 FROM builds b WHERE b.revision_id=? AND b.status='leased') THEN 'building' ELSE 'queued' END,
         updated_at=? WHERE id=(SELECT request_id FROM revisions WHERE id=?) AND status IN ('queued','building','built','failed')
         AND EXISTS(SELECT 1 FROM builds WHERE revision_id=? AND architecture=? AND status='queued')`)
-        .bind(row.recipe_revision_id, now(), row.recipe_revision_id, row.recipe_revision_id, row.architecture),
-      audit(env.DB, human.id, 'input.lock_selected', digest, { reason: clean }),
+        .bind(row.recipe_revision_id, now(), row.recipe_revision_id, row.recipe_revision_id, row.architecture)]),
+      audit(env.DB, human.id, 'input.lock_selected', digest, { reason: clean, ...(factoryManaged ? { factoryRunId: factoryRun.id, factoryRunStatus: factoryRun.status } : {}) }),
     ]);
   } catch (cause) {
     if (cause instanceof Error && /input selection/.test(cause.message)) throw new PolicyError(409, 'Lock reviews changed, build still holds a lease, or cohort has left its build phase.');
@@ -278,8 +282,10 @@ export async function requireCurrentInputLock(env: InputEnv, digest: string): Pr
 }
 
 export async function selectedInputLock(env: InputEnv, revisionId: string, architecture: Architecture, contract: OutputContract): Promise<InputObject | null> {
-  const selected = await env.DB.prepare('SELECT lock_sha256 FROM build_input_selections WHERE recipe_revision_id=? AND architecture=? AND cohort_id=? AND cohort_revision=?')
-    .bind(revisionId, architecture, contract.cohort.id, contract.cohort.revision).first<{ lock_sha256: string }>();
+  const selected = await env.DB.prepare(`SELECT lock_sha256 FROM build_input_selections s
+    WHERE (s.recipe_revision_id=? OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=?))
+      AND s.architecture=? AND s.cohort_id=? AND s.cohort_revision=? ORDER BY (s.recipe_revision_id=?) DESC`)
+    .bind(revisionId, revisionId, architecture, contract.cohort.id, contract.cohort.revision, revisionId).first<{ lock_sha256: string }>();
 
   if (!selected) return null;
   await requireCurrentInputLock(env, selected.lock_sha256);

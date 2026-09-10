@@ -114,6 +114,22 @@ func TestPreservedSourceObjectsBindOriginalTreeAndNativePlan(t *testing.T) {
 	if info, _ := os.Stat(filepath.Join(work, "fix.patch")); info.Mode().Perm() != 0o755 {
 		t.Fatal("original executable mode changed")
 	}
+	repaired := recipe + "# bounded repair successor\n"
+	repairedRef := object([]byte(repaired))
+	repairedJob := job
+	repairedJob.Recipe = repaired
+	repairedJob.RecipeSHA256 = repairedRef.SHA256
+	repairedJob.PreservedRecipe = &preservedBuildInputs{Capture: captureRef, SourceBundle: job.PreservedRecipe.SourceBundle, Recipe: &repairedRef, Inspection: &struct {
+		SrcinfoSHA256 string            `json:"srcinfoSha256"`
+		Architectures map[string]string `json:"architectures,omitempty"`
+	}{SrcinfoSHA256: plan.Inspection.SrcinfoSHA256}}
+	repairedMaterialized, repairedWork, err := load(repairedJob, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(mustReadFile(t, filepath.Join(repairedWork, "PKGBUILD"))) != repaired || repairedMaterialized.Inputs.Recipe == nil || repairedMaterialized.Inputs.Inspection == nil {
+		t.Fatal("successor recipe override was not materialized with fresh inspection binding")
+	}
 	if _, _, err := load(job, true); err == nil {
 		t.Fatal("accepted substituted recipe bytes")
 	}

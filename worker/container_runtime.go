@@ -93,7 +93,7 @@ func (r *Runner) command(ctx context.Context, args ...string) *exec.Cmd {
 
 func runtimeEnvironment() []string {
 	result := []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb"}
-	for _, name := range []string{"HOME", "XDG_RUNTIME_DIR", "TMPDIR", "DOCKER_HOST", "CONTAINER_HOST"} {
+	for _, name := range []string{"HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "TMPDIR", "DOCKER_HOST", "CONTAINER_HOST"} {
 		if value := os.Getenv(name); value != "" {
 			if strings.ContainsAny(value, "\x00\r\n") {
 				continue

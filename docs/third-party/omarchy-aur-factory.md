@@ -23,4 +23,3 @@ The local file carries a prominent modified-file notice and records this commit 
 No Swamp runtime, workflow, model, report, or invocation code was imported. The upstream Next.js application and its `package-lock.json` dependency tree were inspected but are not part of this adaptation, so their transitive package notices are not introduced into omapkg. The upstream `.agents` skills, setup scripts, screenshots, and unrelated application code are also excluded.
 
 The upstream packaging references contain no additional per-file copyright or `NOTICE` text. If a future port copies code or prose from another upstream path, add its source path, commit, licence, and dependency terms to this record before committing the adaptation.
-

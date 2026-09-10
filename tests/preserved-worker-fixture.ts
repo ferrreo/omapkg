@@ -5,6 +5,7 @@ import type { Revision, Worker } from '../src/lib/model';
 import type { RecipeCapture } from '../src/lib/recipe-capture';
 import { preservedBuildInputs } from '../src/lib/preserved-recipe';
 import { canonicalJson } from '../src/lib/canonical-json';
+import { encodeOprEvidence, readOprEvidence } from '../src/lib/server/sbom';
 import { parseFrozenPage } from '../src/lib/frozen-inputs';
 import { sha256 } from '../src/lib/server/db';
 import { claimJob, completeJob, uploadArtifact } from '../src/lib/server/workers';
@@ -15,6 +16,10 @@ import { changeCohortPhase } from '../src/lib/server/cohort-phases';
 import { proposeInputLock, reviewInputLock, selectInputLock } from '../src/lib/server/input-locks';
 import { POST as downloadInput } from '../src/routes/api/worker/jobs/[id]/inputs/[digest]/+server';
 import { nativeBuildStatement, currentNativeBuild } from '../src/lib/server/native-signing';
+import { manifestDigest } from '../src/lib/server/policy';
+import { deriveFactoryInputLocks, deriveFactoryRevisionBinding } from '../src/lib/server/preserved-factory';
+import { queuePrivateFactoryBuilds } from '../src/lib/server/factory-private-build';
+import { reserveFactoryAttempt, startFactoryRun, stopFactoryRun } from '../src/lib/server/factory-runs';
 import { frozenFixture } from './frozen-fixtures';
 import { runtimeEvidence } from './runtime-fixtures';
 import { approveRevision, rejectRequest } from '../src/lib/server/requests';
@@ -143,14 +148,46 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const statement = JSON.parse(await nativeBuildStatement(await currentNativeBuild(env, job.id)));
   expect(statement.predicate.buildDefinition.externalParameters.preservedRecipe).toEqual(inputs);
   expect(statement.predicate.buildDefinition.resolvedDependencies.slice(0, 2).map((item: { digest: { sha256: string } }) => item.digest.sha256)).toEqual([inputs.capture.sha256, inputs.sourceBundle.sha256]);
+  const originalJob = job, successorId = 'preserved-successor';
+  const repairedRecipe = `${revision.recipe}\n# bounded repair successor\n`;
+  const repairedRef = { sha256: await sha256(repairedRecipe), size: new TextEncoder().encode(repairedRecipe).byteLength };
+  const repairedKey = `private/inputs/factory-repairs/${repairedRef.sha256}`;
+  await env.ARTIFACTS.put(repairedKey, repairedRecipe, { customMetadata: { sha256: repairedRef.sha256 } });
+  await env.DB.prepare('INSERT INTO input_objects(sha256,size,object_key,created_by,created_at) VALUES(?,?,?,?,?)').bind(repairedRef.sha256, repairedRef.size, repairedKey, 'factory', timestamp).run();
+  const inspection = await env.DB.prepare(`SELECT r.report_json FROM current_recipe_inspections i JOIN recipe_inspection_results r ON r.job_id=i.id AND r.attempt=i.attempt
+    WHERE i.capture_sha256=? AND i.architecture='x86_64' AND i.status='succeeded'`).bind(inputs.capture.sha256).first<{ report_json: string }>();
+  const repairedEvidence = readOprEvidence(JSON.parse(revision.sbom_json))!;
+  repairedEvidence.factoryRepair = { recipe: repairedRef, inspection: { srcinfoSha256: JSON.parse(inspection!.report_json).srcinfoSha256 } };
+  const successor = { ...revision, id: successorId, recipe: repairedRecipe, recipe_sha256: repairedRef.sha256, sbom_json: JSON.stringify({ ...JSON.parse(revision.sbom_json), comment: encodeOprEvidence(repairedEvidence) }), preserved_origin_revision_id: revision.id, created_at: timestamp + 1 };
+  successor.manifest_sha256 = await manifestDigest(successor);
+  await env.DB.prepare("UPDATE requests SET status='review' WHERE id=?").bind(revision.request_id).run();
+  await env.DB.prepare(`INSERT INTO revisions(
+    id,request_id,version,recipe,recipe_sha256,manifest_sha256,sources_json,dependencies_json,make_dependencies_json,smoke_commands_json,
+    architectures_json,build_images_json,pkgrel,source_date_epoch,image_digest,license,surface,description,explanation,sbom_json,lint_json,
+    upstream_commit,pr_url,commit_sha,created_at,preserved_origin_revision_id
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    successor.id, successor.request_id, successor.version, successor.recipe, successor.recipe_sha256, successor.manifest_sha256, successor.sources_json,
+    successor.dependencies_json, successor.make_dependencies_json, successor.smoke_commands_json, successor.architectures_json, successor.build_images_json,
+    successor.pkgrel, successor.source_date_epoch, successor.image_digest, successor.license, successor.surface, successor.description, successor.explanation,
+    successor.sbom_json, successor.lint_json, successor.upstream_commit, successor.pr_url, successor.commit_sha, successor.created_at, successor.preserved_origin_revision_id,
+  ).run();
+  await deriveFactoryRevisionBinding(env.DB, revision.id, successor.id, 2);
+  await deriveFactoryInputLocks(env, revision.id, successor.id, successor.recipe_sha256);
+  const successorRun = await startFactoryRun(env.DB, { id: 'preserved-successor-run', targetKind: 'preserved', targetId: revision.request_id, unitKey: revision.id, policy: { network: 'disabled' }, createdBy: 'factory', requestedRevisionId: successor.id });
+  const successorAttempt = await reserveFactoryAttempt(env.DB, { runId: successorRun.id, reservationKey: 'attempt:1', candidateSha256: successor.manifest_sha256, inputSha256: await sha256(canonicalJson({ revisionId: successor.id })), candidateRevisionId: successor.id, policy: { network: 'disabled' } });
+  await queuePrivateFactoryBuilds(env, successorRun.id, successorAttempt, successor);
+  const successorJob = (await claimJob(env.DB, worker, metadata, env))!;
+  const derivedLock = (await env.DB.prepare('SELECT derived_lock_sha256 FROM factory_derived_input_locks WHERE revision_id=?').bind(successor.id).first<{ derived_lock_sha256: string }>())!;
+  expect(successorJob.revisionId).toBe(successor.id); expect(successorJob.inputLock?.sha256).toBe(derivedLock.derived_lock_sha256); expect(successorJob.inputLock?.sha256).not.toBe(frozen.lock.sha256);
+  await stopFactoryRun(env.DB, successorRun.id, 'Fixture successor claim complete.');
+  job = originalJob;
   await expect(rejectRequest(env as Env, { ...actor, areas: ['desktop'] }, revision.request_id, 'Wrong owner.')).rejects.toMatchObject({ status: 403 });
   holder.exec("UPDATE cohorts SET phase='publish' WHERE id='preserved-protocol-cohort'");
   await expect(rejectRequest(env as Env, actor, revision.request_id, 'Published recovery required.')).rejects.toMatchObject({ status: 409 });
   expect(() => holder.prepare("UPDATE requests SET status='rejected' WHERE id=?").bind(revision.request_id).run()).toThrow('release recovery');
   holder.exec("UPDATE cohorts SET phase='build' WHERE id='preserved-protocol-cohort'");
   const succeededAttempt = job.attempt!;
-  holder.prepare("UPDATE builds SET status='queued' WHERE id=?").bind(job.id).run();
-  job = (await claimJob(env.DB, worker, metadata, env))!;
+  holder.prepare("UPDATE builds SET status='queued',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=?").bind(job.id).run();
   holder.prepare("INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES('preserved-arm-queued',?,'aarch64','queued',?)").bind(revision.id, timestamp).run();
   await rejectRequest(env as Env, actor, revision.request_id, 'Replace the obsolete imported recipe.');
   expect(holder.prepare('SELECT status,lease_token FROM builds WHERE revision_id=? ORDER BY architecture').bind(revision.id).all().results)

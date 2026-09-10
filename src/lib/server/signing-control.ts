@@ -4,7 +4,7 @@ import { preservedBuildInputs, type PreservedBuildInputs } from '../preserved-re
 import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
 import type { Architecture, Revision } from '../model';
 import type { Env } from './env';
-import { audit, now, query, sha256 } from './db';
+import { now, query, sha256 } from './db';
 import { PolicyError, revisionImage, validateRevision } from './policy';
 import { archRelationCovers, parsePackageMetadata } from './arch';
 import { dependencyPlansEqual, parseDependencyPlan, type DependencyPlan } from './dependency-plan';

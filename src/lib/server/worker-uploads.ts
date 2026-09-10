@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Worker, Architecture } from '../model';
+import type { Worker } from '../model';
 import {
   WorkerProtocolError,
   MAX_ARTIFACT_BYTES,
@@ -8,7 +8,7 @@ import {
   requireWorkerLease,
 } from './worker-protocol';
 import { validateArtifactFilename } from './worker-results';
-import { audit, id, now, sha256 } from './db';
+import { id, now, sha256 } from './db';
 import { artifactInsert, assertExpectedFilename, buildArtifacts, storedOutputContract } from './build-outputs';
 
 export const UPLOAD_PART_SIZE = 8 * 1024 * 1024;
@@ -159,14 +159,6 @@ async function getUpload(db: D1Database, buildId: string, uploadId: string, work
   try {
     return await db.prepare(`${uploadQuery()} WHERE u.id = ? AND u.build_id = ? AND u.worker_id = ?`)
       .bind(uploadId, buildId, workerId).first<UploadRow>();
-  } catch {
-    return databaseFailure();
-  }
-}
-
-async function getUploadById(db: D1Database, uploadId: string, workerId: string): Promise<UploadRow | null> {
-  try {
-    return await db.prepare(`${uploadQuery()} WHERE u.id = ? AND u.worker_id = ?`).bind(uploadId, workerId).first<UploadRow>();
   } catch {
     return databaseFailure();
   }
@@ -401,7 +393,7 @@ export async function uploadMultipartPart(
         SELECT ?, 'worker.upload_part', ?, ?, ? WHERE changes() = 1`)
         .bind(`worker:${worker.id}`, buildId, JSON.stringify({ uploadId, partNumber, size: body.byteLength, sha256: digest }), timestamp)
     ]);
-  } catch (cause) {
+  } catch {
     await abortR2(bucket, row);
     await markFailed(db, row, { reason: 'part metadata commit failed' });
 

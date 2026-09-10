@@ -2,7 +2,7 @@ import type { Architecture, Worker } from '../model';
 import type { Env } from './env';
 import { canonicalJson } from '../canonical-json';
 import { audit, id, now, sha256 } from './db';
-import { FactoryRunError, finishFactoryAttempt, renewFactoryAttempt, type FactoryAttempt } from './factory-runs';
+import { FactoryRunError, renewFactoryAttempt, type FactoryAttempt } from './factory-runs';
 import { safeKey, verifyR2Object } from './release-storage';
 import {
   decodeBase64,
@@ -19,11 +19,13 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$/;
 const FINGERPRINT = /^[a-f0-9]{40}$/i;
 const IMAGE_FILENAME = /^[A-Za-z0-9][A-Za-z0-9@._+%~:-]{0,220}$/;
+const IMAGE_REPOSITORY = /^(?=.{1,512}$)[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?(?:\/[a-z0-9][a-z0-9._-]*)+(?::[a-z0-9][a-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
 const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024 * 1024;
 const MAX_EVIDENCE_BYTES = 2 * 1024 * 1024;
 export const FACTORY_IMAGE_UPLOAD_PART_SIZE = 8 * 1024 * 1024;
-export const FACTORY_IMAGE_MAX_UPLOAD_SIZE = MAX_INPUT_BYTES;
-export const FACTORY_IMAGE_MAX_UPLOAD_PARTS = MAX_INPUT_BYTES / FACTORY_IMAGE_UPLOAD_PART_SIZE;
+export const FACTORY_IMAGE_MAX_UPLOAD_SIZE = MAX_OUTPUT_BYTES;
+export const FACTORY_IMAGE_MAX_UPLOAD_PARTS = MAX_OUTPUT_BYTES / FACTORY_IMAGE_UPLOAD_PART_SIZE;
 
 export type FactoryImageKind = 'oci' | 'system';
 export type FactoryImageInputName =
@@ -49,12 +51,12 @@ export interface FactoryImageCandidate {
   architecture: Architecture;
   kind: FactoryImageKind;
   profileId: string;
-  nativePlanId: string;
+  constructionPolicySha256: string;
   profile: FactoryImageObjectRef;
   candidateLock: FactoryImageObjectRef;
-  candidateLockSignature: FactoryImageObjectRef;
+  candidateLockSignature?: FactoryImageObjectRef;
   nativePlan: FactoryImageObjectRef;
-  nativePlanSignature: FactoryImageObjectRef;
+  nativePlanSignature?: FactoryImageObjectRef;
   trustedAuthorityKey: FactoryImageObjectRef;
   builder: FactoryImageObjectRef;
   context?: FactoryImageObjectRef;
@@ -168,11 +170,13 @@ function validateObject(value: unknown, label: string, maxSize = MAX_INPUT_BYTES
 }
 
 export function validateFactoryImageCandidate(value: FactoryImageCandidate): FactoryImageCandidate {
+  const allowedKeys = ['architecture','builder','candidateLock','candidateLockSignature','constructionPolicySha256','context','dockerfile','id','imageRef','kind','nativePlan','nativePlanSignature','outputFilename','profile','profileId','sourceDateEpoch','trustedAuthorityFingerprint','trustedAuthorityKey'];
+  if (!value || typeof value !== 'object' || Object.keys(value).some((key) => !allowedKeys.includes(key))) imageFailure('Private image candidate contains unsupported fields.');
   if (!value || typeof value !== 'object' || !ID.test(value.id) ||
       !['x86_64', 'aarch64'].includes(value.architecture) || !['oci', 'system'].includes(value.kind) ||
-      !ID.test(value.profileId) || !ID.test(value.nativePlanId) || !FINGERPRINT.test(value.trustedAuthorityFingerprint) ||
+      !ID.test(value.profileId) || !SHA256.test(value.constructionPolicySha256) || !FINGERPRINT.test(value.trustedAuthorityFingerprint) ||
       !Number.isSafeInteger(value.sourceDateEpoch) || value.sourceDateEpoch <= 0 || !IMAGE_FILENAME.test(value.outputFilename) ||
-      (value.imageRef !== undefined && !/^(?=.{1,512}$)[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?(?:\/[a-z0-9][a-z0-9._-]*)+(?::[a-z0-9][a-z0-9._-]{0,127})?@sha256:[a-f0-9]{64}$/.test(value.imageRef))) {
+      (value.imageRef !== undefined && !IMAGE_REPOSITORY.test(value.imageRef))) {
     imageFailure('Private image candidate identity or policy is invalid.');
   }
   const names: Array<[string, FactoryImageObjectRef | undefined, number?]> = [
@@ -182,8 +186,8 @@ export function validateFactoryImageCandidate(value: FactoryImageCandidate): Fac
   ];
   for (const [name, ref, maxSize] of names) if (ref !== undefined) validateObject(ref, name, maxSize);
   if (value.kind === 'oci' && (!value.context || !value.dockerfile)) imageFailure('OCI image candidates require a context and Dockerfile input.');
-  if (value.kind === 'system' && (value.context || value.dockerfile)) imageFailure('System image candidates cannot carry OCI context inputs.');
-  if (value.kind === 'oci' && !value.imageRef) imageFailure('OCI image candidates require a digest-pinned image reference.');
+  if (value.kind === 'system' && value.dockerfile) imageFailure('System image candidates cannot carry an OCI Dockerfile input.');
+  if (value.kind === 'oci' && !value.imageRef) imageFailure('OCI image candidates require an image repository reference.');
   if (value.kind === 'system' && value.imageRef) imageFailure('System image candidates cannot carry an OCI image reference.');
   return { ...value, trustedAuthorityFingerprint: value.trustedAuthorityFingerprint.toLowerCase() };
 }
@@ -191,9 +195,9 @@ export function validateFactoryImageCandidate(value: FactoryImageCandidate): Fac
 export async function factoryImageInputSha256(candidate: FactoryImageCandidate): Promise<string> {
   const checked = validateFactoryImageCandidate(candidate);
   return sha256(canonicalJson({
-    id: checked.id, architecture: checked.architecture, kind: checked.kind, profileId: checked.profileId, nativePlanId: checked.nativePlanId,
-    profile: checked.profile, candidateLock: checked.candidateLock, candidateLockSignature: checked.candidateLockSignature,
-    nativePlan: checked.nativePlan, nativePlanSignature: checked.nativePlanSignature, trustedAuthorityKey: checked.trustedAuthorityKey,
+    id: checked.id, architecture: checked.architecture, kind: checked.kind, profileId: checked.profileId, constructionPolicySha256: checked.constructionPolicySha256,
+    profile: checked.profile, candidateLock: checked.candidateLock, candidateLockSignature: checked.candidateLockSignature ?? null,
+    nativePlan: checked.nativePlan, nativePlanSignature: checked.nativePlanSignature ?? null, trustedAuthorityKey: checked.trustedAuthorityKey,
     builder: checked.builder, context: checked.context ?? null, dockerfile: checked.dockerfile ?? null, imageRef: checked.imageRef ?? null,
     trustedAuthorityFingerprint: checked.trustedAuthorityFingerprint, sourceDateEpoch: checked.sourceDateEpoch, outputFilename: checked.outputFilename,
   }));
@@ -212,8 +216,8 @@ async function imageJob(db: D1Database, jobId: string): Promise<FactoryImageJobR
 }
 
 async function verifyCandidateObjects(env: FactoryImageEnvironment, candidate: FactoryImageCandidate): Promise<void> {
-  const refs = [candidate.profile, candidate.candidateLock, candidate.candidateLockSignature, candidate.nativePlan,
-    candidate.nativePlanSignature, candidate.trustedAuthorityKey, candidate.builder, ...(candidate.context ? [candidate.context] : []),
+  const refs = [candidate.profile, candidate.candidateLock, ...(candidate.candidateLockSignature ? [candidate.candidateLockSignature] : []), candidate.nativePlan,
+    ...(candidate.nativePlanSignature ? [candidate.nativePlanSignature] : []), candidate.trustedAuthorityKey, candidate.builder, ...(candidate.context ? [candidate.context] : []),
     ...(candidate.dockerfile ? [candidate.dockerfile] : [])];
   await Promise.all(refs.map((ref) => verifyR2Object(env as Env, ref.key, ref.sha256, ref.size)));
 }
@@ -285,8 +289,8 @@ export async function factoryImageInputForWorker(env: FactoryImageEnvironment, a
   const row = await imageJob(env.DB, jobId); if (!row) throw new WorkerProtocolError(404, 'Private image job not found.');
   assertImageLease(row, auth.worker, leaseToken); const candidate = candidateFromRow(row);
   const refs: Partial<Record<FactoryImageInputName, FactoryImageObjectRef>> = {
-    profile: candidate.profile, 'candidate-lock': candidate.candidateLock, 'candidate-lock-signature': candidate.candidateLockSignature,
-    'native-plan': candidate.nativePlan, 'native-plan-signature': candidate.nativePlanSignature, 'trusted-authority-key': candidate.trustedAuthorityKey,
+    profile: candidate.profile, 'candidate-lock': candidate.candidateLock, ...(candidate.candidateLockSignature ? { 'candidate-lock-signature': candidate.candidateLockSignature } : {}),
+    'native-plan': candidate.nativePlan, ...(candidate.nativePlanSignature ? { 'native-plan-signature': candidate.nativePlanSignature } : {}), 'trusted-authority-key': candidate.trustedAuthorityKey,
     builder: candidate.builder, context: candidate.context, dockerfile: candidate.dockerfile,
   };
   const ref = refs[inputName]; if (!ref) throw new WorkerProtocolError(404, 'Private image input is not part of the reviewed candidate.');
@@ -306,7 +310,12 @@ function parseEvidence(value: unknown, row: FactoryImageJobRow, artifact: Factor
   const evidence = object as Partial<ImageEvidence>;
   if (evidence.schemaVersion !== 1 || evidence.kind !== 'factory-image-result' || evidence.jobId !== row.id || evidence.runId !== row.run_id || evidence.attempt !== row.attempt || evidence.candidateId !== row.candidate_id || evidence.architecture !== row.architecture || evidence.imageKind !== row.kind || evidence.inputSha256 !== row.input_sha256 || typeof evidence.profileSha256 !== 'string' || !SHA256.test(evidence.profileSha256) || typeof evidence.nativePlanSha256 !== 'string' || !SHA256.test(evidence.nativePlanSha256) || typeof evidence.builderSha256 !== 'string' || !SHA256.test(evidence.builderSha256) || (evidence.imageRef !== null && typeof evidence.imageRef !== 'string') || !evidence.observed || typeof evidence.observed !== 'object' || Array.isArray(evidence.observed)) throw new WorkerProtocolError(409, 'Private image evidence does not bind the reviewed job.');
   const saved = evidence.artifact; if (!saved || typeof saved !== 'object' || saved.key !== artifact.key || saved.sha256 !== artifact.sha256 || saved.size !== artifact.size || saved.filename !== artifact.filename) throw new WorkerProtocolError(409, 'Private image evidence does not bind the uploaded artifact.');
-  const candidate = candidateFromRow(row); if (evidence.profileSha256 !== candidate.profile.sha256 || evidence.nativePlanSha256 !== candidate.nativePlan.sha256 || evidence.builderSha256 !== candidate.builder.sha256 || evidence.imageRef !== (candidate.imageRef ?? null)) throw new WorkerProtocolError(409, 'Private image evidence input digests differ from the reviewed candidate.');
+  const candidate = candidateFromRow(row); if (evidence.profileSha256 !== candidate.profile.sha256 || evidence.nativePlanSha256 !== candidate.nativePlan.sha256 || evidence.builderSha256 !== candidate.builder.sha256) throw new WorkerProtocolError(409, 'Private image evidence input digests differ from the reviewed candidate.');
+  if (row.kind === 'oci') {
+    if (typeof evidence.imageRef !== 'string' || !IMAGE_REPOSITORY.test(evidence.imageRef) || !evidence.imageRef.includes('@sha256:')) throw new WorkerProtocolError(409, 'OCI evidence has no actual output image digest.');
+    const requestedRepository = candidate.imageRef!.split('@', 1)[0];
+    if (evidence.imageRef.split('@', 1)[0] !== requestedRepository) throw new WorkerProtocolError(409, 'OCI output image repository differs from the reviewed request.');
+  } else if (evidence.imageRef !== null) throw new WorkerProtocolError(409, 'System image evidence cannot claim an OCI image reference.');
   return evidence as ImageEvidence;
 }
 
@@ -323,8 +332,7 @@ export async function completePrivateFactoryImage(env: FactoryImageEnvironment, 
   await verifyR2Object(env as Env, artifact.key, artifact.sha256, artifact.size); const evidence = parseEvidence(JSON.parse(input.evidence) as unknown, row, artifact);
   const publicKey = decodeBase64(worker.public_key, 'worker public key'); const signature = decodeBase64(input.evidenceSignature, 'private image evidence signature');
   if (!await verifyEd25519(publicKey, new TextEncoder().encode(input.evidence), signature)) throw new WorkerProtocolError(403, 'Private image evidence signature is invalid.');
-  const evidenceSha256 = await sha256(input.evidence); if (!row.factory_lease_token) throw new WorkerProtocolError(409, 'Factory attempt lease is missing.');
-  await finishFactoryAttempt(env.DB, row.run_id, row.attempt, row.factory_lease_token, { status: 'succeeded', artifact: { ...artifact, evidence, evidenceSha256 } });
+  const evidenceSha256 = await sha256(input.evidence);
   const result = await env.DB.prepare(`UPDATE factory_image_jobs SET status='succeeded',evidence_json=?,evidence_sha256=?,evidence_signature=?,finished_at=?,lease_expires_at=? WHERE id=? AND status='leased' AND worker_id=? AND lease_token=?`).bind(input.evidence, evidenceSha256, input.evidenceSignature, now(), now(), jobId, worker.id, leaseToken).run();
   if (!changed(result)) throw new WorkerProtocolError(409, 'Private image completion was fenced.');
   await audit(env.DB, `worker:${worker.id}`, 'worker.factory_image_completed', jobId, { runId: row.run_id, attempt: row.attempt, artifact, evidenceSha256 });
@@ -332,8 +340,6 @@ export async function completePrivateFactoryImage(env: FactoryImageEnvironment, 
 }
 
 async function dbFinishImageFailure(db: D1Database, row: FactoryImageJobRow, worker: Worker, leaseToken: string, error: string): Promise<void> {
-  if (!row.factory_lease_token) throw new WorkerProtocolError(409, 'Factory attempt lease is missing.');
-  await finishFactoryAttempt(db, row.run_id, row.attempt, row.factory_lease_token, { status: 'failed', failureKind: 'build', failure: { message: error } });
   const result = await db.prepare(`UPDATE factory_image_jobs SET status='failed',error=?,finished_at=?,lease_expires_at=? WHERE id=? AND status='leased' AND worker_id=? AND lease_token=?`).bind(error, now(), now(), row.id, worker.id, leaseToken).run();
   if (!changed(result)) throw new WorkerProtocolError(409, 'Private image failure was fenced.');
   await audit(db, `worker:${worker.id}`, 'worker.factory_image_failed', row.id, { runId: row.run_id, attempt: row.attempt, error });
@@ -343,7 +349,7 @@ function parseUpload(value: unknown): { leaseToken: string; filename: string; si
   const object = requireObject(value); if (Object.keys(object).sort().join(',') !== 'filename,leaseToken,sha256,size') throw new WorkerProtocolError(400, 'Invalid private image upload fields.');
   const filename = requireText(object.filename, 'image filename', 256); if (!IMAGE_FILENAME.test(filename)) throw new WorkerProtocolError(400, 'Invalid image filename.');
   const leaseToken = requireText(object.leaseToken, 'lease token', 128); const digest = requireText(object.sha256, 'image digest', 64);
-  if (!SHA256.test(digest) || !Number.isSafeInteger(object.size) || (object.size as number) <= 0 || (object.size as number) > MAX_INPUT_BYTES) throw new WorkerProtocolError(400, 'Invalid private image upload metadata.');
+  if (!SHA256.test(digest) || !Number.isSafeInteger(object.size) || (object.size as number) <= 0 || (object.size as number) > MAX_OUTPUT_BYTES) throw new WorkerProtocolError(400, 'Invalid private image upload metadata.');
   return { leaseToken, filename, size: object.size as number, sha256: digest };
 }
 
@@ -362,12 +368,12 @@ export async function startFactoryImageUpload(env: FactoryImageEnvironment, work
   const active = await env.DB.prepare("SELECT * FROM factory_image_uploads WHERE job_id=? AND status='active'").bind(jobId).first<FactoryImageUploadRow>();
   if (active) {
     if (active.worker_id !== worker.id || active.lease_token !== input.leaseToken || active.filename !== input.filename || active.expected_size !== input.size || active.expected_sha256 !== input.sha256) throw new WorkerProtocolError(409, 'Private image already has a different upload.');
-    return { uploadId: active.id, partSize: FACTORY_IMAGE_UPLOAD_PART_SIZE, maxSize: MAX_INPUT_BYTES, filename: active.filename, size: active.expected_size, sha256: active.expected_sha256, parts: await imageUploadParts(env.DB, active.id) };
+    return { uploadId: active.id, partSize: FACTORY_IMAGE_UPLOAD_PART_SIZE, maxSize: MAX_OUTPUT_BYTES, filename: active.filename, size: active.expected_size, sha256: active.expected_sha256, parts: await imageUploadParts(env.DB, active.id) };
   }
   const uploadId = id(); const key = `private/factory-images/${jobId}/attempt-${job.attempt}/upload-${uploadId}/${input.sha256}-${input.filename}`; const multipart = await env.ARTIFACTS.createMultipartUpload(key, { customMetadata: { factoryImageJobId: jobId, sha256: input.sha256 } });
   try { await env.DB.prepare(`INSERT INTO factory_image_uploads(id,job_id,worker_id,attempt,lease_token,filename,object_key,r2_upload_id,expected_size,expected_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(uploadId, jobId, worker.id, job.attempt, input.leaseToken, input.filename, key, multipart.uploadId, input.size, input.sha256, now()).run(); }
   catch (cause) { await multipart.abort().catch(() => undefined); throw cause; }
-  return { uploadId, partSize: FACTORY_IMAGE_UPLOAD_PART_SIZE, maxSize: MAX_INPUT_BYTES, filename: input.filename, size: input.size, sha256: input.sha256, parts: [] };
+  return { uploadId, partSize: FACTORY_IMAGE_UPLOAD_PART_SIZE, maxSize: MAX_OUTPUT_BYTES, filename: input.filename, size: input.size, sha256: input.sha256, parts: [] };
 }
 
 export async function uploadFactoryImagePart(env: FactoryImageEnvironment, worker: Worker, jobId: string, uploadId: string, partNumber: number, leaseToken: string, body: Uint8Array): Promise<FactoryImageUploadPart> {
@@ -383,7 +389,7 @@ export async function completeFactoryImageUpload(env: FactoryImageEnvironment, w
   const row = await imageUploadRow(env.DB, jobId, uploadId, worker.id); if (!row) throw new WorkerProtocolError(404, 'Private image upload not found.'); if (row.status === 'completed' && row.actual_sha256 && row.actual_size !== null) return { key: row.object_key, sha256: row.actual_sha256, size: row.actual_size, filename: row.filename };
   const job = await imageJob(env.DB, jobId); if (!job) throw new WorkerProtocolError(404, 'Private image job not found.'); assertImageLease(job, worker, leaseToken); if (row.status !== 'active' || row.lease_token !== leaseToken) throw new WorkerProtocolError(409, 'Private image upload lease is fenced.');
   const parts = await imageUploadParts(env.DB, uploadId); const expected = uploadPartSize(row.expected_size, Math.ceil(row.expected_size / FACTORY_IMAGE_UPLOAD_PART_SIZE)); if (parts.length !== expected.total || parts.some((part, index) => part.partNumber !== index + 1 || part.size !== uploadPartSize(row.expected_size, part.partNumber).size)) throw new WorkerProtocolError(409, 'Private image upload is incomplete.');
-  await env.ARTIFACTS.resumeMultipartUpload(row.object_key, row.r2_upload_id).complete(parts.map((part) => ({ partNumber: part.partNumber, etag: part.etag }))); const actual = await hashObject(env.ARTIFACTS, row.object_key, MAX_INPUT_BYTES);
+  await env.ARTIFACTS.resumeMultipartUpload(row.object_key, row.r2_upload_id).complete(parts.map((part) => ({ partNumber: part.partNumber, etag: part.etag }))); const actual = await hashObject(env.ARTIFACTS, row.object_key, MAX_OUTPUT_BYTES);
   if (actual.sha256 !== row.expected_sha256 || actual.size !== row.expected_size) { await env.ARTIFACTS.delete(row.object_key).catch(() => undefined); throw new WorkerProtocolError(409, 'Private image bytes do not match declaration.'); }
   const timestamp = now(); const result = await env.DB.batch([
     env.DB.prepare(`UPDATE factory_image_uploads SET status='completed',actual_sha256=?,actual_size=?,completed_at=? WHERE id=? AND status='active' AND lease_token=?`).bind(actual.sha256, actual.size, timestamp, uploadId, leaseToken),

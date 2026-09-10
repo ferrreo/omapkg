@@ -6,7 +6,6 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { manifestDigest } from '../src/lib/server/policy';
 import { promoteBatch, publishBuild, publicRelease, quarantineRelease, rollbackRelease } from '../src/lib/server/releases';
 import { sha256 } from '../src/lib/server/db';
-import type { Env } from '../src/lib/server/env';
 import { claimJob } from '../src/lib/server/workers';
 import { asD1, TestD1 } from './d1';
 

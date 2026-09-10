@@ -64,16 +64,18 @@ export async function reservePreservedImport(env: FactoryEnv, actor: Actor | nul
   return row;
 }
 
-export async function assertPreservedImportCurrent(db: D1Database, revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json' | 'manifest_sha256'>) {
+export async function assertPreservedImportCurrent(db: D1Database, revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json' | 'manifest_sha256' | 'preserved_origin_revision_id'>) {
   const evidence = preservedRecipe(revision);
 
   if (!evidence) return;
 
-  const row = await db.prepare(`SELECT evidence_json,draft_json FROM current_preserved_recipe_imports i
+  const row = await db.prepare(`SELECT i.revision_id AS source_revision_id,i.evidence_json,i.draft_json FROM current_preserved_recipe_imports i
     WHERE i.revision_id=? OR i.revision_id=(SELECT preserved_origin_revision_id FROM revisions WHERE id=?)`)
-    .bind(revision.id, revision.id).first<{ evidence_json: string; draft_json: string }>();
+    .bind(revision.id, revision.id).first<{ source_revision_id: string; evidence_json: string; draft_json: string }>();
 
-  if (!row || row.evidence_json !== canonicalJson(evidence) || (JSON.parse(row.draft_json) as FactoryRevisionDraft).revision.manifest_sha256 !== revision.manifest_sha256) {
+  const originalDraft = row ? JSON.parse(row.draft_json) as FactoryRevisionDraft : null;
+  if (!row || row.evidence_json !== canonicalJson(evidence) || (row.source_revision_id === revision.id && originalDraft?.revision.manifest_sha256 !== revision.manifest_sha256) ||
+      (row.source_revision_id !== revision.id && revision.preserved_origin_revision_id !== row.source_revision_id)) {
     throw new PolicyError(409, 'Preserved recipe import or source authority changed.');
   }
 }

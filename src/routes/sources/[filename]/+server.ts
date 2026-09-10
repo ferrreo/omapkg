@@ -23,7 +23,7 @@ export const GET: RequestHandler = async (event) => {
 
       const allowed = await env.DB.prepare(`SELECT 1 FROM builds b JOIN revisions r ON r.id=b.revision_id
         JOIN requests q ON q.id=r.request_id
-        WHERE b.worker_id=? AND b.status='leased' AND b.lease_expires_at>? AND ((b.private_candidate=1 AND q.status IN ('generating','review') AND EXISTS(
+        WHERE b.worker_id=? AND b.status='leased' AND b.lease_expires_at>? AND ((b.private_candidate=1 AND q.status IN ('generating','review','queued','building') AND EXISTS(
           SELECT 1 FROM factory_runs fr JOIN factory_run_attempts fa ON fa.run_id=fr.id AND fa.attempt=fr.current_attempt
           WHERE fr.id=b.factory_run_id AND fr.status='running' AND fr.current_attempt=b.factory_attempt AND fr.lease_expires_at>unixepoch() AND fa.status='running' AND fa.lease_expires_at>unixepoch() AND fa.candidate_revision_id=r.id)) OR (b.private_candidate=0 AND q.status IN ('queued','building')))
         AND r.id=(SELECT latest.id FROM revisions latest WHERE latest.request_id=q.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)

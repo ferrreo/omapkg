@@ -17,7 +17,8 @@ const schema = v.strictObject({ schemaVersion: v.literal(1), capture: object,
 
 export type PreservedRecipe = v.InferOutput<typeof schema>;
 
-const buildSchema = v.strictObject({ capture: object, sourceBundle: object });
+const buildSchema = v.strictObject({ capture: object, sourceBundle: object,
+  recipe: v.optional(object), inspection: v.optional(v.strictObject({ srcinfoSha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)), architectures: v.optional(v.record(v.pipe(v.string(), v.regex(/^(x86_64|aarch64)$/)), v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)))) })) });
 
 export type PreservedBuildInputs = v.InferOutput<typeof buildSchema>;
 
@@ -36,7 +37,12 @@ export function preservedBuildInputs(revision: Pick<Revision, 'id' | 'sbom_json'
 
   if (!evidence.sources[target]) throw new Error('Preserved sources omit native target');
 
-  return { capture: evidence.capture, sourceBundle: evidence.sources[target] };
+  const repair = readOprEvidence(JSON.parse(revision.sbom_json))?.factoryRepair;
+  const recipe = repair && typeof repair === 'object' && !Array.isArray(repair) ? (repair as { recipe?: unknown }).recipe : undefined;
+  const inspection = repair && typeof repair === 'object' && !Array.isArray(repair) ? (repair as { inspection?: unknown }).inspection : undefined;
+  const parsed = v.safeParse(buildSchema, { capture: evidence.capture, sourceBundle: evidence.sources[target], ...(recipe === undefined ? {} : { recipe }), ...(inspection === undefined ? {} : { inspection }) });
+  if (!parsed.success) throw new Error('Invalid preserved repair inputs');
+  return parsed.output;
 }
 
 /** Immutable input references are review scope; live database authority is checked separately. */

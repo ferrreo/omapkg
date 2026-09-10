@@ -11,6 +11,9 @@ import { finalDescription } from '../src/lib/server/descriptions';
 import type { Env } from '../src/lib/server/env';
 import type { Revision } from '../src/lib/model';
 import { asD1, TestD1 } from './d1';
+import { normalizeFactorySuccessorRecipe } from '../src/lib/server/preserved-factory';
+import { assertFactoryRepairMetadata } from '../src/lib/server/preserved-factory';
+import { parseSrcinfo } from '../src/lib/srcinfo';
 
 const requestSchema = `
 CREATE TABLE rateLimit(id TEXT PRIMARY KEY,key TEXT NOT NULL UNIQUE,count INTEGER NOT NULL,lastRequest INTEGER NOT NULL);
@@ -69,6 +72,25 @@ function revision(overrides: Partial<Revision> = {}): Revision {
 }
 
 describe('core security regressions', () => {
+  test('factory repair normalizes pkgrel before retaining candidate bytes', async () => {
+    const base = revision({ pkgrel: 1, recipe: 'pkgname=hello\npkgver=1.0\npkgrel=1\n' });
+    const raw = `${base.recipe}# bounded repair\n`;
+    const normalized = normalizeFactorySuccessorRecipe(base, raw);
+    expect(normalized).toContain('pkgrel=2');
+    expect(await sha256(normalized)).toBe(await sha256(normalizeFactorySuccessorRecipe(base, normalized)));
+  });
+
+  test('factory repair metadata permits only the expected pkgrel bump', () => {
+    const reviewed = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 1\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\npkgname = hello\n');
+    const recipe = 'pkgname=hello\npkgver=1.0\npkgrel=2\n';
+    const observed = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 2\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\npkgname = hello\n');
+    expect(() => assertFactoryRepairMetadata(reviewed, observed, recipe)).not.toThrow();
+    const drift = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 2\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\n\tdepends = openssl\npkgname = hello\n');
+    expect(() => assertFactoryRepairMetadata(reviewed, drift, recipe)).toThrow('policy');
+    const newerReviewed = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 3.2\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\npkgname = hello\n');
+    expect(() => assertFactoryRepairMetadata(newerReviewed, observed, recipe)).toThrow('increase');
+  });
+
   test('a failed factory run can restart without a revision and records the reason', async () => {
     const db = new TestD1(requestSchema + 'ALTER TABLE requests ADD COLUMN factory_run_id TEXT;');
 
@@ -288,7 +310,7 @@ describe('core security regressions', () => {
     }
   });
 
-  test('queued finalization can resume only when no worker job exists', async () => {
+  test('review finalization starts one bounded private build before merging', async () => {
     const schema = readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n');
 
     const db = new TestD1(schema);
@@ -308,8 +330,16 @@ describe('core security regressions', () => {
     db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
       .bind('approval-security', item.id, 'github:2', 'security', item.manifest_sha256, 1).run();
     const service = { ...env(db), GITHUB_REPOSITORY: 'opr/recipes', GITHUB_REPO_TOKEN: 'github_pat_test' };
+    let dispatched = 0;
+    service.PIPELINE = { fetch: async (request: Request) => {
+      dispatched += 1;
+      const input = await request.json() as { workflowId: string };
+      return Response.json({ workflowId: input.workflowId });
+    } } as unknown as Fetcher;
     const previousFetch = globalThis.fetch;
+    let githubCalls = 0;
     globalThis.fetch = (async (input) => {
+      githubCalls += 1;
       if (String(input).endsWith('/pulls/1')) return Response.json({ head: { sha: item.commit_sha }, merged: true });
 
       return new Response('unexpected request', { status: 500 });
@@ -320,14 +350,18 @@ describe('core security regressions', () => {
         .rejects.toMatchObject({ status: 400 });
       db.prepare("UPDATE approvals SET revoked_at=2 WHERE revision_id=? AND kind='security'").bind(item.id).run();
       await approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'Security review checked source and build evidence.', true);
-      expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(item.request_id).first<{ status: string }>()?.status).toBe('queued');
       expect(db.prepare('SELECT status FROM builds WHERE revision_id=?').bind(item.id).first<{ status: string }>()?.status).toBe('queued');
+      expect(db.prepare('SELECT private_candidate FROM builds WHERE revision_id=?').bind(item.id).first<{ private_candidate: number }>()?.private_candidate).toBe(1);
+      expect(db.prepare('SELECT attempt_count FROM factory_runs').first<{ attempt_count: number }>()?.attempt_count).toBe(1);
+      expect(dispatched).toBe(1);
+      expect(githubCalls).toBe(0);
       const approvalRows = db.prepare("SELECT detail FROM audit_events WHERE action='revision.approved' ORDER BY id DESC LIMIT 1").all<{ detail: string }>().results;
       expect(JSON.parse(approvalRows[0]?.detail ?? '{}').reason).toBe('Security review checked source and build evidence.');
-      const auditRows = db.prepare("SELECT detail FROM audit_events WHERE action='revision.finalizing'").all<{ detail: string }>().results;
-      expect(JSON.parse(auditRows.at(-1)?.detail ?? '{}').resumed).toBe(true);
-      await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security'))
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='factory.unit_dispatched'").first<{ n: number }>()?.n).toBe(1);
+      await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'Same review, pending build.', true))
         .rejects.toMatchObject({ status: 409 });
+      expect(dispatched).toBe(1);
+      expect(db.prepare('SELECT attempt_count FROM factory_runs').first<{ attempt_count: number }>()?.attempt_count).toBe(1);
     } finally {
       globalThis.fetch = previousFetch;
       db.close();

@@ -171,8 +171,8 @@ func (r *Runner) removeContainer(name string) {
 }
 
 func (r *Runner) startAndCollect(ctx context.Context, name string) (string, error) {
-	if _, err := r.run(ctx, "start", name); err != nil {
-		return "", err
+	if startLog, err := r.run(ctx, "start", name); err != nil {
+		return startLog, err
 	}
 	waitOutput, err := r.run(ctx, "wait", name)
 	if err != nil {

@@ -100,7 +100,11 @@ func enrollCommand(args []string) error {
 			return errors.New("image must include image-digest")
 		}
 	}
-	metadata, err := daemonMetadataForConfig(Config{FactoryImage: *factoryImage, FactoryImageBuilderPath: *factoryBuilder, FactoryImageBuilderSHA256: *factoryBuilderSHA, Runtime: *runtime})
+	factoryConfig := Config{FactoryImage: *factoryImage, FactoryImageBuilderPath: *factoryBuilder, FactoryImageBuilderSHA256: *factoryBuilderSHA, Runtime: *runtime, Image: *image, ImageDigest: *imageDigest, Architecture: *architecture}
+	if err := validateFactoryImageConfig(factoryConfig); err != nil {
+		return err
+	}
+	metadata, err := daemonMetadataForConfig(factoryConfig)
 	if err != nil {
 		return err
 	}

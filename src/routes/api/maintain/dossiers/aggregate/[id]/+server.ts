@@ -1,6 +1,6 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
 import { environment, maintainer } from '$lib/server/http';
-import { factoryAggregateDossierMarkdown, storedFactoryAggregateDossier } from '$lib/server/factory-aggregate-dossier';
+import { storedFactoryAggregateDossier } from '$lib/server/factory-aggregate-dossier';
 import { PolicyError } from '$lib/server/policy';
 
 const headers = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' };

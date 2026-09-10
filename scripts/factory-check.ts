@@ -39,7 +39,7 @@ const digestPattern = /^sha256:[0-9a-f]{64}$/;
 
 const workerIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
-const allowedConfigKeys = new Set(['origin', 'workerId', 'privateKey', 'image', 'imageDigest', 'runtimeImage', 'architecture', 'containerRuntime', 'stateDir', 'maxSourceBytes', 'sourceTimeoutSeconds']);
+const allowedConfigKeys = new Set(['origin', 'workerId', 'privateKey', 'image', 'imageDigest', 'runtimeImage', 'architecture', 'containerRuntime', 'stateDir', 'maxSourceBytes', 'sourceTimeoutSeconds', 'factoryImage', 'factoryImageBuilderPath', 'factoryImageBuilderSha256']);
 
 const requiredFreeBytes = Number(process.env.FACTORY_MIN_FREE_BYTES ?? 1_073_741_824);
 
@@ -114,7 +114,10 @@ export function validateWorkerConfig(filename: string): DiagnosticCheck {
 
   if (config.runtimeImage !== undefined && config.runtimeImage !== '' && !validPinnedImage(config.runtimeImage)) return check('worker-config', true, 'failed', 'Runtime image must be digest pinned.', 'Set runtimeImage to IMAGE@sha256:DIGEST or omit it until approved.');
 
-  if (resolve(String(config.stateDir)) !== dirname(resolve(filename))) return check('worker-config', true, 'failed', 'Worker stateDir must be the config file parent.', 'Place config.json directly inside stateDir.');
+  if (config.factoryImage !== undefined && typeof config.factoryImage !== 'boolean') return check('worker-config', true, 'failed', 'factoryImage must be boolean.', 'Set factoryImage to true or false.');
+  if (config.factoryImageBuilderPath !== undefined && (typeof config.factoryImageBuilderPath !== 'string' || !config.factoryImageBuilderPath)) return check('worker-config', true, 'failed', 'factoryImageBuilderPath must be a nonempty path.', 'Set factoryImageBuilderPath to the protected builder script path.');
+  if (config.factoryImageBuilderSha256 !== undefined && (typeof config.factoryImageBuilderSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(config.factoryImageBuilderSha256))) return check('worker-config', true, 'failed', 'factoryImageBuilderSha256 must be 64 lowercase hex characters.', 'Set factoryImageBuilderSha256 to the builder script SHA-256.');
+  if (config.factoryImage === true && (typeof config.factoryImageBuilderPath !== 'string' || !config.factoryImageBuilderPath || typeof config.factoryImageBuilderSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(config.factoryImageBuilderSha256))) return check('worker-config', true, 'failed', 'factoryImage requires a builder path and SHA-256.', 'Set factoryImageBuilderPath and factoryImageBuilderSha256 for factory image support.');
 
   return check('worker-config', true, 'passed', `Validated permitted worker config fields at ${filename}; credential values withheld.`);
 }
@@ -173,11 +176,12 @@ function baseChecks(options: FactoryCheckOptions): DiagnosticCheck[] {
     toolCheck('jq', ['--version'], false),
   ];
 
-  const runtime = process.env.OPR_CONTAINER_RUNTIME === 'docker' ? 'docker' : process.env.OPR_CONTAINER_RUNTIME === 'podman' ? 'podman' : ['podman', 'docker'].find((name) => command(name, ['--version']).ok) ?? null;
+  const configured = workerExecutionPrerequisites(options);
+  const runtime = configured.runtime ?? (process.env.OPR_CONTAINER_RUNTIME === 'docker' ? 'docker' : process.env.OPR_CONTAINER_RUNTIME === 'podman' ? 'podman' : ['podman', 'docker'].find((name) => command(name, ['--version']).ok) ?? null);
   result.push(runtime ? toolCheck(runtime, ['--version'], true) : check('container-isolation', true, 'failed', 'Neither podman nor docker is available.', 'Install and configure one rootless OCI runtime through worker provisioning; this command does not install host dependencies.'));
 
   if (runtime) {
-    const info = command(runtime, ['info', '--format', '{{.Host.OS}}'], 15_000);
+    const info = command(runtime, ['info', '--format', runtime === 'docker' ? '{{.OSType}}' : '{{.Host.OS}}'], 15_000);
     result.push(info.ok ? check('container-isolation', true, 'passed', `${runtime} responds to read-only info.`) : check('container-isolation', true, 'failed', `${runtime} is installed but isolation info failed.`, `Start the rootless ${runtime} service and verify user namespaces without changing this service configuration.`));
   }
 
@@ -213,9 +217,11 @@ function fixtureDigest(filename: string): string {
   return createHash('sha256').update(readFileSync(filename)).digest('hex');
 }
 
-function runCommandCheck(name: string, cwd: string, args: string[], required: boolean, remediation: string, envRoot = cwd, extraEnv: NodeJS.ProcessEnv = {}, incompleteOnSkip = false): DiagnosticCheck {
-  const result = spawnSync(name, args, { cwd, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...fixtureEnvironment(envRoot), ...extraEnv } });
-  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim().slice(-800);
+function runCommandCheck(name: string, cwd: string, args: string[], required: boolean, remediation: string, envRoot = cwd, extraEnv: NodeJS.ProcessEnv = {}, incompleteOnSkip = false, timeoutMs = 120_000): DiagnosticCheck {
+  const result = spawnSync(name, args, { cwd, encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'], env: { ...fixtureEnvironment(envRoot), ...extraEnv } });
+  const rawOutput = `${result.stdout || ''}\n${result.stderr || ''}\n${result.error instanceof Error ? result.error.message : ''}`.trim();
+  const failureLines = rawOutput.split(/\r?\n/).filter((line) => /(?:fail|error|panic|timeout|incomplete|fixture failed|exit status)/i.test(line));
+  const output = (failureLines.length ? failureLines.slice(-12).join('\n') : rawOutput).slice(-3_000);
   if (result.status === 3) return check(`deep:${basename(name)} ${args.join(' ')}`, required, 'incomplete', output || 'Prerequisites are unavailable.', remediation);
   if (result.status === 0) {
     const skipped = incompleteOnSkip && /(?:skip|incomplete|not set)/i.test(output);
@@ -226,6 +232,14 @@ function runCommandCheck(name: string, cwd: string, args: string[], required: bo
 
 function fixtureEnvironment(root: string): NodeJS.ProcessEnv {
   return { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: root, TMPDIR: root, GOPROXY: 'off', GOSUMDB: 'off', GOTOOLCHAIN: 'local', CI: '1' };
+}
+
+function localOciEnvironment(): NodeJS.ProcessEnv {
+  return {
+    // Keep fixture HOME isolated while allowing explicitly selected local OCI images to use host image storage.
+    XDG_DATA_HOME: join(homedir(), '.local', 'share'),
+    ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}),
+  };
 }
 
 function removeOwned(path: string): boolean {
@@ -317,6 +331,7 @@ export async function runDeepCheck(options: FactoryCheckOptions): Promise<Diagno
       const pair = runCommandCheck('go', 'worker', ['test', '-run', '^TestRunReproducibilityPair', '-count=1'], true, 'Run the shared RunReproducibilityPair harness.', fixtureRoot);
       checks.push({ ...pair, name: 'deep:reproducibility-pair-harness' });
       const reproEnv = execution.image && execution.runtimeImage ? {
+        ...localOciEnvironment(),
         OPR_WORKER_REPRO_IMAGE: execution.image,
         OPR_WORKER_REPRO_RUNTIME_IMAGE: execution.runtimeImage,
         OPR_WORKER_REPRO_RUNTIME: execution.runtime ?? 'podman',
@@ -326,13 +341,46 @@ export async function runDeepCheck(options: FactoryCheckOptions): Promise<Diagno
       checks.push({ ...nativeRepro, name: 'deep:clean-runtime' });
       checks.push({ ...nativeRepro, name: 'deep:single-build-reproducibility' });
       const matrixEnv = execution.image && execution.runtimeImage ? {
+        ...localOciEnvironment(),
         OPR_WORKER_TEMPLATE_MATRIX_IMAGE: execution.image,
         OPR_WORKER_TEMPLATE_MATRIX_RUNTIME_IMAGE: execution.runtimeImage,
         OPR_WORKER_TEMPLATE_MATRIX_RUNTIME: execution.runtime ?? 'podman',
         OPR_WORKER_TEMPLATE_MATRIX_ARCH: arch() === 'arm64' ? 'aarch64' : 'x86_64',
       } : {};
-      const matrix = runCommandCheck('go', 'worker', ['test', '-run', '^TestTemplateFamilyReproducibilityNativeOCI$', '-count=1', '-v'], true, 'Provide a local digest-pinned builder/runtime pair for the template matrix.', fixtureRoot, matrixEnv, true);
+      const matrix = runCommandCheck('go', 'worker', ['test', '-timeout=90m', '-run', '^TestTemplateFamilyReproducibilityNativeOCI$', '-count=1', '-v'], true, 'Provide a local digest-pinned builder/runtime pair for the template matrix.', fixtureRoot, matrixEnv, true, 90 * 60_000);
       checks.push({ ...matrix, name: 'deep:template-matrix' });
+      const deepResult = join(fixtureRoot, 'deep-factory-result.json');
+      const deepSourceRoot = join(fixtureRoot, 'deep-factory-source');
+      const deepFactoryEnv = execution.image && execution.runtimeImage ? {
+        ...localOciEnvironment(),
+        OPR_DEEP_BUILDER_IMAGE: execution.image,
+        OPR_DEEP_RUNTIME_IMAGE: execution.runtimeImage,
+        OPR_DEEP_RUNTIME: execution.runtime ?? 'podman',
+        OPR_DEEP_RESULT: deepResult,
+        OPR_DEEP_SOURCE_ROOT: deepSourceRoot,
+      } : {};
+      const deepDossierDir = join(fixtureRoot, 'deep-dossier');
+      if (execution.image && execution.runtimeImage) {
+        const deepCoordinator = runCommandCheck('bun', '.', ['scripts/factory-deep-coordinator.ts', '--result', deepResult, '--output-dir', deepDossierDir, '--source-root', deepSourceRoot], true, 'Provide a local digest-pinned builder/runtime pair for the end-to-end factory coordinator.', fixtureRoot, deepFactoryEnv, true);
+        checks.push({ ...deepCoordinator, name: 'deep:factory-e2e-build' });
+        let dossierStatus = deepCoordinator.status;
+        let dossierDetail = deepCoordinator.detail;
+        if (deepCoordinator.status === 'passed') {
+          try {
+            const jsonText = readFileSync(join(deepDossierDir, 'dossier.json'), 'utf8');
+            const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+            if (!parsed || parsed.kind !== 'factory-package-dossier' || canonicalJson(parsed) !== jsonText.trimEnd() || !existsSync(join(deepDossierDir, 'dossier.md'))) throw new Error('coordinator dossier export is incomplete or noncanonical');
+            dossierDetail = `${deepCoordinator.detail} exported coordinator dossier.`;
+          } catch (cause) {
+            dossierStatus = 'failed';
+            dossierDetail = cause instanceof Error ? cause.message : String(cause);
+          }
+        }
+        checks.push({ ...deepCoordinator, name: 'deep:factory-e2e-dossier', status: dossierStatus, detail: dossierDetail });
+      } else {
+        checks.push(check('deep:factory-e2e-build', true, 'incomplete', 'End-to-end factory execution requires local digest-pinned builder and runtime images.', 'Provide a local digest-pinned builder/runtime pair.'));
+        checks.push(check('deep:factory-e2e-dossier', true, 'incomplete', 'End-to-end dossier export waits for the real native factory execution.', 'Provide a local digest-pinned builder/runtime pair.'));
+      }
       const { privateKey, publicKey } = generateKeyPairSync('ed25519');
       const signingPayload = Buffer.from(`factory-self-check:${namespace}`);
       const signature = sign(null, signingPayload, privateKey);
@@ -342,14 +390,14 @@ export async function runDeepCheck(options: FactoryCheckOptions): Promise<Diagno
     checks.push(check('deep:live-agent', false, 'skipped', 'No live-agent CLI mode is exposed; live model spend remains disabled.'));
     const imageTools = process.env.FACTORY_CHECK_IMAGE_ACCEPTANCE === '1' && command('buildah', ['--version']).ok && command('jq', ['--version']).ok;
     const imageRepro = imageTools && arch() === 'x64'
-      ? runCommandCheck('bash', '.', ['system-images/reproducibility/run.sh', '--oci', '--output', join(fixtureRoot, 'image-repro')], true, 'Install the approved native image tools and provide required image inputs.', fixtureRoot, {}, false)
-      : check('deep:image-reproducibility', true, 'incomplete', 'Native image acceptance is disabled by default or its prerequisites are unavailable.', 'Set FACTORY_CHECK_IMAGE_ACCEPTANCE=1 only for an explicit native image exercise with buildah, jq, /dev/kvm, and approved image inputs.');
+      ? runCommandCheck('bash', '.', ['system-images/reproducibility/run.sh', '--oci', '--output', join(fixtureRoot, 'image-repro')], true, 'Install the approved native image construction tools and provide approved image inputs.', fixtureRoot, {}, false)
+      : check('deep:image-reproducibility', true, 'incomplete', 'Native image construction acceptance is disabled by default or its prerequisites are unavailable.', 'Set FACTORY_CHECK_IMAGE_ACCEPTANCE=1 only for an explicit native image construction exercise with buildah, jq, and approved image inputs. Boot-profile validation is separate and requires KVM.');
     checks.push({ ...imageRepro, name: 'deep:image-reproducibility' });
     const profiles = readdirSync('system-images/profiles', { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith('.json'));
 
     for (const profile of profiles) {
       const parsed = JSON.parse(readFileSync(join('system-images/profiles', profile.name), 'utf8')) as Record<string, unknown>;
-      checks.push(check(`deep:image-profile:${profile.name}`, true, parsed.requiresNative === true && parsed.requiresKvm === true ? 'incomplete' : 'failed', parsed.requiresNative === true && parsed.requiresKvm === true ? 'The exact boot/filesystem profile harness was not run; profile remains incomplete.' : 'Image profile does not declare required native/KVM policy.', 'Run the exact profile harness with its native tools, /dev/kvm, and approved image inputs; this command will not install or configure it.'));
+      checks.push(check(`deep:image-profile:${profile.name}`, true, parsed.requiresNative === true && parsed.requiresKvm === true ? 'incomplete' : 'failed', parsed.requiresNative === true && parsed.requiresKvm === true ? 'The exact VM boot/filesystem profile harness was not run; profile remains incomplete.' : 'Image profile does not declare required native/KVM policy.', 'Run exact VM boot/filesystem profile validation with /dev/kvm and approved image inputs; native image construction is checked separately.'));
     }
 
     let evidencePath = options.preserveFailures ? fixtureRoot : undefined;

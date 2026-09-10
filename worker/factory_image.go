@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -18,6 +19,66 @@ import (
 	"time"
 )
 
+const (
+	maxFactoryImageContextEntries = 200000
+	maxFactoryImageInputBytes     = 4 << 30
+	maxFactoryImageContextBytes   = maxFactoryImageInputBytes
+	maxFactoryImageOutputBytes    = 64 << 30
+)
+
+func extractFactoryImageContext(ctx context.Context, archivePath, destination string) error {
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		return err
+	}
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	reader := tar.NewReader(contextReader{ctx, file})
+	seen := make(map[string]bool)
+	var total int64
+	for {
+		header, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			return nextErr
+		}
+		name := strings.TrimSuffix(header.Name, "/")
+		mode := os.FileMode(header.Mode).Perm()
+		if !safeSourceArchivePath(name) || seen[name] || len(seen) >= maxFactoryImageContextEntries || header.Size < 0 || header.Size > maxFactoryImageContextBytes-total || (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir) || (header.Typeflag != tar.TypeDir && mode != 0o600 && mode != 0o644 && mode != 0o700 && mode != 0o755) || (header.Typeflag == tar.TypeDir && mode != 0o700 && mode != 0o755) {
+			return errors.New("unsafe system image context archive entry")
+		}
+		seen[name] = true
+		total += header.Size
+		path := filepath.Join(destination, name)
+		if header.Typeflag == tar.TypeDir {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		output, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(output, reader)
+		closeErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
+}
+
 type factoryImageObject struct {
 	Key    string `json:"key"`
 	SHA256 string `json:"sha256"`
@@ -30,12 +91,12 @@ type factoryImageCandidate struct {
 	Architecture                string              `json:"architecture"`
 	Kind                        string              `json:"kind"`
 	ProfileID                   string              `json:"profileId"`
-	NativePlanID                string              `json:"nativePlanId"`
+	ConstructionPolicySHA256    string              `json:"constructionPolicySha256"`
 	Profile                     factoryImageObject  `json:"profile"`
 	CandidateLock               factoryImageObject  `json:"candidateLock"`
-	CandidateLockSignature      factoryImageObject  `json:"candidateLockSignature"`
+	CandidateLockSignature      *factoryImageObject `json:"candidateLockSignature,omitempty"`
 	NativePlan                  factoryImageObject  `json:"nativePlan"`
-	NativePlanSignature         factoryImageObject  `json:"nativePlanSignature"`
+	NativePlanSignature         *factoryImageObject `json:"nativePlanSignature,omitempty"`
 	TrustedAuthorityKey         factoryImageObject  `json:"trustedAuthorityKey"`
 	Builder                     factoryImageObject  `json:"builder"`
 	Context                     *factoryImageObject `json:"context,omitempty"`
@@ -105,6 +166,9 @@ func (c *Client) factoryImageInput(ctx context.Context, jobID, leaseToken, name,
 	if !idPattern.MatchString(jobID) || leaseToken == "" || name == "" {
 		return errors.New("invalid private image input identity")
 	}
+	if expected.Size <= 0 || expected.Size > maxFactoryImageInputBytes {
+		return errors.New("private image input exceeds its size limit")
+	}
 	resp, err := c.signedRequest(ctx, http.MethodGet, "/api/worker/factory-images/"+urlPath(jobID)+"/inputs/"+urlPath(name)+"?leaseToken="+urlQuery(leaseToken), nil)
 	if err != nil {
 		return err
@@ -140,22 +204,40 @@ func (c *Client) completeFactoryImage(ctx context.Context, job *factoryImageJob,
 }
 
 func (c *Client) uploadFactoryImage(ctx context.Context, job *factoryImageJob, file *os.File, size int64, digest string) (factoryImageArtifact, error) {
+	if size <= 0 || size > maxFactoryImageOutputBytes {
+		return factoryImageArtifact{}, errors.New("private image output exceeds its size limit")
+	}
 	var start uploadStartResponse
 	requestPath := "/api/worker/factory-images/" + urlPath(job.ID) + "/uploads"
 	if err := c.doJSON(ctx, http.MethodPost, requestPath, uploadStartRequest{LeaseToken: job.LeaseToken, Filename: job.Candidate.OutputFilename, Size: size, SHA256: digest}, &start); err != nil {
 		return factoryImageArtifact{}, err
 	}
 	if start.Completed != nil {
+		if start.Completed.Key == "" || start.Completed.SHA256 != digest || start.Completed.Size != size || start.Completed.Filename != job.Candidate.OutputFilename {
+			return factoryImageArtifact{}, errors.New("completed private image upload does not match output bytes")
+		}
 		return factoryImageArtifact{Key: start.Completed.Key, SHA256: start.Completed.SHA256, Size: start.Completed.Size, Filename: start.Completed.Filename}, nil
 	}
 	if start.UploadID == "" || start.PartSize <= 0 || start.PartSize > maxUploadPartSize || start.Size != size || start.SHA256 != digest {
 		return factoryImageArtifact{}, errors.New("invalid private image upload session")
 	}
+	if start.MaxSize > 0 && size > start.MaxSize {
+		return factoryImageArtifact{}, errors.New("private image output exceeds upload session size limit")
+	}
 	parts := make(map[int]UploadPart, len(start.Parts))
 	for _, part := range start.Parts {
+		if part.PartNumber < 1 || part.PartNumber > int((size+start.PartSize-1)/start.PartSize) || part.Size <= 0 || !sha256Pattern.MatchString(part.SHA256) || part.ETag == "" {
+			return factoryImageArtifact{}, errors.New("private image upload session contains an invalid part")
+		}
+		if _, exists := parts[part.PartNumber]; exists {
+			return factoryImageArtifact{}, errors.New("private image upload session contains duplicate parts")
+		}
 		parts[part.PartNumber] = part
 	}
 	total := int((size + start.PartSize - 1) / start.PartSize)
+	if total > int(maxFactoryImageOutputBytes/maxUploadPartSize) {
+		return factoryImageArtifact{}, errors.New("private image upload exceeds its part limit")
+	}
 	for index := 0; index < total; index++ {
 		partNumber := index + 1
 		offset := int64(index) * start.PartSize
@@ -178,7 +260,7 @@ func (c *Client) uploadFactoryImage(ctx context.Context, job *factoryImageJob, f
 		if err := c.uploadPart(ctx, partPath, file, offset, partSize, partHash, &response); err != nil {
 			return factoryImageArtifact{}, err
 		}
-		if response.PartNumber != partNumber || response.SHA256 != partHash || response.Size != partSize {
+		if response.PartNumber != partNumber || response.SHA256 != partHash || response.Size != partSize || response.ETag == "" {
 			return factoryImageArtifact{}, errors.New("private image upload part response differs")
 		}
 	}
@@ -200,7 +282,7 @@ func runFactoryImageJob(parent context.Context, client *Client, cfg Config, job 
 	if err != nil || !lease.After(time.Now()) {
 		return errors.New("private image lease is expired")
 	}
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancel := context.WithTimeout(parent, defaultBuildTimeout)
 	defer cancel()
 	status := &heartbeatStatus{}
 	go func() {
@@ -228,9 +310,18 @@ func runFactoryImageJob(parent context.Context, client *Client, cfg Config, job 
 	if err != nil {
 		return completeFactoryImageFailure(parent, client, job, err)
 	}
-	defer os.RemoveAll(root)
+	defer func() {
+		(&Runner{Runtime: cfg.Runtime}).cleanupJobDirectory(root, cfg.Image)
+		_ = os.RemoveAll(root)
+	}()
 	_ = os.Chmod(root, 0o700)
-	inputs := map[string]factoryImageObject{"profile": job.Candidate.Profile, "candidate-lock": job.Candidate.CandidateLock, "candidate-lock-signature": job.Candidate.CandidateLockSignature, "native-plan": job.Candidate.NativePlan, "native-plan-signature": job.Candidate.NativePlanSignature, "trusted-authority-key": job.Candidate.TrustedAuthorityKey}
+	inputs := map[string]factoryImageObject{"profile": job.Candidate.Profile, "candidate-lock": job.Candidate.CandidateLock, "native-plan": job.Candidate.NativePlan, "trusted-authority-key": job.Candidate.TrustedAuthorityKey}
+	if job.Candidate.CandidateLockSignature != nil {
+		inputs["candidate-lock-signature"] = *job.Candidate.CandidateLockSignature
+	}
+	if job.Candidate.NativePlanSignature != nil {
+		inputs["native-plan-signature"] = *job.Candidate.NativePlanSignature
+	}
 	if job.Candidate.Context != nil {
 		inputs["context"] = *job.Candidate.Context
 	}
@@ -245,8 +336,28 @@ func runFactoryImageJob(parent context.Context, client *Client, cfg Config, job 
 		}
 		paths[name] = path
 	}
+	if job.Candidate.Kind == "system" {
+		if job.Candidate.Context == nil {
+			return completeFactoryImageFailure(parent, client, job, errors.New("system image candidate is missing its retained context bundle"))
+		}
+		contextDir := filepath.Join(root, "context")
+		if err := extractFactoryImageContext(ctx, paths["context"], contextDir); err != nil {
+			return completeFactoryImageFailure(parent, client, job, fmt.Errorf("materialize system image context: %w", err))
+		}
+		if info, statErr := os.Stat(filepath.Join(contextDir, "packages")); statErr != nil || !info.IsDir() {
+			return completeFactoryImageFailure(parent, client, job, errors.New("system image context has no package cache directory"))
+		}
+		contextLock := filepath.Join(contextDir, job.Candidate.CandidateLock.File)
+		if err := bindFactoryImageContextFile(paths["candidate-lock"], contextLock, job.Candidate.CandidateLock); err != nil {
+			return completeFactoryImageFailure(parent, client, job, fmt.Errorf("bind system image context lock: %w", err))
+		}
+	}
 	if err := verifyFactoryImageSignedInputs(job, paths, cfg); err != nil {
 		return completeFactoryImageFailure(parent, client, job, err)
+	}
+	binding, err := json.Marshal(map[string]any{"schemaVersion": 1, "kind": "factory-image-coordinator-binding", "runId": job.RunID, "attempt": job.Attempt, "candidateId": job.Candidate.ID, "architecture": job.Candidate.Architecture, "policySha256": job.Candidate.ConstructionPolicySHA256, "inputSha256": job.InputSHA256, "candidateLockSha256": job.Candidate.CandidateLock.SHA256, "constructionProofSha256": job.Candidate.NativePlan.SHA256, "profileSha256": job.Candidate.Profile.SHA256})
+	if err != nil || os.WriteFile(filepath.Join(root, "coordinator-binding.json"), binding, 0o600) != nil {
+		return completeFactoryImageFailure(parent, client, job, errors.New("write coordinator construction binding failed"))
 	}
 	outputDir := filepath.Join(root, "output")
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
@@ -291,8 +402,11 @@ func runFactoryImageJob(parent context.Context, client *Client, cfg Config, job 
 		return completeFactoryImageFailure(parent, client, job, err)
 	}
 	imageRef := (*string)(nil)
-	if job.Candidate.ImageRef != "" {
-		value := job.Candidate.ImageRef
+	if job.Candidate.Kind == "oci" {
+		value := stringField(observed, "imageRef")
+		if value == "" {
+			return completeFactoryImageFailure(parent, client, job, errors.New("OCI builder provenance does not contain actual output image identity"))
+		}
 		imageRef = &value
 	}
 	evidence := factoryImageEvidence{SchemaVersion: 1, Kind: "factory-image-result", JobID: job.ID, RunID: job.RunID, Attempt: job.Attempt, CandidateID: job.Candidate.ID, Architecture: job.Candidate.Architecture, ImageKind: job.Candidate.Kind, ImageRef: imageRef, InputSHA256: job.InputSHA256, ProfileSHA256: job.Candidate.Profile.SHA256, NativePlanSHA256: job.Candidate.NativePlan.SHA256, Artifact: artifact, BuilderSHA256: job.Candidate.Builder.SHA256, Observed: json.RawMessage(bytes.TrimSpace(observed))}
@@ -318,28 +432,90 @@ func factoryImageBuilderCommand(ctx context.Context, cfg Config, job *factoryIma
 		return nil, func() {}, errors.New("private image worker prerequisites are unavailable")
 	}
 	name := "opr-image-" + strings.ReplaceAll(job.ID, "_", "-")
-	args := []string{"run", "--rm", "--name", name, "--pull=never", "--network=none", "--read-only"}
+	args := []string{"run", "--rm", "--name", name, "--pull=never", "--network=none", "--read-only", "--pids-limit", "512", "--memory", "4g", "--cpus", "2"}
 	if job.Candidate.Kind == "system" {
 		// The mounted-filesystem assembler needs loop/mount access inside its container.
 		args = append(args, "--privileged")
 	}
+	if job.Candidate.Kind == "oci" {
+		args = append(args, "-e", "BUILDAH_ISOLATION=chroot", "-e", "STORAGE_DRIVER=vfs")
+	}
+	lockPath := "/opr/input/" + job.Candidate.CandidateLock.File
+	if job.Candidate.Kind == "system" {
+		lockPath = "/opr/input/context/" + job.Candidate.CandidateLock.File
+	}
 	args = append(args, "--tmpfs", "/tmp:rw,nosuid,nodev", "--tmpfs", "/run:rw,nosuid,nodev", "-v", inputDir+":/opr/input:ro", "-v", outputDir+":/opr/output:rw", "-v", cfg.FactoryImageBuilderPath+":/opr/builder/image-builder:ro", cfg.Image, "/bin/bash", "/opr/builder/image-builder",
-		"--candidate-lock", "/opr/input/"+job.Candidate.CandidateLock.File, "--candidate-lock-signature", "/opr/input/"+job.Candidate.CandidateLockSignature.File, "--candidate-id", job.Candidate.ID,
-		"--native-plan", "/opr/input/"+job.Candidate.NativePlan.File, "--native-plan-signature", "/opr/input/"+job.Candidate.NativePlanSignature.File, "--key", "/opr/input/"+job.Candidate.TrustedAuthorityKey.File,
+		"--coordinator-binding", "/opr/input/coordinator-binding.json", "--candidate-lock", lockPath, "--candidate-id", job.Candidate.ID,
+		"--native-plan", "/opr/input/"+job.Candidate.NativePlan.File, "--key", "/opr/input/"+job.Candidate.TrustedAuthorityKey.File,
 		"--fingerprint", job.Candidate.TrustedAuthorityFingerprint, "--profile", "/opr/input/"+job.Candidate.Profile.File, "--output", "/opr/output/"+job.Candidate.OutputFilename, "--provenance", "/opr/output/provenance.json", "--work-dir", "/opr/output/work")
 	if job.Candidate.Kind == "oci" {
 		if job.Candidate.Context == nil || job.Candidate.Dockerfile == nil {
 			return nil, func() {}, errors.New("OCI image job is missing reviewed context inputs")
 		}
-		args = append(args, "--context", "/opr/input/"+job.Candidate.Context.File, "--dockerfile", "/opr/input/"+job.Candidate.Dockerfile.File)
+		args = append(args, "--context", "/opr/input/"+job.Candidate.Context.File, "--dockerfile", "/opr/input/"+job.Candidate.Dockerfile.File, "--image-ref", job.Candidate.ImageRef)
+	} else {
+		if job.Candidate.Context == nil {
+			return nil, func() {}, errors.New("system image job is missing a context bundle")
+		}
+		args = append(args, "--package-cache", "/opr/input/context/packages")
 	}
 	command := exec.CommandContext(ctx, cfg.Runtime, args...)
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=/tmp", "LANG=C", "LC_ALL=C", "TZ=UTC", "SOURCE_DATE_EPOCH=" + fmt.Sprint(job.Candidate.SourceDateEpoch), "OMAPKG_IMAGE_CLEAN_ENV=1"}
+	home := "/tmp"
+	if userHome, homeErr := os.UserHomeDir(); homeErr == nil && userHome != "" {
+		home = userHome
+	}
+	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "LANG=C", "LC_ALL=C", "TZ=UTC", "SOURCE_DATE_EPOCH=" + fmt.Sprint(job.Candidate.SourceDateEpoch), "OMAPKG_IMAGE_CLEAN_ENV=1"}
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" && !strings.ContainsAny(runtimeDir, "\x00\r\n") {
+		command.Env = append(command.Env, "XDG_RUNTIME_DIR="+runtimeDir)
+	}
 	cleanup := func() {
-		cleanup := exec.CommandContext(context.Background(), cfg.Runtime, "rm", "-f", name)
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cleanup := exec.CommandContext(cleanupContext, cfg.Runtime, "rm", "-f", name)
 		_ = cleanup.Run()
 	}
 	return command, cleanup, nil
+}
+
+func bindFactoryImageContextFile(source, destination string, expected factoryImageObject) error {
+	if info, err := os.Lstat(destination); err == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("context lock is not a regular file")
+		}
+		digest, size, hashErr := hashFile(destination)
+		if hashErr != nil {
+			return hashErr
+		}
+		if size != expected.Size || digest != expected.SHA256 {
+			return errors.New("context lock bytes do not match reviewed lock")
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(output, hash), input)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if size != expected.Size || hexBytes(hash.Sum(nil)) != expected.SHA256 {
+		return errors.New("context lock bytes do not match reviewed lock")
+	}
+	return nil
 }
 
 func verifyFactoryImageSignedInputs(job *factoryImageJob, paths map[string]string, cfg Config) error {
@@ -371,21 +547,11 @@ func verifyFactoryImageSignedInputs(job *factoryImageJob, paths map[string]strin
 	if stringField(lock, "authority") != "factory-candidate-v1" || stringField(lock, "candidate.executionScope") != "private" || stringField(lock, "candidate.id") != job.Candidate.ID || stringField(lock, "architecture") != job.Candidate.Architecture {
 		return errors.New("candidate lock does not bind the private image candidate")
 	}
-	requiredOperation := "boot"
-	if job.Candidate.Kind == "oci" {
-		requiredOperation = "install"
-	}
-	if stringField(lock, "candidate.nativePlanSha256") != job.Candidate.NativePlan.SHA256 || stringField(plan, "kind") != "factory-image-native-plan" || stringField(plan, "status") != "reviewed" || stringField(plan, "operation") != requiredOperation || stringField(plan, "nativePlanId") != job.Candidate.NativePlanID || stringField(plan, "candidateId") != job.Candidate.ID || stringField(plan, "architecture") != job.Candidate.Architecture || stringField(plan, "qualificationPlanSha256") == "" || stringField(plan, "profileSha256") != job.Candidate.Profile.SHA256 {
+	if stringField(lock, "candidate.nativePlanSha256") != job.Candidate.NativePlan.SHA256 || stringField(plan, "kind") != "factory-image-construction-proof" || stringField(plan, "status") != "reviewed" || stringField(plan, "runPolicySha256") != job.Candidate.ConstructionPolicySHA256 || stringField(plan, "candidateId") != job.Candidate.ID || stringField(plan, "architecture") != job.Candidate.Architecture || stringField(plan, "profileSha256") != job.Candidate.Profile.SHA256 || !sha256Pattern.MatchString(stringField(plan, "inputLockSha256")) {
 		return errors.New("native plan does not bind the private image candidate")
 	}
 	if stringField(profile, "architecture") != job.Candidate.Architecture {
 		return errors.New("image profile architecture differs from worker target")
-	}
-	if err := verifyFactoryImageSignature(paths["candidate-lock"], paths["candidate-lock-signature"], paths["trusted-authority-key"], job.Candidate.TrustedAuthorityFingerprint); err != nil {
-		return fmt.Errorf("candidate lock signature: %w", err)
-	}
-	if err := verifyFactoryImageSignature(paths["native-plan"], paths["native-plan-signature"], paths["trusted-authority-key"], job.Candidate.TrustedAuthorityFingerprint); err != nil {
-		return fmt.Errorf("native plan signature: %w", err)
 	}
 	return nil
 }
@@ -416,25 +582,6 @@ func stringField(body []byte, path string) string {
 	}
 	result, _ := value.(string)
 	return result
-}
-
-func verifyFactoryImageSignature(payload, signature, publicKey, fingerprint string) error {
-	home, err := os.MkdirTemp("", "opr-image-gpg-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(home)
-	if err := os.Chmod(home, 0o700); err != nil {
-		return err
-	}
-	if output, err := exec.Command("gpg", "--batch", "--no-tty", "--homedir", home, "--import", publicKey).CombinedOutput(); err != nil {
-		return fmt.Errorf("import authority key: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	output, err := exec.Command("gpg", "--batch", "--no-tty", "--status-fd=1", "--homedir", home, "--verify", signature, payload).CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "[GNUPG:] VALIDSIG "+strings.ToUpper(fingerprint)) {
-		return errors.New("authority signature is invalid")
-	}
-	return nil
 }
 
 func completeFactoryImageFailure(ctx context.Context, client *Client, job *factoryImageJob, cause error) error {

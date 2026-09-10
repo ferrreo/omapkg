@@ -105,7 +105,7 @@
   }
 
   onMount(() => startVisibleRefresh(
-    () => ['queued', 'building', 'blocked'].includes(request?.status || '') || (!data.imported && request?.status === 'generating'),
+    () => ['queued', 'building', 'blocked'].includes(request?.status || '') || (!data.imported && request?.status === 'generating') || builds.some((build) => build.private_candidate === 1 && ['queued', 'leased'].includes(build.status)),
     () => { void invalidateAll(); }
   ));
 </script>
@@ -131,6 +131,31 @@
             <button class="button" type="submit">Save dossier snapshot</button>
           </form>
           <ul>{#each data.dossiers as dossier}<li><a href={`/maintain/dossiers/${encodeURIComponent(dossier.id)}`}>{dossier.revision_id} · {formatDate(dossier.created_at)}</a></li>{:else}<li>No snapshots saved. Current evidence remains on this request.</li>{/each}</ul>
+        </section>
+      {/if}
+
+      {#if data.factoryRuns.length}
+        <section class="workbench-panel" aria-labelledby="factory-runs-title">
+          <h2 id="factory-runs-title">Factory runs</h2>
+          <ul>{#each data.factoryRuns as run}<li><a href={`/maintain/factory-runs/${encodeURIComponent(run.id)}`}>{run.target_kind} · {run.status} · {run.attempt_count}/3 attempts</a></li>{/each}</ul>
+        </section>
+      {/if}
+
+      {#if data.factoryBindings.length}
+        <section class="workbench-panel" aria-labelledby="factory-inputs-title">
+          <h2 id="factory-inputs-title">Repaired recipe input bindings</h2>
+          {#each data.factoryBindings as binding}
+            <p><code>{binding.revision_id}</code> uses retained inputs from <code>{binding.source_revision_id}</code> · {binding.status}</p>
+            <p><a href={`/maintain/cohorts/${encodeURIComponent(binding.cohort_id)}`}>Inspect cohort and input evidence</a></p>
+            {#if binding.status === 'pending'}
+              <form class="review-form" method="POST" action="?/reviewFactoryBinding">
+                <input type="hidden" name="revision_id" value={binding.revision_id} />
+                <label><input type="checkbox" name="inputs_acknowledged" required /> I reviewed the repaired revision against its retained parent inputs.</label>
+                <label for={`binding-reason-${binding.revision_id}`}>Input review reason</label><input id={`binding-reason-${binding.revision_id}`} name="reason" required maxlength="2000" />
+                <button class="button" type="submit">Record input binding review</button>
+              </form>
+            {/if}
+          {/each}
         </section>
       {/if}
 

@@ -35,6 +35,21 @@ podman build --pull=never \
   --file worker/Dockerfile.template-matrix-aarch64 worker
 ```
 
+Build matching clean ARM runtime image. It packages official Electron v43.2.0
+linux arm64 release archive with SHA-256
+`50e1cdefbf8590e0d89b0276314a99c7b98e8eed732204c6f1a1c2a38376ed87`:
+
+```sh
+OPR_ARM_TEMPLATE_BUILDER_IMAGE='registry.example/omapkg/template-builder-arm64@sha256:<64 lowercase hex>' \
+OPR_ARM_RUNTIME_ROOTFS_CONTEXT=/private/archlinuxarm/rootfs-context \
+OPR_ARM_TEMPLATE_RUNTIME_IMAGE='registry.example/omapkg/template-runtime-arm64@sha256:<64 lowercase hex>' \
+scripts/build-arm-template-runtime.sh
+```
+
+This stages only retained Electron package archive from builder image into
+signature-verified minimal ARM rootfs context; runtime image does not inherit
+compiler or package-manager build tools.
+
 The fixture assets are generated from the tracked source definitions at test
 time: deterministic source archives, `.deb`, RPM via `rpmbuild`, Type 2
 AppImage via `mksquashfs`, and a known extraction-only `.run`. No source mirror

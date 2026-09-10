@@ -513,7 +513,7 @@ export async function runFactory(
       draft.revision.commit_sha = pullRequest.commitSha;
       const persisted = await persistFactoryRevision(env, draft, 'factory', generationId, { privateCandidate: true });
       const builds = await queuePrivateFactoryBuilds(env, generationId, attempt, persisted.revision);
-      const attached = await waitForPrivateFactoryBuilds(env, generationId, { ...attempt, buildIds: builds.map((build) => build.id) }, { timeoutMs: 25 * 60_000, pollMs: 5_000 });
+      const attached = await waitForPrivateFactoryBuilds(env, generationId, { ...attempt, buildIds: builds.map((build) => build.id) }, { timeoutMs: 150 * 60_000, pollMs: 30_000 });
       if (attached.status === 'ambiguous') throw new Error(attached.failure?.message ?? 'Private build execution is ambiguous; human intervention is required.');
       if (attached.status === 'failed') return { status: 'failed' as const, failureKind: 'build' as const, failure: attached.failure ?? { message: 'Private build failed.' } };
       return {

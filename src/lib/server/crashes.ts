@@ -1,6 +1,6 @@
 import { CRASH_REPORT_RETENTION_DAYS } from '../reports';
 import type { Actor } from '../model';
-import { audit, now } from './db';
+import { now } from './db';
 import type { Env } from './env';
 import { PolicyError, requireMaintainer } from './policy';
 import { quarantineRelease } from './releases';

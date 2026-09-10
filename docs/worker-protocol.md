@@ -46,6 +46,8 @@ Before building, the worker verifies the recipe hash and pinned image reference/
 
 `POST /api/worker/jobs/{id}/uploads` body `{ leaseToken, filename, size, sha256 }` starts or resumes one multipart upload. The response is `{ uploadId, partSize, maxSize, filename, size, sha256, parts[] }`, or `{ completed: { key, sha256, size, filename } }` when a matching upload already completed under the current lease. `partSize` is 8 MiB and `maxSize` is 4 GiB. The filename must be a safe basename ending `.pkg.tar.zst`; the declared size and SHA-256 must match the completed object.
 
+Private factory image uploads use the corresponding `/api/worker/factory-images/{id}/uploads` endpoint. They retain the 8 MiB part size but allow image outputs up to 64 GiB, represented by at most 8,192 parts. Retained image inputs remain limited to 4 GiB each.
+
 `PUT /api/worker/jobs/{id}/uploads/{uploadId}/{partNumber}?leaseToken=...` accepts one raw chunk, at most 8 MiB. The response is `{ partNumber, sha256, size, etag }`; the server verifies each chunk before recording it. All parts must be present and contiguous when the upload is completed, and retries with the same bytes are idempotent.
 
 `POST /api/worker/jobs/{id}/uploads/{uploadId}/complete` body `{ leaseToken }` completes the multipart upload and returns `{ key, sha256, size, filename }`. The server checks every part, streams a whole-object SHA-256 and size check, and stores the immutable private R2 object. `DELETE /api/worker/jobs/{id}/uploads/{uploadId}?leaseToken=...` aborts an active upload after failure or cancellation.

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { asD1, TestD1 } from './d1';
-import { createFactoryDossier, factoryDossierPublicProjection, factoryDossierPublicCanonicalJson, factoryDossierMarkdown } from '../src/lib/server/factory-dossier';
+import { createFactoryDossier, renderFactoryDossier, storedFactoryDossier, listFactoryDossiers, factoryDossierPublicProjection, factoryDossierPublicCanonicalJson, factoryDossierMarkdown } from '../src/lib/server/factory-dossier';
 import type { Env } from '../src/lib/server/env';
 
 const digest = 'a'.repeat(64);
@@ -81,6 +81,24 @@ test('factory dossier preserves every attempt/output and stable canonical export
     db.prepare("UPDATE builds SET provenance=replace(provenance,'reproducibility-contract-verified','verified') WHERE id='build-dossier'").run();
     const fake = await createFactoryDossier(env(db), 'github:1', { requestId: 'request-dossier', revisionId: 'revision-dossier' });
     expect(fake.dossier.checks.find((check) => check.name === 'x86_64/reproducibility-contract')?.status).not.toBe('passed');
+  } finally { db.close(); }
+});
+
+test('changed evidence creates a new snapshot with the same ID before and after storage', async () => {
+  const db = await database();
+  try {
+    const input = { requestId: 'request-dossier', revisionId: 'revision-dossier' };
+    const first = await createFactoryDossier(env(db), 'github:1', input);
+    db.prepare("UPDATE approvals SET revoked_at=200 WHERE id='approval-area'").run();
+    const rendered = await renderFactoryDossier(env(db), input);
+    const second = await createFactoryDossier(env(db), 'github:1', input);
+    const repeated = await createFactoryDossier(env(db), 'github:2', input);
+    expect(second.dossier.id).not.toBe(first.dossier.id);
+    expect(second.canonicalJson).toBe(rendered.canonicalJson);
+    expect(repeated.canonicalJson).toBe(second.canonicalJson);
+    expect((await storedFactoryDossier(env(db), first.dossier.id)).canonicalJson).toBe(first.canonicalJson);
+    expect((await listFactoryDossiers(env(db), input.requestId))[0].id).toBe(second.dossier.id);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM factory_dossiers').first<{ count: number }>()?.count).toBe(2);
   } finally { db.close(); }
 });
 

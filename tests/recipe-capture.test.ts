@@ -13,7 +13,7 @@ import type { ImportEntry, ImportManifest } from '../src/lib/imports';
 import { sha256 } from '../src/lib/server/db';
 import { TestD1, asD1 } from './d1';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { requestRecipeInspection, claimRecipeInspection, requireRecipeInspectionLease, recipeInspectionObject, completeRecipeInspection, listRecipeInspections } from '../src/lib/server/recipe-inspections';
+import { requestRecipeInspection, requestFactoryRecipeInspection, claimRecipeInspection, requireRecipeInspectionLease, recipeInspectionObject, completeRecipeInspection, listRecipeInspections } from '../src/lib/server/recipe-inspections';
 import { proposeCatalogPackage, approveCatalogPackage } from '../src/lib/server/catalog-ownership';
 import { registerBuildImage, setBuildImageEnabled } from '../src/lib/server/build-images';
 import type { Worker } from '../src/lib/model';
@@ -27,6 +27,7 @@ import type { FactoryRevisionDraft } from '../services/pipeline/types';
 import { validateRevision } from '../src/lib/server/policy';
 import { reviewedPackageVersion } from '../src/lib/server/build-outputs';
 import { startFactory } from '../src/lib/server/requests';
+import { finishFactoryAttempt, reserveFactoryAttempt, startFactoryRun } from '../src/lib/server/factory-runs';
 import type { Env } from '../src/lib/server/env';
 import { checkPreservedWorker } from './preserved-worker-fixture';
 
@@ -225,6 +226,22 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     expect(await completeRecipeInspection(env.DB, worker, second.id, completion())).toEqual({ status: 'succeeded' });
     expect(await completeRecipeInspection(env.DB, worker, second.id, completion())).toEqual({ status: 'succeeded' });
     expect((await listRecipeInspections(env.DB, ref.sha256))[0]).toMatchObject({ current: 1, status: 'succeeded' });
+
+    const repairRun = await startFactoryRun(env.DB, { id: 'repair-run', targetKind: 'preserved', targetId: 'demo', unitKey: 'demo', policy: {}, createdBy: actor.id });
+    const firstRepairAttempt = await reserveFactoryAttempt(env.DB, { runId: repairRun.id, reservationKey: 'repair:1', candidateSha256: 'a'.repeat(64), inputSha256: 'b'.repeat(64), architecture: 'x86_64', policy: {} });
+    await finishFactoryAttempt(env.DB, repairRun.id, firstRepairAttempt.attempt, firstRepairAttempt.leaseToken, { status: 'failed', failureKind: 'build', failure: { message: 'native build failed' } });
+    const repairOverride = await retainInputBytes(env, actor, new TextEncoder().encode("pkgname=demo\npkgver=1.4\npkgrel=4\narch=('x86_64')\nsource=()\n"));
+    const repairInspection = await requestFactoryRecipeInspection(env, 'repair-run', 2, ref.sha256, image.id, repairOverride, 'Inspect automatic preserved successor.');
+    expect(await claimRecipeInspection(env.DB, worker, workerMetadata)).toBeNull();
+    const overrideMetadata: WorkerMetadata = { ...workerMetadata, capabilities: ['recipe-inspection-v1', 'recipe-inspection-override-v1'] };
+    const overrideLease = (await claimRecipeInspection(env.DB, worker, overrideMetadata))!;
+    expect(overrideLease).toMatchObject({ id: repairInspection.id, recipeOverride: { sha256: repairOverride.sha256, size: repairOverride.size }, factoryRunId: 'repair-run', factoryAttempt: 2 });
+    expect((await recipeInspectionObject(env.DB, await requireRecipeInspectionLease(env.DB, worker, overrideLease.id, overrideLease.leaseToken), repairOverride.sha256)).size).toBe(repairOverride.size);
+    const overrideReport = JSON.stringify({ ...report, jobId: overrideLease.id, attempt: overrideLease.attempt, recipeOverride: repairOverride });
+    await expect(completeRecipeInspection(env.DB, worker, overrideLease.id, { leaseToken: overrideLease.leaseToken, report: overrideReport, signature: Buffer.from(sign(null, Buffer.from(overrideReport), keys.privateKey)).toString('base64') })).resolves.toEqual({ status: 'succeeded' });
+    const secondRepairAttempt = await reserveFactoryAttempt(env.DB, { runId: 'repair-run', reservationKey: 'repair:2', candidateSha256: 'c'.repeat(64), inputSha256: 'd'.repeat(64), architecture: 'x86_64', policy: {} });
+    expect(secondRepairAttempt.attempt).toBe(2);
+
     expect(await recipeSourcePlan(env, ref.sha256, second.id, second.attempt)).toMatchObject({ capture: ref, architecture: 'x86_64', version: '2:1.4-3.2',
       inspection: { jobId: second.id, attempt: 2, srcinfoSha256: report.srcinfoSha256 }, sources: [{ kind: 'file', name: 'demo.tar.xz', url: 'https://example.org/source.tar.xz', checksums: { sha256: 'a'.repeat(64) } }] });
     await expect(recipeSourcePlan(env, ref.sha256, second.id, 1)).rejects.toThrow('current successful');
@@ -246,7 +263,7 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     await expect(retainRecipeSources(env, actor, ref.sha256, await storeBundle({ ...sourceBundle, plan: alteredPlan }), 'Changed plan.')).rejects.toThrow('differs from current');
     expect(() => parseRecipeSourceBundle({ ...sourceBundle, sources: [...sourceBundle.sources, ...sourceBundle.sources] })).toThrow('repeats');
     expect(() => parseRecipeSourceBundle({ ...sourceBundle, caches: [{ kind: 'go', object: sourceObject, entries: 200001, expandedBytes: 10 }] })).toThrow();
-    expect(db.prepare('SELECT COUNT(*) AS n FROM recipe_inspection_results').first<{ n: number }>()).toEqual({ n: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM recipe_inspection_results').first<{ n: number }>()).toEqual({ n: 2 });
 
     for (const table of ['approvals', 'builds']) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>()).toEqual({ n: 0 });
     await expect(reservePreservedImport(env, actor, ref.sha256, { x86_64: sourceRef }, ['test -f /usr/share/doc/demo/README'], 'Preserve inspected fixture.')).rejects.toThrow('every admitted catalog target');

@@ -285,6 +285,24 @@ export async function reconcileExpiredFactoryBuilds(db: D1Database, at = now()):
   for (const row of rows.results) await stopFactoryRun(db, row.run_id, 'Private factory worker lease expired; execution is ambiguous and requires human intervention.');
 }
 
+export async function completeFactoryCoordinatorRun(db: D1Database, runId: string, detail: unknown = {}): Promise<FactoryRun> {
+  requireIdentifier(runId, 'run id');
+  const timestamp = now();
+  const artifact = canonicalJson({ kind: 'cohort-dispatch', ...((detail && typeof detail === 'object' && !Array.isArray(detail)) ? detail : {}) });
+  const result = await db.prepare(`UPDATE factory_runs SET status='succeeded',artifact_json=?,updated_at=?
+    WHERE id=? AND status IN ('queued','running') AND attempt_count=0`).bind(artifact, timestamp, runId).run();
+  if (!changed(result)) {
+    const existing = await runRow(db, runId);
+    if (!existing) throw new FactoryRunError('not-found', 'Factory run not found.');
+    if (existing.status === 'succeeded') return mapRun(existing);
+    throw new FactoryRunError('human-intervention', 'Factory coordinator run changed before completion.');
+  }
+  await audit(db, 'factory', 'factory.coordinator_completed', runId, JSON.parse(artifact)).run();
+  const completed = await runRow(db, runId);
+  if (!completed) throw new FactoryRunError('storage', 'Factory coordinator run disappeared after completion.');
+  return mapRun(completed);
+}
+
 export async function getFactoryRun(db: D1Database, runId: string): Promise<FactoryRun | null> {
   requireIdentifier(runId, 'run id');
   const row = await runRow(db, runId);
@@ -512,11 +530,14 @@ export async function finishFactoryAttempt(db: D1Database, runId: string, attemp
   const artifactJson = result.artifact === undefined ? null : canonicalJson(result.artifact);
   const runStatus: FactoryRunStatus = succeeded ? 'succeeded' : result.failureKind === 'policy' || attempt >= FACTORY_MAX_ATTEMPTS ? 'needs-human-intervention' : 'queued';
   const runFailure = succeeded ? null : failureJson ?? canonicalJson({ message: 'factory attempt failed', kind: result.failureKind });
+  const imageJobsAvailable = Boolean(await db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='factory_image_jobs'").first());
 
   try {
     const results = await db.batch([
       ...(result.status === 'failed' ? [db.prepare(`UPDATE builds SET status='cancelled'
         WHERE factory_run_id=? AND factory_attempt=? AND private_candidate=1 AND status IN ('queued','leased')`).bind(runId, attempt)] : []),
+      ...(result.status === 'failed' && imageJobsAvailable ? [db.prepare(`UPDATE factory_image_jobs SET status='cancelled',error=?,finished_at=?
+        WHERE run_id=? AND attempt=? AND status IN ('queued','leased')`).bind('factory attempt failed', timestamp, runId, attempt)] : []),
       db.prepare(`UPDATE factory_run_attempts SET status=?,failure_kind=?,failure_json=?,artifact_json=?,finished_at=?,lease_expires_at=?,updated_at=?
         WHERE run_id=? AND attempt=? AND status='running' AND lease_token=? AND lease_expires_at>?`)
         .bind(result.status, result.failureKind ?? null, failureJson, artifactJson, timestamp, timestamp, timestamp, runId, attempt, leaseToken, timestamp),
@@ -528,7 +549,7 @@ export async function finishFactoryAttempt(db: D1Database, runId: string, attemp
       ...(runStatus === 'needs-human-intervention' ? [audit(db, 'factory', 'factory.needs_human_intervention', runId, { attempt, reason: result.failureKind === 'policy' ? 'policy-stop' : 'budget-exhausted' })] : []),
     ]);
 
-    const attemptIndex = result.status === 'failed' ? 1 : 0;
+    const attemptIndex = result.status === 'failed' ? 1 + Number(imageJobsAvailable) : 0;
     if (!changed(results[attemptIndex]) || !changed(results[attemptIndex + 1])) throw new FactoryRunError('lease-fenced', 'Factory attempt lease is fenced.');
   } catch (cause) {
     if (cause instanceof FactoryRunError) throw cause;
@@ -551,6 +572,7 @@ export async function stopFactoryRun(db: D1Database, runId: string, reason: stri
   const failureValue = { reason: cleanReason, ...(policy === undefined ? {} : { policy }) };
   const failure = canonicalJson(failureValue);
   const failureKind: FactoryFailureKind = policy === undefined ? 'infrastructure' : 'policy';
+  const imageJobsAvailable = Boolean(await db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='factory_image_jobs'").first());
   await db.batch([
     db.prepare(`UPDATE factory_run_attempts SET status='failed',failure_kind=?,failure_json=?,finished_at=?,lease_expires_at=?,updated_at=?
       WHERE run_id=? AND attempt=(SELECT current_attempt FROM factory_runs WHERE id=? AND status IN ('queued','running')) AND status='running'`)
@@ -558,6 +580,8 @@ export async function stopFactoryRun(db: D1Database, runId: string, reason: stri
     db.prepare(`UPDATE builds SET status='cancelled'
       WHERE factory_run_id=? AND factory_attempt=(SELECT current_attempt FROM factory_runs WHERE id=? AND status IN ('queued','running'))
         AND private_candidate=1 AND status IN ('queued','leased')`).bind(runId, runId),
+    ...(imageJobsAvailable ? [db.prepare(`UPDATE factory_image_jobs SET status='cancelled',error=?,finished_at=?
+      WHERE run_id=? AND attempt=(SELECT current_attempt FROM factory_runs WHERE id=? AND status IN ('queued','running')) AND status IN ('queued','leased')`).bind(cleanReason, timestamp, runId, runId)] : []),
     db.prepare(`UPDATE factory_runs SET status='needs-human-intervention',failure_json=?,lease_token=NULL,lease_expires_at=NULL,updated_at=?
       WHERE id=? AND status IN ('queued','running')`).bind(failure, timestamp, runId),
     db.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at)

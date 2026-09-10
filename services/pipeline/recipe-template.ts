@@ -3,8 +3,6 @@ import {
   TYPED_TEMPLATE_DEFINITIONS,
   TYPED_TEMPLATE_IDS,
   typedTemplateCommands,
-  typedTemplateOutputCommands,
-  typedTemplateOutputs,
   validateTypedTemplate,
   type TypedRecipeTemplate,
 } from './typed-templates';

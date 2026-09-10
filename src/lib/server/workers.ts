@@ -398,7 +398,7 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
         r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
         r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
         r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface, r.license AS revision_license, r.sbom_json AS revision_sbom_json, r.public_recipe AS revision_public_recipe
+        r.surface AS revision_surface, r.license AS revision_license, r.sbom_json AS revision_sbom_json, r.public_recipe AS revision_public_recipe, r.preserved_origin_revision_id AS revision_preserved_origin_revision_id
       FROM builds b
       JOIN revisions r ON r.id = b.revision_id
       JOIN requests q ON q.id = r.request_id
@@ -407,17 +407,17 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
           EXISTS(SELECT 1 FROM current_preserved_recipe_imports i WHERE i.id=q.preserved_import_id AND (i.revision_id=r.id OR i.revision_id=r.preserved_origin_revision_id)) AND
           EXISTS(SELECT 1 FROM cohort_recipe_ownership WHERE recipe_revision_id=r.id) AND
           EXISTS(SELECT 1 FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
-            WHERE s.recipe_revision_id=r.id AND s.architecture=b.architecture AND s.cohort_id=l.cohort_id AND s.cohort_revision=l.cohort_revision)))
-        AND ((b.private_candidate=1 AND q.status IN ('generating','review')) OR (b.private_candidate=0 AND q.status IN ('queued', 'building')))
+            WHERE (s.recipe_revision_id=r.id OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=r.id)) AND s.architecture=b.architecture AND s.cohort_id=l.cohort_id AND s.cohort_revision=l.cohort_revision)))
+        AND ((b.private_candidate=1 AND q.status IN ('generating','review','queued','building')) OR (b.private_candidate=0 AND q.status IN ('queued', 'building')))
         AND (?=1 OR r.surface='recipe' OR NOT EXISTS(SELECT 1 FROM cohort_recipe_ownership WHERE recipe_revision_id=r.id))
         AND NOT EXISTS(SELECT 1 FROM build_input_selections s JOIN cohorts c ON c.id=s.cohort_id AND c.current_revision=s.cohort_revision
           JOIN input_locks selected ON selected.sha256=s.lock_sha256
-          WHERE s.recipe_revision_id=r.id AND s.architecture=b.architecture AND (?=0 OR (?=0 AND json_extract(selected.manifest_json,'$.shellAnalysis')='helper')
+          WHERE (s.recipe_revision_id=r.id OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=r.id)) AND s.architecture=b.architecture AND (?=0 OR (?=0 AND json_extract(selected.manifest_json,'$.shellAnalysis')='helper')
             OR NOT EXISTS(SELECT 1 FROM current_input_locks l WHERE l.sha256=s.lock_sha256)))
         AND NOT EXISTS (SELECT 1 FROM cohort_recipe_ownership owned JOIN cohorts cohort ON cohort.id=owned.cohort_id
           WHERE owned.recipe_revision_id=r.id AND (cohort.phase<>'build' OR cohort.condition NOT IN ('ready','blocked')
             OR NOT EXISTS(SELECT 1 FROM cohort_members member WHERE member.cohort_id=cohort.id
-              AND member.revision=cohort.current_revision AND member.recipe_revision_id=r.id)))
+              AND member.revision=cohort.current_revision AND (member.recipe_revision_id=r.id OR member.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=r.id)))))
         AND r.pr_url IS NOT NULL AND r.commit_sha IS NOT NULL AND length(r.image_digest) > 0
         AND (b.status = 'queued' OR (b.private_candidate=0 AND b.status = 'leased' AND b.lease_expires_at IS NOT NULL AND b.lease_expires_at < ?))
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
@@ -468,7 +468,7 @@ export async function claimJob(
   const outputContractJSON = outputContract ? JSON.stringify(outputContract) : null;
   const inputLock = outputContract && dependencyContext ? await selectedInputLock({ DB: db, ARTIFACTS: dependencyContext.ARTIFACTS }, candidate.revision_id, worker.architecture, outputContract) : null;
 
-  const sourceRevision = { id: candidate.revision_id, sbom_json: candidate.revision_sbom_json, architectures_json: candidate.revision_architectures_json,
+  const sourceRevision = { id: candidate.revision_id, preserved_origin_revision_id: candidate.revision_preserved_origin_revision_id, sbom_json: candidate.revision_sbom_json, architectures_json: candidate.revision_architectures_json,
     manifest_sha256: candidate.revision_manifest_sha256 };
 
   const preserved = preservedBuildInputs(sourceRevision, worker.architecture);
@@ -528,7 +528,7 @@ export async function claimJob(
               AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = b.revision_id AND a.kind = 'security' AND a.manifest_sha256 = ? AND a.revoked_at IS NULL)))
           AND EXISTS (SELECT 1 FROM revisions r WHERE r.id = b.revision_id AND r.pr_url IS NOT NULL AND r.commit_sha IS NOT NULL AND length(r.image_digest) > 0)
           AND EXISTS (SELECT 1 FROM requests q WHERE q.id = (SELECT request_id FROM revisions WHERE id = b.revision_id)
-            AND ((b.private_candidate=1 AND q.status IN ('generating','review')) OR (b.private_candidate=0 AND q.status IN ('queued','building'))))
+            AND ((b.private_candidate=1 AND q.status IN ('generating','review','queued','building')) OR (b.private_candidate=0 AND q.status IN ('queued','building'))))
           AND EXISTS (SELECT 1 FROM workers w WHERE w.id = ? AND w.status = 'active' AND w.accepting_jobs = 1 AND w.removed_at IS NULL)`)
         .bind(worker.id, leaseToken, leaseExpiresAt, timestamp, dependencyPlanJSON, outputContractJSON, inputLock?.sha256 ?? null, preserved ? canonicalJson(preserved) : null, candidate.id, worker.architecture, timestamp,
           candidate.revision_manifest_sha256, candidate.revision_manifest_sha256, worker.id),
