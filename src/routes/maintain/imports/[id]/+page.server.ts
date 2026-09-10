@@ -1,6 +1,7 @@
 import { error, redirect } from '@sveltejs/kit';
 import { getCatalogImport, listCatalogImports, listImportEntries, parseImportManifest, reviewImportEntry } from '$lib/server/catalog-imports';
 import { importBuildCoverage, reconcileCatalogImports, type ImportDifference } from '$lib/server/catalog-reconciliation';
+import { recipeCaptureCoverage } from '$lib/server/recipe-captures';
 import { environment, field, formAction, maintainer } from '$lib/server/http';
 import { query, sha256 } from '$lib/server/db';
 import type { ImportEntry } from '$lib/imports';
@@ -14,10 +15,11 @@ export const load: PageServerLoad = async (event) => {
   const reportId = event.url.searchParams.get('report') ?? '';
   const differenceKind = event.url.searchParams.get('difference') ?? '';
   const differenceAfter = event.url.searchParams.get('differenceAfter') ?? '';
-  const [detail, entries, captures, coverage, comparisons, observedVersions] = await Promise.all([
+  const [detail, entries, captures, coverage, comparisons, observedVersions, recipeCoverage] = await Promise.all([
     getCatalogImport(DB, event.params.id), listImportEntries(DB, event.params.id, { search, disposition, after }), listCatalogImports(DB), importBuildCoverage(DB, event.params.id),
     query<{ id: string; report_json: string; report_sha256: string; created_at: number }>(DB, "SELECT id,report_json,report_sha256,created_at FROM catalog_reconciliations WHERE candidate_import_id=? AND status='ready' ORDER BY created_at DESC,id LIMIT 20", event.params.id),
     query<{ version: string; target: string }>(DB, "SELECT json_extract(entry_json,'$.version') AS version,target_architecture AS target FROM catalog_import_entries WHERE import_id=? AND name='omarchy'", event.params.id),
+    recipeCaptureCoverage(DB, event.params.id),
   ]);
   for (const comparison of comparisons) if (await sha256(comparison.report_json) !== comparison.report_sha256) error(409, 'Stored reconciliation integrity check failed.');
   const recipeLinks = await query<{ source_id: string; pkgbase: string; capture_sha256: string; matches: number; metadata_present: number; inspected: number }>(DB,
@@ -38,7 +40,7 @@ export const load: PageServerLoad = async (event) => {
     AND (?='' OR kind=?) AND package_key>? ORDER BY package_key LIMIT 50`, selected.id, differenceKind, differenceKind, differenceAfter) : [];
   return { ...detail, entries: entries.map((entry) => ({ ...entry, recipeCapture: recipeLinks.find((link) => link.source_id === entry.source_id && link.pkgbase === entry.pkgbase), metadata: JSON.parse(entry.entry_json) as ImportEntry })),
     captures: captures.filter((capture) => capture.id !== event.params.id && capture.status !== 'capturing').map((capture) => ({ ...capture, manifest: parseImportManifest(JSON.parse(capture.manifest_json)) })),
-    coverage, comparisons: comparisons.map((comparison) => ({ id: comparison.id, summary: JSON.parse(comparison.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] })),
+    coverage, recipeCoverage, comparisons: comparisons.map((comparison) => ({ id: comparison.id, summary: JSON.parse(comparison.report_json) as Awaited<ReturnType<typeof reconcileCatalogImports>>['report'] })),
     selectedReport: selected && summary ? { id: selected.id, summary } : null,
     uncomparedBaselineSources: baseline && summary ? baseline.manifest.sources.filter((source) => source.status === 'captured' && source.entries > 0 && !summary.scope.includes(source.collection)) : [],
     differences: differences.map((item) => JSON.parse(item.item_json) as ImportDifference), observedVersions,

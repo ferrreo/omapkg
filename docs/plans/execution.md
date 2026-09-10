@@ -615,3 +615,25 @@ runnable check rejects retained private key material, including the exposed
 helper. Both image publication and preserved acceptance run that check. A freshly
 built replacement and production image rotation remain required. This acceptance
 is component evidence, not production admission or full-catalog qualification.
+
+### Full Arch recipe capture and source coverage
+
+The resumable catalog recipe capture reads the sealed Arch inventory and captures
+each exact package version from its official packaging Git repository. It retains
+complete original trees and raw Git version-reference objects without executing
+recipes, resumes interrupted attempts and respects upstream request quotas.
+
+At this checkpoint, 1,712 of 12,327 versioned recipe tasks passed independent
+Git/object verification. Eleven lacked original `.SRCINFO`; no metadata was
+invented. Capture continues. The first 712 recipes were retained through the
+actual local private input/mapping API, using labelled test identities. They
+produced 612 matching original metadata mappings, 98 differences and two missing
+metadata results. Differences include generated dependency declarations and need
+inspection; retained source bytes alone do not qualify a build.
+
+The import page now counts source recipe mappings across the complete captured
+repository/target set, including missing sources, differing metadata and absent
+metadata. Split outputs count once per source recipe. Retries and older capture
+links do not inflate coverage. Local source uploads, private access and layout
+at 320, 375, 414, 768, 1440 and 1920 pixels passed browser checks. Full source
+capture, native inspection/adaptation and human admission remain pending.

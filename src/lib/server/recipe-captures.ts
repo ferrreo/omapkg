@@ -18,6 +18,19 @@ export type RecipeSummary = { files: number; bytes: number; executableFiles: str
 export type RecipeCaptureRow = { sha256: string; pkgbase: string; manifest_json: string; summary_json: string; created_by: string; created_at: number };
 export type RecipeComparison = { metadataPresent: boolean; matches: boolean; differences: string[]; capturedOutputs: string[] };
 
+export async function recipeCaptureCoverage(db: D1Database, importId: string) {
+  const row = await db.prepare(`SELECT COUNT(*) AS total,COUNT(l.capture_sha256) AS retained,
+      COALESCE(SUM(json_extract(l.comparison_json,'$.matches')=1),0) AS matching,
+      COALESCE(SUM(json_extract(l.comparison_json,'$.metadataPresent')=1 AND json_extract(l.comparison_json,'$.matches')=0),0) AS differing,
+      COALESCE(SUM(json_extract(l.comparison_json,'$.metadataPresent')=0),0) AS missingMetadata
+    FROM (SELECT DISTINCT source_id,pkgbase FROM catalog_import_entries WHERE import_id=?) e
+    LEFT JOIN recipe_capture_links l ON l.rowid=(SELECT latest.rowid FROM recipe_capture_links latest
+      WHERE latest.import_id=? AND latest.source_id=e.source_id AND latest.pkgbase=e.pkgbase
+      ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)`).bind(importId, importId)
+    .first<{ total: number; retained: number; matching: number; differing: number; missingMetadata: number }>();
+  return row!;
+}
+
 function describeRecipe(value: RecipeCapture, files: Map<string, Uint8Array>): RecipeSummary {
   const text = (path: string) => new TextDecoder('utf-8', { fatal: true }).decode(files.get(path));
   let metadata: Srcinfo | null = null, metadataError: string | null = null, omarchy: Record<string, unknown> | null = null;
