@@ -369,6 +369,18 @@ identities and do not grant production admission.
 Validation passed: 235 application tests with 1,510 assertions, 12 signer tests,
 Go tests and vet, ARM cross-compilation, Svelte checks with zero errors/warnings,
 pipeline TypeScript, production web build, and 40 native D1 queries at expression
-depth 100. Native ARM inspection remains to be run. Preserved recipe adaptation,
-source archive/VCS/language-cache preparation, full inventory qualification,
-ABI cohorts, release/client integration and cutover remain open.
+depth 100.
+
+[Native ARM run 34431242722](https://github.com/ferrreo/omapkg/actions/runs/34431242722)
+passed on exact code commit `14c228be7f0b7eaed005077ba98edb7a341a7e33` using
+`ubuntu-24.04-arm` and retained builder/runtime image digests. The new inspection
+fixture ran on aarch64 Linux `6.17.0-1022-azure`, Docker `28.0.4`, Go `1.22.12`;
+its native report signature independently verified. Existing native build,
+split-output and isolation regressions also passed. The dedicated pull-only
+registry credential was removed after the run; no images were republished.
+This verifies the inspection worker on ARM, not every imported recipe's ARM
+support or a production coordinator rollout.
+
+Preserved recipe adaptation, source archive/VCS/language-cache preparation,
+full inventory qualification, ABI cohorts, release/client integration and
+cutover remain open.
