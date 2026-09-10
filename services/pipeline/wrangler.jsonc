@@ -16,7 +16,8 @@
     "bindings": [{ "name": "Sandbox", "class_name": "Sandbox" }]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["FluePackageFactoryAgent", "Sandbox"] }
+    { "tag": "v1", "new_sqlite_classes": ["FluePackageFactoryAgent", "Sandbox"] },
+    { "tag": "v2", "new_sqlite_classes": ["FluePreservedRepairFactoryAgent"] }
   ],
   "containers": [],
   "services": [{ "binding": "SIGNER", "service": "omapkg-signer" }],
