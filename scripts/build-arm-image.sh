@@ -55,6 +55,13 @@ mkdir -p "$context"
 tar --extract --gzip --file "$archive" --directory "$context" \
   --no-xattrs --no-same-owner --no-same-permissions --delay-directory-restore
 
+# Build a fresh trust database; never inherit a rootfs-local master key.
+if [[ -d "$context/etc/pacman.d/gnupg" ]]; then
+  find "$context/etc/pacman.d/gnupg" -depth -type f -delete
+  find "$context/etc/pacman.d/gnupg" -depth -type l -delete
+  find "$context/etc/pacman.d/gnupg" -depth -type d -empty -delete
+fi
+
 cat > "$work_dir/provenance.txt" <<EOF
 source_url=$rootfs_url
 source_sha256=$rootfs_sha256

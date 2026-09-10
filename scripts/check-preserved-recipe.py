@@ -88,6 +88,7 @@ def capture(root, image, helper_analysis, preparation_runtime):
         command("podman", "save", "--format", "oci-archive", "--output", archive, alias)
     finally:
         command("podman", "untag", image, alias)
+    command("python3", PROJECT / "scripts/check-image-keyrings.py", archive)
     with tarfile.open(archive, "r:") as retained:
         index = json.load(retained.extractfile("index.json"))
     helper = alias + "@" + index["manifests"][0]["digest"]

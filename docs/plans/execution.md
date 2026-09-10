@@ -577,3 +577,41 @@ Validation: 237 application tests (1,675 assertions), 14 signer tests (117
 assertions), Go tests/vet, clean Svelte/pipeline/signer type checks, production
 web build, bootstrap parser self-check and native SQL depth checks. No production
 admission, input approval, build approval or release was created.
+
+### Native ARM preserved build and artifact containment
+
+Native ARM acceptance passed on `e86793bbe3f09cca8fb37d26255862da87be8152`:
+[run 34452478773](https://github.com/ferrreo/omapkg/actions/runs/34452478773).
+Original asdcontrol built at `1:0.6.0-2` with 163 signed ARM build inputs and
+117 separate runtime inputs. Bootstrap archives used the original XZ format;
+owned output remained Zstandard. Docker handled networked input capture and
+Podman 4.9.3 ran the offline build on aarch64 Linux `6.17.0-1022-azure`, Go 1.22.12.
+The artifact SHA-256 is
+`bad82cdfea0393edbe73405df1609f50de81876e394dc3addf0c31489ae2a0e9`.
+Local independent verification accepted both Ed25519 reports, original Git proof,
+source-plan equivalence, frozen evidence and the actual package archive.
+The old x86 build-root analysis path also passed again with its original archive
+hash `5eef999d986c4440bb48e15e923a7283751af8289d6eb2fa4eee8642775b3af8`.
+
+Artifact handling had a security error: this GitHub repository is public, and the
+new acceptance workflow uploaded its test captures as downloadable artifacts.
+Those included the retained private helper image. All seven generated capture
+artifacts were deleted and deletion verified; the successful capture was retained
+locally. Every temporary registry secret was deleted. Registry credentials were
+stored outside the capture directories. No distribution release was activated.
+The workflow now fails before capture in a public repository.
+
+Layer inspection found one image-local pacman private key in helper
+`sha256:f640f189a7cb91a3a1f0f5e654ff7ecd3c854e092589178c26b5304c8d18d440`.
+Treat that key as exposed; deletion cannot undo prior downloads. Read-only
+production checks found the helper enabled/default as `arm-runtime-20260909`,
+with no queued or leased builds using it at that check. Production disabling was
+submitted to the user for authorization; it has not been performed at this
+checkpoint. OPR's package-signing key is held separately from helper images.
+
+ARM image construction now starts with a fresh package-manager keyring and removes
+private/revocation material before committing its build layer. A layer-level
+runnable check rejects retained private key material, including the exposed
+helper. Both image publication and preserved acceptance run that check. A freshly
+built replacement and production image rotation remain required. This acceptance
+is component evidence, not production admission or full-catalog qualification.

@@ -9,7 +9,8 @@ RUN pacman-key --init && pacman-key --populate archlinuxarm \
     && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls\nDisableSandboxFilesystem' /tmp/opr-pacman.conf \
     && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
       base-devel arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools namcap curl xz \
-    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm && rm /tmp/opr-pacman.conf
+    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm && rm /tmp/opr-pacman.conf \
+    && rm -rf /etc/pacman.d/gnupg/openpgp-revocs.d /etc/pacman.d/gnupg/private-keys-v1.d
 
 # Arch Linux ARM does not package ShellCheck. Pin the official static ARM release.
 ADD --checksum=sha256:12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.aarch64.tar.xz /tmp/shellcheck.tar.xz

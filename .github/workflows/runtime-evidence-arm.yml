@@ -62,6 +62,11 @@ jobs:
           scripts/build-arm-image.sh
           docker build -t "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG" \
             -f worker/images/aarch64/runtime.Dockerfile "$OPR_ARM_WORKDIR/context"
+          for image in "$REGISTRY_NAMESPACE/omarpkg-arch-builder:$IMAGE_TAG" "$REGISTRY_NAMESPACE/omarpkg-arch-runtime:$IMAGE_TAG"; do
+            docker save -o "$RUNNER_TEMP/image-keyring-check.tar" "$image"
+            python3 scripts/check-image-keyrings.py "$RUNNER_TEMP/image-keyring-check.tar"
+            rm "$RUNNER_TEMP/image-keyring-check.tar"
+          done
       - name: Push images with temporary rollout credential
         if: ${{ !inputs.preserved_recipe && inputs.builder_image == '' && inputs.runtime_image == '' }}
         shell: bash
