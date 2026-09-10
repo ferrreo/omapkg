@@ -1,5 +1,5 @@
 import { canonicalJson } from '../canonical-json';
-import type { CohortBlocker, CohortManifest, CohortRow } from '../cohorts';
+import { cohortGatePageSize, cohortMemberCount, type CohortBlocker, type CohortRow } from '../cohorts';
 import { cohortPhases, requiredArchitectures, type CohortPhase } from '../distribution';
 import type { Architecture, Build, Revision } from '../model';
 import { assertExplicitReview } from '../../../services/pipeline/recipe-policy';
@@ -16,6 +16,7 @@ import { getBuildForWorker } from './worker-protocol';
 import type { Worker } from '../model';
 import type { FrozenEvidence } from '../frozen-inputs';
 import { selectedInputLock } from './input-locks';
+import { cohortMembers, readCohortManifest } from './cohort-members';
 
 export interface CohortMatrixRow {
   pkgbase: string; architecture: Architecture; required: boolean; status: string;
@@ -30,14 +31,18 @@ async function reviewAuthority(env: Env, actorId: string, kind: string, area: st
   if (kind === 'security') requireSecurity(actor);
 }
 
-export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArtifacts = true): Promise<CohortGate> {
-  const manifest: CohortManifest = JSON.parse(current.manifest_json);
+export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArtifacts = true, page?: number): Promise<CohortGate> {
+  const manifest = await readCohortManifest(current);
+  const pageSize = cohortGatePageSize(current.phase);
+  if (page !== undefined && (!Number.isSafeInteger(page) || page < 0 || page * pageSize >= cohortMemberCount(manifest))) throw new PolicyError(400, 'Choose an existing cohort member page.');
+  if (manifest.schemaVersion === 2 && page === undefined) throw new PolicyError(400, 'Check each member page before advancing this complete cohort.');
+  const members = manifest.schemaVersion === 1 && page === undefined ? manifest.members : await cohortMembers(env.DB, current, (page ?? 0) * pageSize, pageSize);
   const gate: CohortGate = { next: cohortPhases[cohortPhases.indexOf(current.phase) + 1] ?? null, blockers: [], matrix: [], fences: [] };
   const block = (code: string, reason: string, pkgbase: string | null = null, architecture: Architecture | null = null, href: string | null = null) => {
     gate.blockers.push({ code, reason, pkgbase, architecture, href });
   };
   const phaseIndex = cohortPhases.indexOf(current.phase);
-  for (const member of manifest.members) {
+  for (const member of members) {
     const catalogLink = `/maintain/catalog/${encodeURIComponent(member.pkgbase)}`;
     const policy = await env.DB.prepare('SELECT current_revision,admitted_revision FROM catalog_packages WHERE pkgbase=?')
       .bind(member.pkgbase).first<{ current_revision: number; admitted_revision: number | null }>();
@@ -164,7 +169,8 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
   if (phaseIndex >= 3) {
     const kinds = phaseIndex === 3 ? ['dependency-closure', 'abi', 'reproducibility']
       : ['dependency-closure', 'abi', 'reproducibility', 'install', 'upgrade', 'recovery', ...(manifest.lane === 'system' ? ['boot'] : [])];
-    for (const architecture of requiredArchitectures.filter((target) => manifest.members.some((member) => member.policy.architectures.includes(target)))) {
+    const targets = manifest.schemaVersion === 2 ? manifest.architectures : requiredArchitectures.filter((target) => manifest.members.some((member) => member.policy.architectures.includes(target)));
+    for (const architecture of targets) {
       for (const kind of kinds) block(`check-${kind}`, `Verified ${kind} evidence bound to this candidate is required.`, null, architecture);
     }
     if (manifest.lane === 'opr' && !manifest.compatibleSystems.length) block('supported-systems', 'Choose exact supported system snapshots for the independent OPR cohort.');

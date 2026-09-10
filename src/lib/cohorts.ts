@@ -13,15 +13,27 @@ export interface CohortMember {
   cause: CohortCause;
   reason: string;
 }
-export interface CohortManifest {
-  schemaVersion: 1;
+export interface CohortMetadata {
   title: string;
   lane: ReleaseLane;
   systemVersion: string | null;
   parentSnapshot: string | null;
   compatibleSystems: string[];
-  members: CohortMember[];
 }
+export interface CohortInlineManifest extends CohortMetadata { schemaVersion: 1; members: CohortMember[] }
+export interface CohortMemberChunk { index: number; start: number; count: number; first: string; last: string; sha256: string }
+export interface CohortChunkedManifest extends CohortMetadata {
+  schemaVersion: 2;
+  memberCount: number;
+  ownerAreas: string[];
+  architectures: Architecture[];
+  memberChunks: CohortMemberChunk[];
+}
+export type CohortManifest = CohortInlineManifest | CohortChunkedManifest;
+export const cohortPageSize = 25;
+export const cohortGatePageSize = (phase: CohortPhase) => phase === 'plan' || phase === 'review' ? cohortPageSize : 1;
+export const cohortMemberCount = (manifest: CohortManifest) => manifest.schemaVersion === 1 ? manifest.members.length : manifest.memberCount;
+export const cohortOwnerAreas = (manifest: CohortManifest) => manifest.schemaVersion === 1 ? [...new Set(manifest.members.map((member) => member.policy.ownerArea))].sort() : manifest.ownerAreas;
 export interface CohortEvent {
   schemaVersion: 1;
   cohortId: string;

@@ -4,10 +4,17 @@ import { canonicalJson } from '../src/lib/canonical-json';
 import type { CatalogManifest } from '../src/lib/distribution';
 import type { Revision, Worker } from '../src/lib/model';
 import { approveCatalogPackage, proposeCatalogPackage } from '../src/lib/server/catalog-ownership';
-import { approveCohortChangelog, generateCohortFacts, saveCohortChangelog } from '../src/lib/server/cohort-changelogs';
+import { approveCohortChangelog, cohortChangePage, cohortChangeStream, generateCohortFacts, saveCohortChangelog } from '../src/lib/server/cohort-changelogs';
 import { evaluateCohortGate } from '../src/lib/server/cohort-gates';
 import { changeCohortPhase } from '../src/lib/server/cohort-phases';
-import { getCohort, proposeCohort, releaseAuthority, type CohortScopeInput } from '../src/lib/server/cohorts';
+import { getCohort, listCohorts, proposeCohort, releaseAuthority, type CohortScopeInput } from '../src/lib/server/cohorts';
+import { appendCohortScope, beginCohortScope, sealCohortScope } from '../src/lib/server/cohort-scope-uploads';
+import { aggregateCohortGate, checkCohortPage, cohortEventPageProofs, currentCohortPage } from '../src/lib/server/cohort-gate-pages';
+import { cohortMembers, cohortRecipeMember } from '../src/lib/server/cohort-members';
+import { cohortOutputContract } from '../src/lib/server/build-outputs';
+import { GET as getScopeApi, POST as postScopeApi } from '../src/routes/api/maintain/cohorts/+server';
+import { GET as exportChangelog } from '../src/routes/maintain/cohorts/[id]/changelog/+server';
+import { GET as exportScope } from '../src/routes/maintain/cohorts/[id]/scope/+server';
 import { sha256 } from '../src/lib/server/db';
 import { manifestDigest } from '../src/lib/server/policy';
 import { claimJob } from '../src/lib/server/workers';
@@ -88,6 +95,7 @@ test('cohort phases derive admission and native gates; history and reviewed narr
     expect(revision2.current_revision).toBe(2); expect(revision2.phase).toBe('plan');
     const diff = await generateCohortFacts(d1, revision2);
     expect(diff.baseline.revision).toBe(1);
+    if (diff.schemaVersion !== 1) throw new Error('Expected inline cohort diff.');
     expect(diff.changes.find((item) => item.pkgbase === 'consumer')?.kind).toBe('added');
     expect(diff.changes.find((item) => item.pkgbase === 'example')?.kind).toBe('unchanged');
     await expect(proposeCohort(d1, owner, current.id, 1, scope(), 'Stale removal.')).rejects.toThrow('changed');
@@ -95,6 +103,120 @@ test('cohort phases derive admission and native gates; history and reviewed narr
     expect(() => db.exec('DELETE FROM cohort_revisions')).toThrow('immutable');
     expect(() => db.exec("UPDATE cohort_changelogs SET document_json='{}'")).toThrow('immutable');
     expect(db.prepare('PRAGMA foreign_key_check').all().results).toEqual([]);
+  } finally { db.close(); }
+});
+
+test('12,000-member scope seals atomically, streams complete changes and advances only after every current page passes', async () => {
+  const db = database(); const d1 = asD1(db); const service = env(db);
+  try {
+    const count = 12000;
+    const name = (index: number) => `package-${String(index).padStart(5, '0')}`;
+    for (let index = 0; index < count; index++) await admit(db, name(index));
+    const bound = await recipe(db, name(count - 1));
+    const { members: _, ...metadata } = scope();
+    const upload = await beginCohortScope(d1, owner, 'complete-toolchain', null, metadata, count, 'toolchain-proposal');
+    const chunk = (offset: number) => Array.from({ length: Math.min(100, count - offset) }, (_, index) => scope(name(offset + index), offset + index === count - 1 ? bound.id : null).members[0]);
+    await appendCohortScope(d1, owner, upload.id, 0, chunk(0));
+    expect((await appendCohortScope(d1, owner, upload.id, 0, chunk(0))).member_count).toBe(100);
+    await expect(sealCohortScope(d1, owner, upload.id, 'Select complete toolchain transition.')).rejects.toThrow('every declared');
+    expect(db.prepare("SELECT 1 FROM cohorts WHERE id='complete-toolchain'").first()).toBeNull();
+    await expect(appendCohortScope(d1, security, upload.id, 1, chunk(100))).rejects.toThrow('own account');
+    await expect(appendCohortScope(d1, owner, upload.id, 2, chunk(100))).rejects.toThrow('next chunk');
+    for (let offset = 100; offset < count; offset += 100) await appendCohortScope(d1, owner, upload.id, offset / 100, chunk(offset));
+    const sealed = await sealCohortScope(d1, owner, upload.id, 'Select complete toolchain transition.');
+    expect(await sealCohortScope(d1, owner, upload.id, 'Retry complete scope.')).toEqual(sealed);
+    const current = await getCohort(d1, 'complete-toolchain');
+    const manifest = JSON.parse(current.manifest_json);
+    expect(manifest.memberCount).toBe(count); expect(manifest.memberChunks).toHaveLength(120); expect(current.manifest_json.length).toBeLessThan(32000);
+    expect((await listCohorts(d1, {}))[0].member_count).toBe(count);
+    expect((await cohortMembers(d1, current, count - 25)).map((member) => member.pkgbase)).toEqual(Array.from({ length: 25 }, (_, index) => name(count - 25 + index)));
+    expect((await cohortRecipeMember(d1, current, bound.id))?.pkgbase).toBe(name(count - 1));
+    expect((await cohortOutputContract(d1, { ...bound, pkgrel: bound.pkgrel ?? 1 }, 'aarch64'))?.cohort.manifestSha256).toBe(current.manifest_sha256);
+    const nativePage = await evaluateCohortGate(service, { ...current, phase: 'build' }, true, 125);
+    expect(nativePage.matrix).toHaveLength(2); expect(new Set(nativePage.matrix.map((row) => row.pkgbase))).toEqual(new Set([name(125)]));
+    const facts = await generateCohortFacts(d1, current);
+    expect(facts.schemaVersion).toBe(2); expect(facts.changes).toMatchObject({ count, manifestSha256: current.manifest_sha256 });
+    expect((await cohortChangePage(d1, current)).next).toBe(name(24));
+    let streamed = 0;
+    for await (const change of cohortChangeStream(d1, current)) { expect(change.pkgbase).toBe(name(streamed)); streamed++; }
+    expect(streamed).toBe(count);
+    expect((await aggregateCohortGate(d1, current)).blockers[0].code).toBe('cohort-pages');
+    await expect(changeCohortPhase(service, owner, current.id, phaseInput(current, 'advance'))).rejects.toThrow('every page');
+    for (let page = 0; page < count / 25; page++) expect((await checkCohortPage(service, owner, current.id, 1, current.manifest_sha256, page)).blockers).toEqual([]);
+    const gate = await aggregateCohortGate(d1, current);
+    expect(gate.blockers).toEqual([]); expect(gate.pages.checked).toBe(count);
+    expect((await currentCohortPage(d1, current, 0))?.report.memberCount).toBe(25);
+    await admit(db, 'independent-job');
+    const independentRecipe = await recipe(db, 'independent-job');
+    await proposeCohort(d1, owner, 'independent-job', null, scope('independent-job', independentRecipe.id), 'Independent build activity.');
+    db.prepare("INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES('independent-build',?,'x86_64','queued',1)").bind(independentRecipe.id).run();
+    expect((await aggregateCohortGate(d1, current)).pages.checked).toBe(count);
+    await changeCohortPhase(service, owner, current.id, phaseInput(current, 'advance'));
+    expect((await getCohort(d1, current.id)).phase).toBe('review');
+    const proof = await cohortEventPageProofs(d1, current.id, 2);
+    expect(proof.refs).toHaveLength(count / 25);
+    expect(await sha256('cohort-page-proofs-v1\n' + proof.refs.map((ref) => canonicalJson(ref) + '\n').join(''))).toBe(proof.selection.reportsSha256);
+    await expect(checkCohortPage(service, owner, current.id, 1, current.manifest_sha256, 0, 'plan')).rejects.toThrow('phase');
+    db.exec("DELETE FROM team_memberships WHERE github_id='1'");
+    expect(() => db.batch(gate.fences as never)).toThrow();
+    expect((await aggregateCohortGate(d1, current)).pages.checked).toBe(0);
+    expect((await cohortEventPageProofs(d1, current.id, 2)).selection).toEqual(proof.selection);
+    expect(() => db.exec("DELETE FROM cohort_revision_chunks")).toThrow('immutable');
+    expect(() => db.exec("DELETE FROM cohort_gate_pages")).toThrow('immutable');
+    expect(db.prepare('SELECT COUNT(*) AS count FROM distribution_assertions').first<{ count: number }>()?.count).toBe(0);
+    expect(() => db.exec('INSERT INTO distribution_assertions(expected,actual) VALUES(1,0)')).toThrow();
+    db.exec('INSERT INTO distribution_assertions(expected,actual) VALUES(1,1)');
+    expect(db.prepare('SELECT changes() AS count').first<{ count: number }>()?.count).toBe(1);
+    expect(db.prepare('PRAGMA foreign_key_check').all().results).toEqual([]);
+  } finally { db.close(); }
+}, 60000);
+
+test('chunked scope API keeps identities private, rejects stale seals and exports exact historical changes across storage versions', async () => {
+  const db = database(); const d1 = asD1(db); const service = env(db);
+  try {
+    const call = (path: string, actor = owner, body?: unknown) => ({ platform: { env: service }, locals: { actor }, params: { id: 'paged-edit' },
+      url: new URL(`https://omapkg.example${path}`), request: new Request(`https://omapkg.example${path}`, body === undefined ? {} : {
+        method: 'POST', headers: { Origin: 'https://omapkg.example', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      }) }) as never;
+    expect((await getScopeApi(call('/api/maintain/cohorts', null as never))).status).toBe(401);
+    expect((await postScopeApi(call('/api/maintain/cohorts', null as never, { operation: 'begin' }))).status).toBe(401);
+    expect((await postScopeApi(call('/api/maintain/cohorts', owner, { operation: 'begin' }))).status).toBe(400);
+    await admit(db); await admit(db, 'consumer');
+    const first = await proposeCohort(d1, owner, 'paged-edit', null, scope(), 'Initial scope.');
+    const { members: _, ...metadata } = scope();
+    const request = { operation: 'begin', cohortId: first.id, expectedRevision: 1, metadata, memberCount: 1, proposalId: 'replace-example' };
+    const begun = await postScopeApi(call('/api/maintain/cohorts', owner, request)); expect(begun.status).toBe(200);
+    const upload = await begun.json() as { id: string };
+    expect((await postScopeApi(call('/api/maintain/cohorts', owner, { operation: 'append', uploadId: upload.id, index: 0, members: scope('consumer').members }))).status).toBe(200);
+    expect((await getCohort(d1, first.id)).current_revision).toBe(1);
+    expect((await postScopeApi(call('/api/maintain/cohorts', owner, { operation: 'seal', uploadId: upload.id, reason: 'Replace affected package.' }))).status).toBe(200);
+    const second = await getCohort(d1, first.id); const facts = await generateCohortFacts(d1, second);
+    expect(facts.schemaVersion).toBe(2); expect(facts.changes).toMatchObject({ count: 2 });
+    expect((await cohortChangePage(d1, second)).changes.map((change) => [change.pkgbase, change.kind])).toEqual([['consumer', 'added'], ['example', 'removed']]);
+    const document = await saveCohortChangelog(d1, owner, first.id, 2, await sha256(canonicalJson(facts)), 'Replace example with consumer.');
+    await approveCohortChangelog(d1, owner, first.id, 2, document.digest, 'Reviewed both addition and removal.');
+    const beforeRetry = await getCohort(d1, first.id);
+    const identical = await beginCohortScope(d1, owner, first.id, 2, metadata, 1, 'same-selected-scope');
+    await appendCohortScope(d1, owner, identical.id, 0, scope('consumer').members);
+    expect((await sealCohortScope(d1, owner, identical.id, 'Repeated scope upload.')).unchanged).toBe(true);
+    expect((await getCohort(d1, first.id)).event_sequence).toBe(beforeRetry.event_sequence);
+    const scopeDownload = await exportScope(call(`/maintain/cohorts/paged-edit/scope?digest=${second.manifest_sha256}`));
+    expect((await scopeDownload.json() as CohortScopeInput).members).toEqual(scope('consumer').members);
+    const third = await proposeCohort(d1, owner, first.id, 2, scope(), 'Return to initial scope.');
+    expect((await generateCohortFacts(d1, third)).schemaVersion).toBe(2);
+    expect((await getScopeApi(call(`/api/maintain/cohorts?cohortId=${first.id}&manifestSha256=${second.manifest_sha256}`))).status).toBe(409);
+    const oldChanges = await exportChangelog(call(`/maintain/cohorts/paged-edit/changelog?digest=${document.digest}&format=changes`));
+    expect((await oldChanges.json() as { changes: { pkgbase: string; kind: string }[] }).changes.map((change) => [change.pkgbase, change.kind]))
+      .toEqual([['consumer', 'added'], ['example', 'removed']]);
+    const markdown = await (await exportChangelog(call(`/maintain/cohorts/paged-edit/changelog?digest=${document.digest}&format=markdown`))).text();
+    expect(markdown).toContain('| consumer | added |'); expect(markdown).toContain('| example | removed |');
+    const stale = await beginCohortScope(d1, owner, first.id, 3, metadata, 1, 'stale-catalog-policy');
+    await appendCohortScope(d1, owner, stale.id, 0, scope().members);
+    await proposeCatalogPackage(d1, owner, { ...catalog(), description: 'Changed after scope upload.' }, 1, 'Update catalog identity.');
+    await expect(sealCohortScope(d1, owner, stale.id, 'Attempt stale scope.')).rejects.toMatchObject({ status: 409 });
+    expect((await getCohort(d1, first.id)).current_revision).toBe(3);
+    expect(db.prepare('SELECT sealed_revision FROM cohort_scope_uploads WHERE id=?').bind(stale.id).first<{ sealed_revision: number | null }>()?.sealed_revision).toBeNull();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM cohort_revisions WHERE cohort_id=?').bind(first.id).first<{ count: number }>()?.count).toBe(3);
   } finally { db.close(); }
 });
 

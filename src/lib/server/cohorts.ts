@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 import { canonicalJson } from '../canonical-json';
-import { cohortCauses, type CohortEvent, type CohortManifest, type CohortMember, type CohortRow } from '../cohorts';
+import { cohortCauses, cohortOwnerAreas, type CohortEvent, type CohortInlineManifest, type CohortManifest, type CohortMember, type CohortMetadata, type CohortRow } from '../cohorts';
 import { parseSystemVersion } from '../distribution';
 import type { Actor, Revision } from '../model';
 import { getCatalogPackage, humanMaintainer, parseCatalogManifest, reviewReason } from './catalog-ownership';
@@ -12,12 +12,13 @@ const digest = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/));
 const identifier = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/));
 const name = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9@._+-]{0,63}$/));
 const text = v.pipe(v.string(), v.trim(), v.minLength(1), v.maxLength(2000), v.regex(/^[^\x00-\x1f\x7f]+$/));
-// ponytail: a single edit is limited to 512 members; chunked scope import is
-// required for larger toolchain transitions, never silently truncate a cohort.
-const scopeSchema = v.strictObject({
+const metadataSchema = v.strictObject({
   title: v.pipe(text, v.maxLength(160)), lane: v.picklist(['system', 'opr']),
   systemVersion: v.nullable(v.string()), parentSnapshot: v.nullable(digest),
   compatibleSystems: v.pipe(v.array(digest), v.maxLength(32)),
+});
+const scopeSchema = v.strictObject({
+  ...metadataSchema.entries,
   members: v.pipe(v.array(v.strictObject({
     pkgbase: name, catalogRevision: v.pipe(v.number(), v.integer(), v.minValue(1)),
     recipeRevisionId: v.nullable(identifier), cause: v.picklist(cohortCauses), reason: text,
@@ -36,8 +37,14 @@ export async function getCohort(db: D1Database, cohortId: string): Promise<Cohor
 
 export function scopeAuthority(actor: Actor | null, manifest: CohortManifest): Actor {
   const reviewer = humanMaintainer(actor);
-  for (const member of manifest.members) humanMaintainer(reviewer, member.policy.ownerArea);
+  for (const area of cohortOwnerAreas(manifest)) humanMaintainer(reviewer, area);
   return reviewer;
+}
+
+export function scopeAuthorityFence(db: D1Database, actor: Actor, areas: string[]) {
+  return db.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 0,COUNT(*) FROM json_each(?) area
+    WHERE NOT EXISTS(SELECT 1 FROM team_memberships WHERE github_id=? AND (team IN ('admin','security') OR team=area.value))`)
+    .bind(canonicalJson(areas), actor.id.slice(7));
 }
 
 export async function releaseAuthority(db: D1Database, actor: Actor | null): Promise<Actor> {
@@ -48,19 +55,27 @@ export async function releaseAuthority(db: D1Database, actor: Actor | null): Pro
   return reviewer;
 }
 
-export async function cohortManifest(db: D1Database, actor: Actor | null, input: unknown): Promise<CohortManifest> {
-  humanMaintainer(actor);
-  const parsed = v.safeParse(scopeSchema, input);
-  if (!parsed.success) throw new PolicyError(400, 'Check cohort title, lane, pinned snapshots and enumerated members (1–512).');
+export function parseCohortMetadata(input: unknown): CohortMetadata {
+  const parsed = v.safeParse(metadataSchema, input);
+  if (!parsed.success) throw new PolicyError(400, 'Check cohort title, lane and pinned snapshots.');
   const value = parsed.output;
   if (value.lane === 'system' ? !value.systemVersion || !parseSystemVersion(value.systemVersion) : value.systemVersion !== null) {
     throw new PolicyError(400, 'System cohorts need an Omarchy version such as 4.0.3-rc2; OPR cohorts use package versions.');
   }
   if (value.lane === 'system' && value.compatibleSystems.length) throw new PolicyError(400, 'Only independent OPR cohorts select supported system snapshots.');
-  if (new Set(value.members.map((member) => member.pkgbase)).size !== value.members.length ||
-      new Set(value.compatibleSystems).size !== value.compatibleSystems.length) throw new PolicyError(400, 'Cohort members and supported snapshots cannot repeat.');
+  if (new Set(value.compatibleSystems).size !== value.compatibleSystems.length) throw new PolicyError(400, 'Supported snapshots cannot repeat.');
+  return { ...value, compatibleSystems: value.compatibleSystems.sort() };
+}
+
+export async function cohortManifest(db: D1Database, actor: Actor | null, input: unknown): Promise<CohortInlineManifest> {
+  humanMaintainer(actor);
+  const parsed = v.safeParse(scopeSchema, input);
+  if (!parsed.success) throw new PolicyError(400, 'Check cohort title, lane, pinned snapshots and enumerated members (1–512). Use chunked scope uploads for larger cohorts.');
+  const { members: requested, ...metadata } = parsed.output;
+  const value = { ...parseCohortMetadata(metadata), members: requested };
+  if (new Set(value.members.map((member) => member.pkgbase)).size !== value.members.length) throw new PolicyError(400, 'Cohort members cannot repeat.');
   const members: CohortMember[] = [];
-  for (const member of value.members.sort((a, b) => a.pkgbase.localeCompare(b.pkgbase))) {
+  for (const member of value.members.sort((a, b) => a.pkgbase < b.pkgbase ? -1 : a.pkgbase > b.pkgbase ? 1 : 0)) {
     const record = await getCatalogPackage(db, member.pkgbase);
     if (!record || record.revision !== member.catalogRevision) throw new PolicyError(409, `${member.pkgbase}: select the current catalog policy revision.`);
     const policy = parseCatalogManifest(JSON.parse(record.manifest_json));
@@ -166,7 +181,7 @@ export async function listCohorts(db: D1Database, input: { search?: string; lane
   if (input.phase) { filters.push('c.phase=?'); values.push(input.phase); }
   if (input.search) { filters.push("r.title LIKE ? ESCAPE '\\'"); values.push(`%${input.search.slice(0,100).replace(/[\\%_]/g, '\\$&')}%`); }
   return query<CohortRow & { member_count: number }>(db, `SELECT c.*,r.title,r.lane,r.manifest_sha256,
-    json_array_length(r.manifest_json,'$.members') AS member_count FROM cohorts c
+    COALESCE(json_array_length(r.manifest_json,'$.members'),json_extract(r.manifest_json,'$.memberCount')) AS member_count FROM cohorts c
     JOIN cohort_revisions r ON r.cohort_id=c.id AND r.revision=c.current_revision WHERE ${filters.join(' AND ')} ORDER BY c.id LIMIT 50`, ...values);
 }
 

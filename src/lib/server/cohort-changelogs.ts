@@ -4,8 +4,9 @@ import { cohortPhaseLabels } from '../distribution';
 import type { Actor } from '../model';
 import { reviewReason } from './catalog-ownership';
 import { cohortConflict, cohortEventStatements, cohortEvents, getCohort, scopeAuthority } from './cohorts';
-import { now, sha256 } from './db';
+import { now, query, sha256 } from './db';
 import { PolicyError } from './policy';
+import { cohortMemberStream, namedCohortMembers, readCohortManifest, type CohortScopeRecord } from './cohort-members';
 
 export interface CohortChange {
   pkgbase: string; kind: 'added' | 'removed' | 'changed' | 'unchanged';
@@ -14,32 +15,77 @@ export interface CohortChange {
   oldRecipeSha256: string | null; newRecipeSha256: string | null;
   architectures: string[]; cause: string; reason: string;
 }
-export interface CohortFacts {
-  schemaVersion: 1; cohortId: string; revision: number; manifestSha256: string;
+interface CohortFactMetadata {
+  cohortId: string; revision: number; manifestSha256: string;
   title: string; lane: 'system' | 'opr'; systemVersion: string | null;
   baseline: { kind: 'previous-cohort-revision' | 'initial-plan'; revision: number | null; manifestSha256: string | null; parentSnapshot: string | null };
   state: 'planned' | 'built' | 'published';
-  changes: CohortChange[];
-  phases: Array<CohortEvent & { eventSha256: string }>;
+  phases: Array<Pick<CohortEvent, 'sequence' | 'revision' | 'kind' | 'from' | 'phase' | 'condition' | 'actor' | 'timestamp' | 'cause'> & { eventSha256: string }>;
+}
+export type CohortFacts = CohortFactMetadata & ({ schemaVersion: 1; changes: CohortChange[] } | {
+  schemaVersion: 2; changes: { algorithm: 'cohort-member-diff-v1'; count: number; manifestSha256: string; previousManifestSha256: string | null };
+});
+
+export async function previousCohortScope(db: D1Database, current: CohortScopeRecord): Promise<CohortScopeRecord | null> {
+  if (current.current_revision === 1) return null;
+  const previous = await db.prepare('SELECT cohort_id AS id,revision AS current_revision,manifest_json,manifest_sha256 FROM cohort_revisions WHERE cohort_id=? AND revision=?')
+    .bind(current.id, current.current_revision - 1).first<CohortScopeRecord>();
+  if (!previous) throw new PolicyError(409, 'Previous cohort revision is missing.');
+  await readCohortManifest(previous);
+  return previous;
+}
+
+function memberChange(pkgbase: string, before: CohortMember | undefined, after: CohortMember | undefined): CohortChange {
+  const member = after ?? before!;
+  return { pkgbase, kind: !before ? 'added' : !after ? 'removed' : canonicalJson(before) === canonicalJson(after) ? 'unchanged' : 'changed',
+    oldVersion: before?.recipe?.fullVersion ?? null, newVersion: after?.recipe?.fullVersion ?? null,
+    oldRepository: before?.policy.collection ?? null, newRepository: after?.policy.collection ?? null,
+    oldRecipeSha256: before?.recipe?.manifestSha256 ?? null, newRecipeSha256: after?.recipe?.manifestSha256 ?? null,
+    architectures: [...new Set([...(before?.policy.architectures ?? []), ...(after?.policy.architectures ?? [])])].sort(),
+    cause: member.cause, reason: member.reason };
+}
+
+export async function cohortChangePage(db: D1Database, current: CohortScopeRecord, after = '') {
+  if (after && !/^[a-z0-9][a-z0-9@._+-]{0,63}$/.test(after)) throw new PolicyError(400, 'Invalid package change cursor.');
+  const previous = await previousCohortScope(db, current);
+  const rows = await query<{ pkgbase: string }>(db, `SELECT DISTINCT pkgbase FROM cohort_members WHERE cohort_id=? AND revision IN (?,?) AND pkgbase>? ORDER BY pkgbase LIMIT 26`,
+    current.id, current.current_revision, previous?.current_revision ?? 0, after);
+  const names = rows.slice(0, 25).map((row) => row.pkgbase);
+  const oldByName = new Map((previous ? await namedCohortMembers(db, previous, names) : []).map((member) => [member.pkgbase, member]));
+  const newByName = new Map((await namedCohortMembers(db, current, names)).map((member) => [member.pkgbase, member]));
+  const changes = names.map((name) => {
+    if (!oldByName.has(name) && !newByName.has(name)) throw new PolicyError(409, 'Cohort change index integrity check failed.');
+    return memberChange(name, oldByName.get(name), newByName.get(name));
+  });
+  return { changes, next: rows.length > 25 ? names.at(-1)! : null };
+}
+
+export async function* cohortChangeStream(db: D1Database, current: CohortScopeRecord): AsyncGenerator<CohortChange> {
+  const previous = await previousCohortScope(db, current);
+  const oldMembers = previous ? cohortMemberStream(db, previous) : null;
+  const newMembers = cohortMemberStream(db, current);
+  let before = await oldMembers?.next(); let after = await newMembers.next();
+  while (before && !before.done || !after.done) {
+    const old = before && !before.done ? before.value : undefined;
+    const value = !after.done ? after.value : undefined;
+    const name = !old ? value!.pkgbase : !value ? old.pkgbase : old.pkgbase < value.pkgbase ? old.pkgbase : value.pkgbase;
+    yield memberChange(name, old?.pkgbase === name ? old : undefined, value?.pkgbase === name ? value : undefined);
+    if (old?.pkgbase === name) before = await oldMembers!.next();
+    if (value?.pkgbase === name) after = await newMembers.next();
+  }
 }
 
 export async function generateCohortFacts(db: D1Database, current: CohortRow): Promise<CohortFacts> {
-  const manifest: CohortManifest = JSON.parse(current.manifest_json);
-  const previous = current.current_revision > 1 ? await db.prepare('SELECT manifest_json,manifest_sha256 FROM cohort_revisions WHERE cohort_id=? AND revision=?')
-    .bind(current.id, current.current_revision - 1).first<{ manifest_json: string; manifest_sha256: string }>() : null;
-  if (previous && await sha256(previous.manifest_json) !== previous.manifest_sha256) throw new PolicyError(409, 'Previous cohort manifest integrity check failed.');
-  const oldMembers: CohortMember[] = previous ? (JSON.parse(previous.manifest_json) as CohortManifest).members : [];
-  const oldByName = new Map(oldMembers.map((member) => [member.pkgbase, member]));
-  const newByName = new Map(manifest.members.map((member) => [member.pkgbase, member]));
-  const changes = [...new Set([...oldByName.keys(), ...newByName.keys()])].sort().map((pkgbase): CohortChange => {
-    const before = oldByName.get(pkgbase); const after = newByName.get(pkgbase); const member = after ?? before!;
-    return { pkgbase, kind: !before ? 'added' : !after ? 'removed' : canonicalJson(before) === canonicalJson(after) ? 'unchanged' : 'changed',
-      oldVersion: before?.recipe?.fullVersion ?? null, newVersion: after?.recipe?.fullVersion ?? null,
-      oldRepository: before?.policy.collection ?? null, newRepository: after?.policy.collection ?? null,
-      oldRecipeSha256: before?.recipe?.manifestSha256 ?? null, newRecipeSha256: after?.recipe?.manifestSha256 ?? null,
-      architectures: [...new Set([...(before?.policy.architectures ?? []), ...(after?.policy.architectures ?? [])])].sort(),
-      cause: member.cause, reason: member.reason };
-  });
+  const manifest = await readCohortManifest(current);
+  const previous = await previousCohortScope(db, current);
+  const oldManifest: CohortManifest | null = previous ? await readCohortManifest(previous) : null;
+  const paged = manifest.schemaVersion === 2 || oldManifest?.schemaVersion === 2;
+  const changes: CohortChange[] = [];
+  if (!paged) {
+    const oldByName = new Map((oldManifest?.schemaVersion === 1 ? oldManifest.members : []).map((member) => [member.pkgbase, member]));
+    const newByName = new Map((manifest.schemaVersion === 1 ? manifest.members : []).map((member) => [member.pkgbase, member]));
+    for (const name of [...new Set([...oldByName.keys(), ...newByName.keys()])].sort()) changes.push(memberChange(name, oldByName.get(name), newByName.get(name)));
+  }
   const phases: CohortFacts['phases'] = [];
   let sequence = 0; let previousEvent: string | null = null;
   while (sequence < current.event_sequence) {
@@ -52,36 +98,50 @@ export async function generateCohortFacts(db: D1Database, current: CohortRow): P
           event.previousEventSha256 !== previousEvent || await sha256(row.event_json) !== row.event_sha256) {
         throw new PolicyError(409, 'Cohort phase history integrity check failed.');
       }
-      if (event.revision === current.current_revision && !['changelog', 'changelog-review'].includes(event.kind)) phases.push({ ...event, eventSha256: row.event_sha256 });
+      if (event.revision === current.current_revision && !['changelog', 'changelog-review'].includes(event.kind)) phases.push(paged ? {
+        sequence: event.sequence, revision: event.revision, kind: event.kind, from: event.from, phase: event.phase, condition: event.condition,
+        actor: event.actor, timestamp: event.timestamp, cause: event.cause, eventSha256: row.event_sha256,
+      } : { ...event, eventSha256: row.event_sha256 });
       sequence = row.sequence; previousEvent = row.event_sha256;
     }
   }
   if (previousEvent !== current.event_sha256) throw new PolicyError(409, 'Cohort history changed while generating changes.');
-  return { schemaVersion: 1, cohortId: current.id, revision: current.current_revision, manifestSha256: current.manifest_sha256,
+  const count = paged ? (await db.prepare('SELECT COUNT(DISTINCT pkgbase) AS count FROM cohort_members WHERE cohort_id=? AND revision IN (?,?)')
+    .bind(current.id, current.current_revision, previous?.current_revision ?? 0).first<{ count: number }>())!.count : changes.length;
+  return { ...(paged ? { schemaVersion: 2 as const, changes: { algorithm: 'cohort-member-diff-v1' as const, count, manifestSha256: current.manifest_sha256, previousManifestSha256: previous?.manifest_sha256 ?? null } } : { schemaVersion: 1 as const, changes }),
+    cohortId: current.id, revision: current.current_revision, manifestSha256: current.manifest_sha256,
     title: manifest.title, lane: manifest.lane, systemVersion: manifest.systemVersion,
     baseline: { kind: previous ? 'previous-cohort-revision' : 'initial-plan', revision: previous ? current.current_revision - 1 : null,
       manifestSha256: previous?.manifest_sha256 ?? null, parentSnapshot: manifest.parentSnapshot },
     state: phases.some((event) => event.kind === 'publication') ? 'published' : phases.some((event) => event.kind === 'phase' && event.from === 'build' && event.phase === 'verify') ? 'built' : 'planned',
-    changes, phases };
+    phases };
 }
 
 function markdownText(value: string) {
   return value.replace(/[\\`*_{}\[\]()#+.!|<>-]/g, '\\$&');
 }
 
-export function cohortMarkdown(facts: CohortFacts, narrative: string): string {
+export const cohortChangeMarkdown = (change: CohortChange) => `| ${markdownText(change.pkgbase)} | ${change.kind} | ${markdownText(change.oldVersion ?? 'unbound')} | ${markdownText(change.newVersion ?? 'unbound')} | ${markdownText(`${change.oldRepository ?? '—'} → ${change.newRepository ?? '—'}`)} | ${change.architectures.join(', ')} | ${markdownText(change.reason)} |`;
+
+export function cohortMarkdownParts(facts: CohortFacts, narrative: string) {
   const baseline = facts.baseline.kind === 'previous-cohort-revision' ? `cohort revision ${facts.baseline.revision}` : 'initial proposed membership (no earlier cohort revision)';
-  return [`# ${markdownText(facts.title)}`, '', `${facts.lane === 'system' ? `System ${facts.systemVersion}` : 'Independent OPR cohort'} · revision ${facts.revision} · ${facts.state}`,
+  const before = [`# ${markdownText(facts.title)}`, '', `${facts.lane === 'system' ? `System ${facts.systemVersion}` : 'Independent OPR cohort'} · revision ${facts.revision} · ${facts.state}`,
     '', `Comparison baseline: ${baseline}. Parent snapshot: ${facts.baseline.parentSnapshot ?? 'not yet selected'}.`,
     '', '## Maintainer narrative', '', narrative ? markdownText(narrative) : 'Narrative awaiting human review.',
     '', '## Generated package changes', '', '| Package | Change | Old version | New version | Repository | Targets | Cause |',
-    '| --- | --- | --- | --- | --- | --- | --- |',
-    ...facts.changes.map((change) => `| ${markdownText(change.pkgbase)} | ${change.kind} | ${markdownText(change.oldVersion ?? 'unbound')} | ${markdownText(change.newVersion ?? 'unbound')} | ${markdownText(`${change.oldRepository ?? '—'} → ${change.newRepository ?? '—'}`)} | ${change.architectures.join(', ')} | ${markdownText(change.reason)} |`),
+    '| --- | --- | --- | --- | --- | --- | --- |', ''].join('\n');
+  const after = [
     '', '## Generated phase history', '', ...facts.phases.flatMap((phase) => [
       `- ${new Date(phase.timestamp * 1000).toISOString()} · ${cohortPhaseLabels[phase.phase]} · ${phase.condition}: ${markdownText(phase.cause)}`,
       `  Actor: ${markdownText(phase.actor)}. Evidence: ${phase.eventSha256}.`,
     ]), '', `Manifest SHA-256: ${facts.manifestSha256}`, ''
   ].join('\n');
+  return { before, after };
+}
+
+export function cohortMarkdown(facts: CohortFacts, narrative: string): string {
+  const { before, after } = cohortMarkdownParts(facts, narrative);
+  return before + (facts.schemaVersion === 1 ? facts.changes.map(cohortChangeMarkdown).join('\n') : `\n${facts.changes.count} package changes are derived from the exact current and previous scope manifests using ${facts.changes.algorithm}.`) + '\n' + after;
 }
 
 export type ChangelogRow = { digest: string; facts_sha256: string; document_json: string; markdown: string; created_at: number; created_by: string };

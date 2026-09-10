@@ -695,3 +695,44 @@ Regression checks cover shadow/bootstrapped builds, review revocation and stale
 transaction fences. The SQL compiles under D1's expression-depth budget of 100.
 Dependency closure, artifact ABI, reproducibility, install/upgrade/recovery and
 boot gates remain distinct required checks.
+
+### Complete cohort revisions and paged verification
+
+[Complete scope uploads](../cohort-scopes.md) now accept up to 100,000 package
+bases in ordered, immutable chunks. A single transaction selects the complete
+revision after rechecking ownership, catalog/recipe identity, membership counts
+and exclusive recipe ownership. Partial uploads do not replace current scope;
+identical retries do not create duplicate revisions. Worker output contracts and
+native signing resolve the relevant verified member chunk.
+
+Plan and recipe review run in groups of 25 members. Native verification runs one
+package base, including both required targets and every split output, per request.
+Whole-cohort phase advancement requires complete passing coverage and fences the
+selected reports, current actor authority and evidence versions in its transaction.
+Unrelated cohort builds preserve checks; reviewer or historical-input revocations
+invalidate them. Immutable phase events bind reproducible page-proof digests and
+historical report selections. Temporary SQL assertions now discard themselves
+after enforcing their constraints, avoiding per-member assertion-row accumulation.
+
+The UI pages members, tests and changes, jumps directly to a named member, resumes
+complete-scope uploads and verification, and exports all scope/change records.
+Version 2 changelog facts bind a deterministic diff of exact current and previous
+scope manifests. Full Markdown and JSON changes stream from verified chunks,
+including after a later scope revision supersedes them. Changelog approval remains
+separate from package admission and release authorization.
+
+A 12,000-member synthetic regression verifies atomic selection, complete exports,
+full admission-check coverage, native page sizing, stale phase fences and historical
+proofs. Actual local browser/API validation exercised 513 synthetic members across
+21 admission pages, scope upload, member lookup, changelog review, full exports and
+phase advancement. All five views passed layout checks at 320, 375, 414, 768, 1440
+and 1920 pixels; private endpoints returned 401 anonymously and no browser errors
+were recorded. The 242-test application suite passed with 14,248 assertions;
+Svelte, pipeline types and production build passed. All 255 captured cohort/native
+SQL statements compiled with SQLite expression depth limited to 100.
+
+This is implementation validation using local fixtures. Bulk imports remain
+stopped; no production admission, rebuild campaign or release cutover was run.
+Artifact ABI/symbol, dependency-closure, reproducibility and system-test producers,
+complete signed system/OPR release activation and client integration remain
+required implementation work.

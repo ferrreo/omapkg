@@ -1,8 +1,10 @@
-import { error } from '@sveltejs/kit';
+import { error, redirect } from '@sveltejs/kit';
 import { canonicalJson } from '$lib/canonical-json';
-import type { CohortManifest, CohortEvent } from '$lib/cohorts';
-import { approveCohortChangelog, generateCohortFacts, saveCohortChangelog, type ChangelogRow } from '$lib/server/cohort-changelogs';
+import { cohortMemberCount, cohortPageSize, type CohortManifest, type CohortEvent } from '$lib/cohorts';
+import { approveCohortChangelog, cohortChangePage, generateCohortFacts, saveCohortChangelog, type ChangelogRow } from '$lib/server/cohort-changelogs';
 import { evaluateCohortGate } from '$lib/server/cohort-gates';
+import { aggregateCohortGate, cohortPageView } from '$lib/server/cohort-gate-pages';
+import { cohortMembers, readCohortManifest } from '$lib/server/cohort-members';
 import { changeCohortPhase } from '$lib/server/cohort-phases';
 import { cohortEvents, getCohort, proposeCohort, scopeAuthority, type CohortScopeInput } from '$lib/server/cohorts';
 import { getCatalogPackage, listCatalogPackages } from '$lib/server/catalog-ownership';
@@ -13,8 +15,26 @@ import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
   const actor = maintainer(event); const env = environment(event); const record = await getCohort(env.DB, event.params.id);
-  const manifest: CohortManifest = JSON.parse(record.manifest_json);
-  const gate = await evaluateCohortGate(env, record, false); const facts = await generateCohortFacts(env.DB, record);
+  const manifest = await readCohortManifest(record); const memberCount = cohortMemberCount(manifest);
+  const memberSearch = (event.url.searchParams.get('member') ?? '').trim().slice(0, 64);
+  const location = memberSearch ? manifest.schemaVersion === 1
+    ? manifest.members.findIndex((member) => member.pkgbase === memberSearch)
+    : (await env.DB.prepare('SELECT ordinal FROM cohort_members WHERE cohort_id=? AND revision=? AND pkgbase=?')
+      .bind(record.id, record.current_revision, memberSearch).first<{ ordinal: number }>())?.ordinal ?? -1 : -1;
+  const page = location >= 0 ? Math.floor(location / cohortPageSize) : Number(event.url.searchParams.get('page') ?? '0');
+  if (!Number.isSafeInteger(page) || page < 0 || page * cohortPageSize >= memberCount) error(400, 'Choose an existing cohort member page.');
+  if (location >= 0 && !event.url.searchParams.has('page')) {
+    const target = new URL(event.url); target.searchParams.set('page', String(page));
+    target.hash = `member-${memberSearch}${event.url.searchParams.get('tab') === 'tests' ? '-x86_64' : ''}`;
+    redirect(303, target.pathname + target.search + target.hash);
+  }
+  const members = await cohortMembers(env.DB, record, page * cohortPageSize);
+  const progress = manifest.schemaVersion === 2 ? await aggregateCohortGate(env.DB, record) : null;
+  const gate = progress ?? await evaluateCohortGate(env, record, false);
+  const checkedPage = progress ? await cohortPageView(env.DB, record, members, page) : null;
+  const pageGate = checkedPage ?? gate;
+  const facts = await generateCohortFacts(env.DB, record);
+  const changes = await cohortChangePage(env.DB, record, event.url.searchParams.get('changeAfter') ?? '');
   let canEdit = true; try { scopeAuthority(actor, manifest); } catch { canEdit = false; }
   const after = Math.max(0, Number(event.url.searchParams.get('after')) || 0);
   const events = await cohortEvents(env.DB, record.id, after);
@@ -26,8 +46,15 @@ export const load: PageServerLoad = async (event) => {
     LEFT JOIN revisions r ON r.request_id=q.id
       AND r.id=(SELECT latest.id FROM revisions latest WHERE latest.request_id=q.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)
       AND NOT EXISTS(SELECT 1 FROM builds b JOIN releases rel ON rel.build_id=b.id WHERE b.revision_id=r.id)
-    WHERE m.cohort_id=? AND m.revision=? ORDER BY p.pkgbase,r.created_at DESC LIMIT 1024`, record.id, record.current_revision);
+    WHERE m.cohort_id=? AND m.revision=? AND m.pkgbase IN (SELECT value FROM json_each(?)) ORDER BY p.pkgbase,r.created_at DESC LIMIT 1024`, record.id, record.current_revision, JSON.stringify(members.map((member) => member.pkgbase)));
+  const packages = event.url.searchParams.has('search') ? await listCatalogPackages(env.DB, { search: event.url.searchParams.get('search') ?? '', limit: 25 }) : [];
+  const existingMembers = await query<{ pkgbase: string }>(env.DB, 'SELECT pkgbase FROM cohort_members WHERE cohort_id=? AND revision=? AND pkgbase IN (SELECT value FROM json_each(?))',
+    record.id, record.current_revision, JSON.stringify(packages.map((item) => item.pkgbase)));
   return { record, manifest, gate: { next: gate.next, blockers: gate.blockers, matrix: gate.matrix }, facts,
+    members, memberCount, page, pageCount: Math.ceil(memberCount / cohortPageSize), progress: progress?.pages ?? null,
+    memberSearch, memberFound: location >= 0,
+    pageGate: { blockers: pageGate.blockers, matrix: pageGate.matrix.filter((row) => members.some((member) => member.pkgbase === row.pkgbase)) },
+    pageCheckedAt: checkedPage?.checkedAt ?? null, changes: changes.changes, nextChange: changes.next,
     factsSha256: await sha256(canonicalJson(facts)), canEdit, updates,
     events: events.map((row) => ({ ...JSON.parse(row.event_json) as CohortEvent, digest: row.event_sha256 })),
     changelogs: await query<ChangelogRow & { review_count: number }>(env.DB, `SELECT c.*,
@@ -36,7 +63,7 @@ export const load: PageServerLoad = async (event) => {
     history: await query<{ revision: number; manifest_sha256: string; created_at: number; title: string }>(env.DB,
       'SELECT revision,manifest_sha256,created_at,title FROM cohort_revisions WHERE cohort_id=? ORDER BY revision DESC LIMIT 50', record.id),
     search: event.url.searchParams.get('search') ?? '',
-    packages: event.url.searchParams.has('search') ? await listCatalogPackages(env.DB, { search: event.url.searchParams.get('search') ?? '', limit: 25 }) : [],
+    packages, existingMembers: existingMembers.map((item) => item.pkgbase),
     tab: ['overview', 'changes', 'phases', 'tests', 'history'].includes(event.url.searchParams.get('tab') ?? '') ? event.url.searchParams.get('tab')! : 'overview',
   };
 };
@@ -50,6 +77,7 @@ export const actions: Actions = {
     const { DB } = environment(event); const record = await getCohort(DB, event.params.id);
     if (record.current_revision !== Number(field(form, 'revision')) || record.manifest_sha256 !== field(form, 'digest')) throw new PolicyError(409, 'Cohort scope changed. Refresh and review it.');
     const manifest: CohortManifest = JSON.parse(record.manifest_json);
+    if (manifest.schemaVersion === 2) throw new PolicyError(400, 'Upload the complete revised scope to change a chunked cohort.');
     const input: CohortScopeInput = { title: manifest.title, lane: manifest.lane, systemVersion: manifest.systemVersion,
       parentSnapshot: manifest.parentSnapshot, compatibleSystems: manifest.compatibleSystems,
       members: manifest.members.map((member) => ({ pkgbase: member.pkgbase, catalogRevision: member.catalogRevision, recipeRevisionId: member.recipe?.id ?? null, cause: member.cause, reason: member.reason })) };

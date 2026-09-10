@@ -47,7 +47,9 @@ No intermediate package becomes publishable through this report.
 The graph permits full-catalog proposals within 100,000 records per inventory
 and a two-million-relation/edge budget. Budget violations reject the operation;
 they never trim the member list. Native build admission remains a separate
-operation, including the current cohort scope-upload limit.
+operation. [Complete cohort scope uploads](cohort-scopes.md) retain the full
+affected set within one revision; they require exact current ownership and
+recipe bindings rather than treating inventory records as admitted recipes.
 
 This is declared-dependency analysis. Artifact-level ABI/symbol changes,
 undeclared static/bundled dependencies, native `vercmp`/pacman validation,

@@ -1,6 +1,6 @@
 import type { Actor, Revision, Worker } from '../model';
 import type { Env } from './env';
-import type { CohortManifest } from '../cohorts';
+import { cohortRecipeMember } from './cohort-members';
 import { canonicalJson } from '../canonical-json';
 import { humanMaintainer } from './catalog-ownership';
 import { actorForGithubId } from './auth';
@@ -27,7 +27,7 @@ export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, bui
   const scope = await env.DB.prepare(`SELECT r.manifest_json,r.manifest_sha256,c.condition FROM cohort_revisions r JOIN cohorts c ON c.id=r.cohort_id
     WHERE r.cohort_id=? AND r.revision=c.current_revision`).bind(contract.cohort.id).first<{ manifest_json: string; manifest_sha256: string; condition: string }>();
   if (!scope || scope.manifest_sha256 !== contract.cohort.manifestSha256 || scope.condition === 'held') throw new PolicyError(409, 'Cohort is unavailable for signing.');
-  const member = (JSON.parse(scope.manifest_json) as CohortManifest).members.find((item) => item.recipe?.id === revision.id);
+  const member = await cohortRecipeMember(env.DB, { ...scope, id: contract.cohort.id, current_revision: contract.cohort.revision }, revision.id);
   if (!member) throw new PolicyError(409, 'Build left the current cohort scope.');
   const catalog = await env.DB.prepare('SELECT current_revision,admitted_revision FROM catalog_packages WHERE pkgbase=?').bind(member.pkgbase)
     .first<{ current_revision: number; admitted_revision: number | null }>();

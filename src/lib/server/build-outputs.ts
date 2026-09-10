@@ -1,5 +1,5 @@
 import type { Architecture, Revision } from '../model';
-import type { CohortManifest } from '../cohorts';
+import { cohortRecipeMember } from './cohort-members';
 import { canonicalJson } from '../canonical-json';
 import { parseOutputContract as parseContract, packageFilename, type OutputContract } from '../output-contract';
 import { query } from './db';
@@ -31,8 +31,7 @@ export async function cohortOutputContract(db: D1Database, revision: { id: strin
     JOIN cohorts c ON c.id=o.cohort_id JOIN cohort_revisions r ON r.cohort_id=c.id AND r.revision=c.current_revision
     WHERE o.recipe_revision_id=?`).bind(revision.id).first<{ id: string; current_revision: number; manifest_sha256: string; manifest_json: string }>();
   if (!row) return null;
-  const manifest: CohortManifest = JSON.parse(row.manifest_json);
-  const member = manifest.members.find((member) => member.recipe?.id === revision.id);
+  const member = await cohortRecipeMember(db, row, revision.id);
   if (!member || !member.policy.architectures.includes(target)) throw new WorkerProtocolError(409, 'Build is outside current cohort scope');
   const fullVersion = reviewedPackageVersion(revision);
   return parseOutputContract({ schemaVersion: 2, cohort: { id: row.id, revision: row.current_revision, manifestSha256: row.manifest_sha256 },

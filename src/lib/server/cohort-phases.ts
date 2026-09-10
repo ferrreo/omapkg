@@ -1,9 +1,10 @@
 import { canonicalJson } from '../canonical-json';
-import type { CohortManifest, CohortEvent } from '../cohorts';
+import { cohortOwnerAreas, type CohortManifest, type CohortEvent } from '../cohorts';
 import type { Actor } from '../model';
 import { cohortPhaseLabels, type CohortPhase } from '../distribution';
-import { cohortConflict, cohortEventStatements, getCohort, scopeAuthority } from './cohorts';
+import { cohortConflict, cohortEventStatements, getCohort, scopeAuthority, scopeAuthorityFence } from './cohorts';
 import { evaluateCohortGate } from './cohort-gates';
+import { aggregateCohortGate, cohortPageProof } from './cohort-gate-pages';
 import { sha256 } from './db';
 import type { Env } from './env';
 import { PolicyError } from './policy';
@@ -14,7 +15,8 @@ export async function changeCohortPhase(env: Env, actor: Actor | null, cohortId:
   action: 'advance' | 'recheck' | 'hold' | 'resume'; reason: string;
 }) {
   const current = await getCohort(env.DB, cohortId);
-  const reviewer = scopeAuthority(actor, JSON.parse(current.manifest_json) as CohortManifest);
+  const manifest: CohortManifest = JSON.parse(current.manifest_json);
+  const reviewer = scopeAuthority(actor, manifest);
   if (!['advance', 'recheck', 'hold', 'resume'].includes(input.action)) throw new PolicyError(400, 'Choose a cohort phase action.');
   const reason = reviewReason(input.reason);
   const commandSha256 = await sha256(canonicalJson({ ...input, reason, cohortId, actor: reviewer.id }));
@@ -25,7 +27,7 @@ export async function changeCohortPhase(env: Env, actor: Actor | null, cohortId:
     throw new PolicyError(409, 'Cohort changed. Read the current phase and revision before acting.');
   }
   if (['publish', 'observe'].includes(current.phase)) throw new PolicyError(409, 'Use the release rollout or recovery action for a published cohort.');
-  const gate = await evaluateCohortGate(env, current);
+  const gate = manifest.schemaVersion === 2 ? await aggregateCohortGate(env.DB, current) : await evaluateCohortGate(env, current);
   let phase: CohortPhase = current.phase;
   let condition = current.condition;
   if (input.action === 'advance') {
@@ -37,10 +39,11 @@ export async function changeCohortPhase(env: Env, actor: Actor | null, cohortId:
     condition = blockers.length ? 'blocked' : 'ready';
     if (input.action === 'recheck' && current.condition === 'held') condition = 'held';
   }
-  const evidence = {
+  const matrix = 'pages' in gate ? canonicalJson(await cohortPageProof(env.DB, current, gate.pages as Awaited<ReturnType<typeof aggregateCohortGate>>['pages'])) : canonicalJson(gate.matrix);
+  const evidence: Record<string, string> = {
     blockersSha256: await sha256(canonicalJson(gate.blockers)),
-    matrixSha256: await sha256(canonicalJson(gate.matrix)),
-    matrix: canonicalJson(gate.matrix),
+    matrixSha256: await sha256(matrix),
+    ...('pages' in gate ? { pageSelection: matrix } : { matrix }),
     blockers: canonicalJson(gate.blockers),
   };
   if (input.action === 'recheck') {
@@ -53,7 +56,7 @@ export async function changeCohortPhase(env: Env, actor: Actor | null, cohortId:
   }
   const change = await cohortEventStatements(env.DB, current, reviewer.id, commandSha256,
     { kind: phase === current.phase ? 'condition' : 'phase', phase, condition, cause: reason, evidence });
-  try { await env.DB.batch([...(input.action === 'advance' ? gate.fences : []), ...change.statements,
+  try { await env.DB.batch([scopeAuthorityFence(env.DB, reviewer, cohortOwnerAreas(manifest)), ...(input.action === 'advance' ? gate.fences : []), ...change.statements,
     ...(current.phase === 'build' && phase === 'verify' ? [env.DB.prepare(`UPDATE requests SET status='built',updated_at=? WHERE id IN (
       SELECT r.request_id FROM cohort_members m JOIN revisions r ON r.id=m.recipe_revision_id WHERE m.cohort_id=? AND m.revision=?)`)
       .bind(change.event.timestamp, current.id, current.current_revision)] : []),
