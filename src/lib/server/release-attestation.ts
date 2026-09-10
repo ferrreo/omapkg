@@ -50,7 +50,7 @@ export async function releaseAttestation(input: ReleaseAttestationInput): Promis
         buildType: outputs ? OUTPUT_BUILD_TYPE : RELEASE_BUILD_TYPE,
         externalParameters: {
           revisionId: input.revisionId,
-          ...(outputs ? { attempt: outputs.attempt, outputContract: outputs.outputContract, inputPolicy: 'shadow' } : {}),
+          ...(outputs ? { attempt: outputs.attempt, outputContract: outputs.outputContract, inputPolicy: outputs.frozenInputs?.manifest.purpose ?? 'shadow' } : {}),
           surface: input.surface,
           manifestSha256: input.manifestSha256,
           recipeSha256: input.recipeSha256,

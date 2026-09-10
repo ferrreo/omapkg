@@ -59,7 +59,7 @@ export interface SigningIntentResponse {
     smokePassed: true;
     attempt?: number;
   };
-  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract };
+  review: { manifestSha256: string; areaApproved: boolean; securityApproved: boolean; runtimeExceptions: RuntimeException[]; outputContract?: OutputContract; inputLockSha256?: string };
   attestation: { provenance: string; provenanceSignature: string; workerPublicKey: string };
   statement?: string;
   signature?: { key: string; sha256: string; filename: string };
@@ -101,6 +101,7 @@ interface IntentRow extends Revision {
   intent_build_attempt: number | null;
   build_attempt: number;
   build_output_contract_json: string | null;
+  build_input_lock_sha256: string | null;
   revision_id: string;
   build_id: string;
   build_revision_id: string;
@@ -133,7 +134,7 @@ const INTENT_QUERY = `
     i.expires_at AS intent_expires_at, i.claimed_at, i.claim_expires_at,
     i.key_fingerprint AS intent_key_fingerprint, i.signature_key, i.signature_sha256,
     i.created_at AS intent_created_at, i.build_attempt AS intent_build_attempt,
-    b.attempt AS build_attempt,b.output_contract_json AS build_output_contract_json,
+    b.attempt AS build_attempt,b.output_contract_json AS build_output_contract_json,b.input_lock_sha256 AS build_input_lock_sha256,
     b.id AS build_id, b.revision_id AS build_revision_id, b.status AS build_status,
     b.worker_id AS build_worker_id, b.architecture AS build_architecture,
     b.artifact_key AS build_artifact_key, b.artifact_sha256 AS build_artifact_sha256,
@@ -395,7 +396,7 @@ async function response(row: IntentRow, fingerprint: string, size: number): Prom
     expiresAt: expiry(row), keyFingerprint: fingerprint,
     artifact: { key: row.object_key, sha256: row.intent_artifact_sha256, size, filename: row.intent_artifact_filename },
     build: { id: row.build_id, revisionId: row.revision_id, status: 'succeeded', surface: row.surface, architecture: row.build_architecture, workerId: row.build_worker_id!, smokePassed: true, ...(row.build_output_contract_json ? { attempt: row.build_attempt } : {}) },
-    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json), ...(row.build_output_contract_json ? { outputContract: JSON.parse(row.build_output_contract_json) } : {}) },
+    review: { manifestSha256: row.manifest_sha256, areaApproved: row.area_approved === 1, securityApproved: row.security_approved === 1, runtimeExceptions: reviewedRuntimeExceptions(row.sbom_json), ...(row.build_output_contract_json ? { outputContract: JSON.parse(row.build_output_contract_json) } : {}), ...(row.build_input_lock_sha256 ? { inputLockSha256: row.build_input_lock_sha256 } : {}) },
     attestation: { provenance: row.build_provenance!, provenanceSignature: row.build_provenance_signature!, workerPublicKey: row.worker_public_key! },
   };
   if (row.object_kind === 'attestation') result.statement = await statement(row);

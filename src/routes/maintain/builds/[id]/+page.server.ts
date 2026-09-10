@@ -1,4 +1,6 @@
 import { signNativeOutput } from '$lib/server/native-signing';
+import { retainNativeInput } from '$lib/server/input-owned';
+import { inputAuthority } from '$lib/server/input-objects';
 import { humanMaintainer } from '$lib/server/catalog-ownership';
 import { PolicyError } from '$lib/server/policy';
 import { WorkerProtocolError } from '$lib/server/worker-protocol';
@@ -25,13 +27,20 @@ export const load: PageServerLoad = async (event) => {
     "SELECT DISTINCT artifact_filename,signature_sha256 FROM signing_intents WHERE build_id=? AND build_attempt=? AND status='signed'", build.id, build.attempt) : [];
   const request = revision ? await DB.prepare('SELECT area FROM requests WHERE id=?').bind(revision.request_id).first<{ area: string }>() : null;
   let canSign = false; try { humanMaintainer(actor, request?.area); canSign = !!request && build.status === 'succeeded'; } catch { /* Read access remains available. */ }
+  let canRetain = false; try { await inputAuthority(DB, actor); canRetain = !!build.input_lock_sha256 && canSign; } catch { /* Retention requires system authority. */ }
+  const retained = await query<{ package_sha256: string; origin_evidence: string }>(DB,
+    'SELECT package_sha256,origin_evidence FROM input_owned_packages WHERE build_id=? AND attempt=? AND revoked_at IS NULL', build.id, build.attempt);
   const outputs = contract?.outputs.map((output) => ({ ...output, filename: packageFilename(output),
     signature: signatures.find((item) => item.artifact_filename === packageFilename(output)) ?? null,
     artifact: artifacts.find((artifact) => artifact.filename === packageFilename(output)) ?? null })) ?? [];
-  return { build, revision, logs, outputContract: contract, outputs, canSign, statementSigned: signatures.some((item) => item.artifact_filename === 'attestation.json') };
+  return { build, revision, logs, outputContract: contract, outputs, canSign, canRetain, retained, statementSigned: signatures.some((item) => item.artifact_filename === 'attestation.json') };
 };
 
 export const actions: Actions = {
+  retain: (event) => formAction(event, async (form) => {
+    try { await retainNativeInput(environment(event), event.locals.actor, event.params.id, Number(field(form, 'attempt')), field(form, 'filename')); }
+    catch (cause) { if (cause instanceof WorkerProtocolError) throw new PolicyError(cause.status, cause.message); throw cause; }
+  }),
   sign: (event) => formAction(event, async (form) => {
     try { return await signNativeOutput(environment(event), event.locals.actor, event.params.id, Number(field(form, 'attempt')), field(form, 'filename')); }
     catch (cause) { if (cause instanceof WorkerProtocolError) throw new PolicyError(cause.status, cause.message); throw cause; }

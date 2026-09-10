@@ -1,3 +1,9 @@
+import { frozenFixture } from './frozen-fixtures';
+import { proposeInputLock, reviewInputLock, selectInputLock, revokeInputReview } from '../src/lib/server/input-locks';
+import { retainNativeInput, revokeNativeInput } from '../src/lib/server/input-owned';
+import { cohortOutputContract } from '../src/lib/server/build-outputs';
+import { POST as downloadInput } from '../src/routes/api/worker/jobs/[id]/inputs/[digest]/+server';
+import { assembleOwnedInputLock, ownedInputChoices } from '../src/lib/server/input-assembly';
 import { signNativeOutput } from '../src/lib/server/native-signing';
 import { claimSigningIntent, completeSigningIntent } from '../src/lib/server/signing-control';
 import { runtimeEvidence } from './runtime-fixtures';
@@ -47,7 +53,7 @@ class MemoryR2 {
 
   async get(key: string) {
     const object = this.objects.get(key);
-    return object ? { size: object.body.byteLength, customMetadata: object.customMetadata, arrayBuffer: async () => object.body.slice().buffer } : null;
+    return object ? { size: object.body.byteLength, customMetadata: object.customMetadata, arrayBuffer: async () => object.body.slice().buffer, body: new Blob([new Uint8Array(object.body).buffer]).stream() } : null;
   }
 
   async delete(key: string): Promise<void> {
@@ -543,7 +549,7 @@ test('worker dependency failure blocks parent, preserves evidence and fences cha
   } finally { holder.close(); }
 });
 
-test('v2 cohort output completion binds every upload, version, architecture and attempt to signed evidence', async () => {
+for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} completion binds every upload, version, architecture and attempt to signed evidence`, async () => {
   const { holder, db, worker, keys } = await fixture();
   const bucket = new MemoryR2();
   try {
@@ -564,15 +570,43 @@ test('v2 cohort output completion binds every upload, version, architecture and 
       await changeCohortPhase(testEnv(holder), actor, cohort.id, { revision: cohort.current_revision, sequence: cohort.event_sequence, manifestSha256: cohort.manifest_sha256, action: 'advance', reason: 'Test reviewed phase.' });
       cohort = await getCohort(db, cohort.id);
     }
+    const inputEnv = { DB: db, ARTIFACTS: bucket as unknown as R2Bucket, PUBLIC_ORIGIN: 'https://opr.test' };
+    const retained = frozen ? await frozenFixture(inputEnv, revision, (await cohortOutputContract(db, { ...revision, pkgrel: 1 }, 'x86_64'))!) : null;
+    let ownedLock: string | null = null;
+    if (retained) {
+      await proposeInputLock(inputEnv, actor, revision.id, retained.lock, 'INERT protocol fixture.');
+      await expect(selectInputLock(inputEnv, actor, retained.lock.sha256, 'Unreviewed fixture.')).rejects.toThrow('reviews');
+      await reviewInputLock(inputEnv, actor, retained.lock.sha256, 'area', 'INERT system review.');
+      await expect(reviewInputLock(inputEnv, actor, retained.lock.sha256, 'security', 'Not authorized.')).rejects.toThrow();
+      await reviewInputLock(inputEnv, security, retained.lock.sha256, 'security', 'INERT security review.');
+      await selectInputLock(inputEnv, actor, retained.lock.sha256, 'INERT selected closure.');
+      expect(await claimJob(db, worker, { version: 'old-v2', runtime: 'podman', capabilities: ['multi-output-v2'] }, inputEnv)).toBeNull();
+    }
     expect(await claimJob(db, worker)).toBeNull();
-    const job = (await claimJob(db, worker, { version: 'v2-test', runtime: 'podman', capabilities: ['multi-output-v2', 'runtime-analysis-v1'] }))!;
+    const job = (await claimJob(db, worker, { version: 'v2-test', runtime: 'podman', capabilities: ['multi-output-v2', 'runtime-analysis-v1', 'frozen-inputs-v1'] }, retained ? inputEnv : undefined))!;
+    if (retained) {
+      expect(job.inputLock).toEqual(retained.lock); expect(job.dependencyPlan).toBeUndefined();
+      expect(await db.prepare('SELECT input_lock_sha256 FROM build_attempts WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ input_lock_sha256: string }>()).toEqual({ input_lock_sha256: retained.lock.sha256 });
+      expect(() => holder.prepare('UPDATE builds SET input_lock_sha256=NULL WHERE id=?').bind(job.id).run()).toThrow();
+      await expect(selectInputLock(inputEnv, actor, retained.lock.sha256, 'Cannot change active lease.')).rejects.toThrow('lease');
+      async function download(digest: string, token = job.leaseToken) {
+        const path = `/api/worker/jobs/${job.id}/inputs/${digest}`;
+        const request = await signedRequest('POST', path, new TextEncoder().encode(JSON.stringify({ leaseToken: token })), worker.id, keys.privateKey);
+        return downloadInput({ request, url: new URL(request.url), params: { id: job.id, digest }, platform: { env: inputEnv } } as never);
+      }
+      const downloaded = await download(retained.lock.sha256);
+      expect(await sha256(new Uint8Array(await downloaded.arrayBuffer()))).toBe(retained.lock.sha256);
+      await expect(download('f'.repeat(64))).rejects.toMatchObject({ status: 403 });
+      await expect(download(retained.lock.sha256, 'stale-token')).rejects.toMatchObject({ status: 409 });
+    }
     expect(job.outputContract?.outputs.map((output) => [output.fullVersion, output.architecture])).toEqual([['2:1.0.0-1', 'x86_64'], ['2:1.0.0-1', 'any']]);
     const first = job.outputContract!.outputs[0]; const second = job.outputContract!.outputs[1];
+    const inputObjects = bucket.objects.size;
     const bytes = new TextEncoder().encode('first exact test output');
     const uploaded = await Promise.all([0, 1].map(() => uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, packageFilename(first), bytes)));
     expect(uploaded[0]).toEqual(uploaded[1]);
     const artifact = uploaded[0];
-    expect(bucket.objects.size).toBe(1);
+    expect(bucket.objects.size).toBe(inputObjects + 1);
     expect(await uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, artifact.filename, bytes)).toEqual(artifact);
     await expect(uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, artifact.filename, new Uint8Array([1]))).rejects.toThrow('different bytes');
     await expect(uploadArtifact(db, bucket as unknown as R2Bucket, worker, job.id, job.leaseToken, 'surprise-1-1-any.pkg.tar.zst', bytes)).rejects.toThrow('expected output');
@@ -580,8 +614,9 @@ test('v2 cohort output completion binds every upload, version, architecture and 
       schemaVersion: 2, attempt: job.attempt, outputContract: job.outputContract, buildId: job.id, revisionId: job.revisionId, workerId: worker.id,
       recipeSha256: job.recipeSha256, architecture: job.architecture, imageDigest: job.imageDigest, sourceDateEpoch: job.sourceDateEpoch, sources: job.sources,
       network: 'disabled', startedAt: '2026-09-09T00:00:00Z', finishedAt: '2026-09-09T00:01:00Z',
-      buildEnvironment: runtimeEvidence(job.imageDigest).buildEnvironment,
-      runtimeTests: job.outputContract!.runtimeGroups.map((group) => ({ outputs: group, environment: runtimeEvidence(job.imageDigest).runtimeEnvironment, smokePassed: true,
+      ...(retained ? { frozenInputs: { lock: retained.lock, manifest: retained.manifest, host: { architecture: 'x86_64', kernel: 'Linux TEST', cpuInfoSha256: 'a'.repeat(64), cpuModel: 'INERT CPU', runtime: 'podman', runtimeVersion: 'TEST', goVersion: 'TEST' } } } : {}),
+      buildEnvironment: retained ? { baseImage: job.imageRef, preparedImage: `sha256:${'d'.repeat(64)}`, packages: [`${retained.pkg.name} ${retained.pkg.version}`] } : runtimeEvidence(job.imageDigest).buildEnvironment,
+      runtimeTests: job.outputContract!.runtimeGroups.map((group) => ({ outputs: group, environment: retained ? { baseImage: job.imageRef, preparedImage: `sha256:${'e'.repeat(64)}`, packages: [`${retained.pkg.name} ${retained.pkg.version}`] } : runtimeEvidence(job.imageDigest).runtimeEnvironment, smokePassed: true,
         analyses: group.map((name, i) => ({ name, runtimeAnalysis: { ...runtimeEvidence(job.imageDigest).runtimeAnalysis, nativeCode: [] as string[], payloadSha256: String(i + 1).repeat(64) } })) })),
       outputs: job.outputContract!.outputs.map((output) => ({ pkgbase: job.packageName, filename: packageFilename(output), artifactSha256: artifact.sha256,
         packageMetadata: { ...output, installedSize: 10, depends: [], provides: [], conflicts: [], replaces: [] } })),
@@ -592,6 +627,10 @@ test('v2 cohort output completion binds every upload, version, architecture and 
       const signature = await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(provenance));
       return { provenance, provenanceSignature: base64(signature) };
     };
+    if (retained) {
+      const changed = structuredClone(v2Report); changed.frozenInputs!.manifest.purpose = 'owned';
+      await expect(completeJob(db, inputEnv.ARTIFACTS, worker, job.id, { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20, smokePassed: true, artifacts: [artifact], ...await sign(changed) })).rejects.toThrow();
+    }
     const evidence = await sign(v2Report);
     const complete = { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20, smokePassed: true, artifacts: [artifact], ...evidence };
     await expect(completeJob(db, bucket as unknown as R2Bucket, worker, job.id, complete)).rejects.toThrow('incomplete');
@@ -627,6 +666,27 @@ test('v2 cohort output completion binds every upload, version, architecture and 
       const result = await signNativeOutput(service, actor, job.id, job.attempt!, filename);
       expect(bucket.objects.has(result.signatureKey)).toBe(true);
     }
+    if (retained) {
+      await bucket.put('keys/opr-package-signing.asc', 'INERT public key');
+      await expect(assembleOwnedInputLock(inputEnv, actor, retained.lock.sha256, {}, 'Incomplete input set.')).rejects.toThrow('Native input still missing');
+      const owned = await retainNativeInput(service, actor, job.id, job.attempt!, artifact.filename);
+      expect(owned.origin).toBe('owned-build'); expect(owned.package.sha256).toBe(artifact.sha256);
+      expect(await retainNativeInput(service, actor, job.id, job.attempt!, artifact.filename)).toEqual(owned);
+      expect((await ownedInputChoices(db, retained.lock.sha256))[0].candidates).toHaveLength(1);
+      ownedLock = (await assembleOwnedInputLock(inputEnv, actor, retained.lock.sha256, {}, 'INERT final owned closure.')).sha256;
+      await reviewInputLock(inputEnv, actor, ownedLock, 'area', 'INERT owned system review.');
+      await reviewInputLock(inputEnv, security, ownedLock, 'security', 'INERT owned security review.');
+      const invalidPage = await retained.retain([{ ...retained.pkg, origin: 'owned-build' }]);
+      const invalid = { ...retained.manifest, purpose: 'owned', environments: retained.manifest.environments.map((item) => ({ ...item, chunks: [invalidPage] })) };
+      await expect(proposeInputLock(inputEnv, actor, revision.id, await retained.retain(invalid), 'Cannot relabel bootstrap.')).rejects.toThrow('verified native origin');
+      const review = (await db.prepare("SELECT id FROM input_lock_reviews WHERE lock_sha256=? AND kind='security' AND revoked_at IS NULL").bind(retained.lock.sha256).first<{ id: string }>())!;
+      await revokeInputReview(inputEnv, security, retained.lock.sha256, review.id, 'INERT revocation test.');
+      expect(await db.prepare('SELECT COUNT(*) AS count FROM eligible_owned_inputs').first<{ count: number }>()).toEqual({ count: 0 });
+      await expect(claimSigningIntent(service, intents[0])).rejects.toThrow();
+      await reviewInputLock(inputEnv, security, retained.lock.sha256, 'security', 'INERT renewed review.');
+      expect(await db.prepare('SELECT COUNT(*) AS count FROM eligible_owned_inputs').first<{ count: number }>()).toEqual({ count: 1 });
+      expect(() => holder.prepare("UPDATE input_lock_packages SET package_json='{}' WHERE lock_sha256=?").bind(retained.lock.sha256).run()).toThrow('immutable');
+    } else await expect(retainNativeInput(service, actor, job.id, job.attempt!, artifact.filename)).rejects.toThrow('frozen attempt');
     const intentId = intents[0];
     expect((await claimSigningIntent(service, intentId)).status).toBe('signed');
     expect(await db.prepare('SELECT COUNT(*) AS count FROM releases').first<{ count: number }>()).toEqual({ count: 0 });
@@ -637,7 +697,26 @@ test('v2 cohort output completion binds every upload, version, architecture and 
     holder.exec("INSERT INTO team_memberships VALUES('2','security')");
     expect(() => holder.prepare('UPDATE signing_intents SET object_key=? WHERE id=?').bind(other.key, intentId).run()).toThrow('immutable');
     holder.exec("DELETE FROM team_memberships WHERE github_id='2'");
-    expect(() => holder.prepare("UPDATE signing_intents SET status='signed' WHERE id=?").bind(intentId).run()).toThrow('review or attempt changed');
+    expect(() => holder.prepare("UPDATE signing_intents SET status='signed' WHERE id=?").bind(intentId).run()).toThrow(frozen ? 'frozen signing inputs' : 'review or attempt changed');
+    if (retained && ownedLock) {
+      holder.exec("INSERT INTO team_memberships VALUES('2','security')");
+      await selectInputLock(inputEnv, actor, ownedLock, 'INERT final rebuild selection.');
+      expect(await db.prepare('SELECT status FROM builds WHERE id=?').bind(job.id).first<{ status: string }>()).toEqual({ status: 'queued' });
+      expect(await db.prepare('SELECT COUNT(*) AS count FROM eligible_owned_inputs').first<{ count: number }>()).toEqual({ count: 1 });
+      const next = (await claimJob(db, worker, { version: 'frozen-test', runtime: 'podman', capabilities: ['multi-output-v2', 'frozen-inputs-v1'] }, inputEnv))!;
+      expect(next.attempt).toBe(job.attempt! + 1); expect(next.inputLock?.sha256).toBe(ownedLock);
+      const review = (await db.prepare("SELECT id FROM input_lock_reviews WHERE lock_sha256=? AND kind='security' AND revoked_at IS NULL").bind(retained.lock.sha256).first<{ id: string }>())!;
+      await revokeInputReview(inputEnv, security, retained.lock.sha256, review.id, 'INERT ancestor revocation.');
+      await expect(heartbeatJob(db, worker, next.id, next.leaseToken)).rejects.toThrow('fenced');
+      await reviewInputLock(inputEnv, security, retained.lock.sha256, 'security', 'INERT renewed ancestor review.');
+      await expect(heartbeatJob(db, worker, next.id, next.leaseToken)).rejects.toThrow('fenced');
+      const resumed = (await claimJob(db, worker, { version: 'frozen-test', runtime: 'podman', capabilities: ['multi-output-v2', 'frozen-inputs-v1'] }, inputEnv))!;
+      expect(resumed.attempt).toBe(next.attempt! + 1);
+      const nativeOrigin = (await db.prepare('SELECT origin_evidence FROM input_owned_packages WHERE package_sha256=?').bind(artifact.sha256).first<{ origin_evidence: string }>())!;
+      await revokeNativeInput(service, security, artifact.sha256, nativeOrigin.origin_evidence, 'INERT revoked build origin.');
+      await expect(heartbeatJob(db, worker, resumed.id, resumed.leaseToken)).rejects.toThrow('fenced');
+      expect(() => holder.exec('DELETE FROM build_input_selections')).toThrow('cannot fall back');
+    }
 
   } finally { holder.close(); }
 });

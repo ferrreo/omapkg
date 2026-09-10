@@ -1,8 +1,9 @@
 # Frozen native build inputs
 
-The native worker can build and test from retained input archives. Coordinator
-admission, private object registration, production leases and central verification
-are still being implemented. Current production claims do not use this path.
+Native jobs can build and test from retained input archives. Migration 0035 adds
+private retention, independent input reviews, immutable attempt bindings and
+owned input origins. Workers advertise `frozen-inputs-v1`. The coordinator selects
+this path only for an explicitly selected, currently approved lock.
 A local bootstrap capture is neither human approval nor an owned release claim.
 
 ## Contract
@@ -21,7 +22,9 @@ can serve either native architecture.
 
 Limits: 128 KiB root, 1 MiB pages, 4,096 unique packages, 4 GiB per archive,
 32 GiB helper, 1,024 page references and a reviewed transfer budget capped at
-256 GiB. These reject excess work; they do not establish measured capacity.
+256 GiB. Coordinator metadata is bounded to 4 MiB of unique package pages and
+4 MiB of origin documents per lock; each origin document is at most 1 MiB.
+These reject excess work; they do not establish measured capacity.
 The legacy 64-package dependency plan is unchanged.
 
 The worker retrieves digest references through signed lease-scoped requests,
@@ -76,15 +79,58 @@ through signed local requests, builds native/portable outputs, checks runtime
 isolation and rejects another package's signing key. It creates no production
 reviews or repository membership.
 
-## Remaining authority
+## Review and use
 
-Bootstrap manifests need explicit private migration approval and a separate ARM
-seed decision. Submitted `owned-build` labels confer no authority: registration
-must bind them to admitted source, immutable native builds and signatures.
-Input selection must be frozen into each lease/attempt and rechecked by
-completion, signing and release gates. Current ingestion and independent
-verification reject the new evidence; those integrations must land before the
-worker capability is advertised.
+1. Open **Catalog → Frozen build inputs** and upload the capture folder. Every
+   object uses resumable 8 MiB parts and whole-object checksum verification.
+   Canonical JSON receives an immutable database index for bounded batch reads;
+   downloads and native preparation still verify the retained object bytes.
+2. Match the capture to its current recipe and cohort. The coordinator verifies
+   the complete object index, package counts, exact inventories, source records,
+   helper reference and transfer budget. Package origin labels never grant trust.
+3. Two distinct humans, with current system and security authority, review the
+   exact lock. They review captured source databases, package signing fingerprints,
+   public keys and retained helper. Capture metadata alone cannot approve a seed.
+4. Select the lock during cohort planning, review or build. A changed selection
+   queues a new attempt after a completed or failed build. Prior attempt evidence
+   stays immutable. Active leases cannot change locks, and workers without frozen
+   input support skip selected jobs. Revoking input authority fences affected
+   active leases, including descendants of revoked native inputs.
+5. Sign each successful native package and its complete build statement. **Retain
+   for private builds** registers the output against its immutable frozen attempt,
+   admitted source and both signing intents. Shadow outputs cannot enter this
+   registry. Original recipe reviews, input reviews, worker identity and explicit
+   input revocations remain authorization checks; proposing a newer recipe does
+   not silently discard valid historical input versions.
+6. **Prepare owned lock for review** replaces every captured package with a
+   retained native output of the exact same name, version and architecture.
+   Missing outputs block assembly. If matching builds produced different package
+   archive hashes, a maintainer must choose an exact artifact. This choice does
+   not establish reproducibility or bypass its release gate. Identical package
+   bytes reuse the first eligible origin in digest order.
+7. Review the resulting owned lock independently and select it for the final
+   native rebuild. Owned input classification permits private build use; final
+   component rebuilding, ABI, reproducibility and release checks remain required.
+
+Input pages, downloads and review records are maintainer-only. Worker downloads
+require a signed request, current lease and membership in that exact lock's
+object index. A selected job cannot fall back to a live repository resolver.
+
+Completion compares the worker's lock digest with the immutable lease. The
+coordinator rechecks current authority before signing; the isolated signer
+independently checks the reviewed lock digest, output set and native evidence.
+Signed statements distinguish `shadow`, `bootstrap` and `owned` input policies
+and bind the retained lock, helper, configuration and package pages. Offline
+verification rejects changes to that policy, its resolved inputs or worker
+evidence. A signed build statement is not release membership or complete release
+qualification.
+
+## Rollout requirements
+
+Production bootstrap manifests need explicit private migration approval and a
+separate ARM seed decision. Deploy the coordinator migration and protocol before
+upgrading workers to advertise the new capability. Existing shadow jobs remain
+readable and executable under their prior protocol.
 
 Native ARM execution, full catalog/ABI qualification, independent reproduction,
 release/client integration and human cutover remain separate requirements.

@@ -6,8 +6,10 @@ import { releaseAttestation } from '../../src/lib/server/release-attestation';
 import { sha256 } from '../../src/lib/server/db';
 import { packageFilename } from '../../src/lib/output-contract';
 import { runtimeEvidence } from '../../tests/runtime-fixtures';
+import { canonicalJson } from '../../src/lib/canonical-json';
+import type { FrozenEvidence, FrozenManifest } from '../../src/lib/frozen-inputs';
 
-test('native output signing and offline verification bind every output, runtime group and exact attempt', async () => {
+for (const policy of ['shadow', 'bootstrap', 'owned'] as const) test(`native ${policy} signing and offline verification bind every output, runtime group, input policy and exact attempt`, async () => {
   const key = await openpgp.generateKey({ type: 'rsa', rsaBits: 2048, userIDs: [{ name: 'Native signing test' }], format: 'armored', config: { v6Keys: false } });
   const privateKey = await openpgp.readPrivateKey({ armoredKey: key.privateKey });
   const fingerprint = privateKey.getFingerprint();
@@ -20,12 +22,25 @@ test('native output signing and offline verification bind every output, runtime 
     outputs: [{ name: 'native@demo', fullVersion: '2:1-3.1', architecture: 'x86_64' as const }, { name: 'native-docs', fullVersion: '2:1-3.1', architecture: 'any' as const }],
     runtimeGroups: [['native@demo'], ['native-docs']] };
   const artifact = encode('native fixture bytes'); const artifactSha256 = await sha256(artifact);
+  let frozenInputs: FrozenEvidence | undefined;
+  if (policy !== 'shadow') {
+    const manifest: FrozenManifest = { schemaVersion: 1, purpose: policy, architecture: 'x86_64', recipeSha256: 'c'.repeat(64),
+      cohortSha256: outputContract.cohort.manifestSha256, sourceDateEpoch: 1, helperImage: runtime.buildEnvironment.baseImage,
+      helperArchive: { sha256: '5'.repeat(64), size: 1 }, makepkgConfig: { sha256: '6'.repeat(64), size: 1 }, transferLimitBytes: 1024 * 1024,
+      environments: await Promise.all([runtime.buildEnvironment, runtime.runtimeEnvironment, runtime.runtimeEnvironment].map(async (env, index) => ({
+        name: index ? `runtime-${index - 1}` : 'build', packageCount: env.packages.length, totalBytes: 1,
+        inventorySha256: await sha256([...env.packages].sort().join('\n') + '\n'), chunks: [{ sha256: '7'.repeat(64), size: 1 }],
+      }))) };
+    const json = canonicalJson(manifest);
+    frozenInputs = { manifest, lock: { sha256: await sha256(json), size: encode(json).length }, host: { architecture: 'x86_64', kernel: 'INERT kernel',
+      cpuInfoSha256: '8'.repeat(64), cpuModel: 'INERT CPU', runtime: 'podman', runtimeVersion: 'INERT', goVersion: 'INERT' } };
+  }
   const report = { schemaVersion: 2, attempt: 2, outputContract, buildId: 'build-1', revisionId: 'revision-1', workerId: 'worker-1',
     recipeSha256: 'c'.repeat(64), imageDigest, architecture: 'x86_64', sourceDateEpoch: 1, network: 'disabled',
     sources: [{ name: 'source.tar', url: 'https://example.org/source.tar', sha256: 'd'.repeat(64) }], startedAt: '2026-09-09T00:00:00Z', finishedAt: '2026-09-09T00:01:00Z',
-    buildEnvironment: runtime.buildEnvironment, outputs: outputContract.outputs.map((output) => ({ pkgbase: 'native', filename: packageFilename(output), artifactSha256,
+    ...(frozenInputs ? { frozenInputs } : {}), buildEnvironment: runtime.buildEnvironment, outputs: outputContract.outputs.map((output) => ({ pkgbase: 'native', filename: packageFilename(output), artifactSha256,
       packageMetadata: { ...output, installedSize: 10, depends: [], provides: [], conflicts: [], replaces: [] } })),
-    runtimeTests: outputContract.runtimeGroups.map((outputs) => ({ outputs, environment: runtime.runtimeEnvironment, smokePassed: true,
+    runtimeTests: outputContract.runtimeGroups.map((outputs) => ({ outputs, environment: { ...runtime.runtimeEnvironment, ...(frozenInputs ? { baseImage: runtime.buildEnvironment.baseImage } : {}) }, smokePassed: true,
       analyses: outputs.map((name) => ({ name, runtimeAnalysis: { ...runtime.runtimeAnalysis, nativeCode: [] as string[], payloadSha256: 'e'.repeat(64) } })) })) };
   const provenance = JSON.stringify(report);
   const provenanceSignature = Buffer.from(await crypto.subtle.sign('Ed25519', workerKey.privateKey, encode(provenance))).toString('base64');
@@ -43,7 +58,7 @@ test('native output signing and offline verification bind every output, runtime 
   };
   const base = { id: 'native-intent', status: 'ready', expiresAt: Math.floor(Date.now() / 1000) + 600, keyFingerprint: fingerprint,
     build: { id: report.buildId, revisionId: report.revisionId, status: 'succeeded', surface: 'binary', architecture: 'x86_64', workerId: report.workerId, smokePassed: true, attempt: 2 },
-    review: { manifestSha256: 'f'.repeat(64), areaApproved: true, securityApproved: true, outputContract }, attestation: { provenance, provenanceSignature, workerPublicKey } };
+    review: { manifestSha256: 'f'.repeat(64), areaApproved: true, securityApproved: true, outputContract, ...(frozenInputs ? { inputLockSha256: frozenInputs.lock.sha256 } : {}) }, attestation: { provenance, provenanceSignature, workerPublicKey } };
   let control: Record<string, unknown> = { ...base, kind: 'package', artifact: { key: artifactKey, filename, sha256: artifactSha256, size: artifact.length } };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -63,6 +78,10 @@ test('native output signing and offline verification bind every output, runtime 
     await verified.signatures[0].verified;
     control = { ...control, build: { ...base.build, attempt: 1 } };
     expect((await sign()).status).toBe(409);
+    if (frozenInputs) {
+      control = { ...control, build: base.build, review: { ...base.review, inputLockSha256: '9'.repeat(64) } };
+      expect((await sign()).status).toBe(409);
+    }
     control = { ...base, kind: 'attestation', statement, artifact: { key: statementKey, filename: 'attestation.json', sha256: await sha256(statement), size: encode(statement).length } };
     expect((await sign()).status).toBe(200);
     const evidence = { statement: encode(statement), signature: objects.get(`${statementKey}.sig`)!, trustedPublicKey: key.publicKey, trustedFingerprint: fingerprint,
@@ -73,7 +92,7 @@ test('native output signing and offline verification bind every output, runtime 
       (value: any) => value.subject.pop(),
       (value: any) => value.predicate.buildDefinition.externalParameters.attempt++,
       (value: any) => value.predicate.buildDefinition.resolvedDependencies.pop(),
-      (value: any) => value.predicate.buildDefinition.externalParameters.inputPolicy = 'owned',
+      (value: any) => value.predicate.buildDefinition.externalParameters.inputPolicy = policy === 'owned' ? 'bootstrap' : 'owned',
     ]) {
       const changed = JSON.parse(statement); edit(changed); const text = JSON.stringify(changed);
       await expect(verifyReleaseEvidence({ ...evidence, statement: encode(text), signature: await centralSign(text) })).rejects.toThrow();

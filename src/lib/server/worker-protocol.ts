@@ -39,7 +39,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 
@@ -78,6 +78,7 @@ export interface EnrollmentToken {
 }
 
 export interface WorkerJob {
+  inputLock?: import('../frozen-inputs').InputObject;
   attempt?: number;
   outputContract?: import('./build-outputs').OutputContract;
   id: string;
@@ -495,7 +496,7 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
   try {
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
-        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json,
+        b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json, b.input_lock_sha256,
         b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at, b.dependency_blockers_json,
         q.name AS revision_name, r.request_id AS revision_request_id, r.version AS revision_version, r.recipe AS revision_recipe,
         r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,
@@ -506,6 +507,9 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
         r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
       FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
       WHERE b.id = ? AND b.worker_id = ?
+        AND (b.input_lock_sha256 IS NULL OR EXISTS(SELECT 1 FROM current_input_locks l JOIN build_input_selections s ON s.lock_sha256=l.sha256
+          WHERE l.sha256=b.input_lock_sha256 AND s.recipe_revision_id=b.revision_id AND s.architecture=b.architecture
+          AND s.cohort_id=l.cohort_id AND s.cohort_revision=l.cohort_revision))
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'area' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'security' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)`).bind(buildId, workerId).first<WorkerLease>();

@@ -80,6 +80,7 @@ var supportedWorkerCapabilities = [...]string{
 	"registry-pull",
 	"runtime-analysis-v1",
 	"multi-output-v2",
+	"frozen-inputs-v1",
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {

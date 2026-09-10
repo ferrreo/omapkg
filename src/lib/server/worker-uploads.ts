@@ -6,8 +6,8 @@ import {
   type ArtifactReference,
   type WorkerLease,
   requireWorkerLease,
-  validateArtifactFilename
-} from './workers';
+} from './worker-protocol';
+import { validateArtifactFilename } from './worker-results';
 import { audit, id, now, sha256 } from './db';
 import { artifactInsert, assertExpectedFilename, buildArtifacts, storedOutputContract } from './build-outputs';
 
@@ -368,7 +368,7 @@ export async function uploadMultipartPart(
   return { partNumber, sha256: saved.sha256, size: saved.size, etag: saved.etag };
 }
 
-async function hashObject(bucket: R2Bucket, key: string): Promise<{ sha256: string; size: number }> {
+export async function hashObject(bucket: R2Bucket, key: string, limit = MAX_UPLOAD_SIZE): Promise<{ sha256: string; size: number }> {
   let object: R2ObjectBody | null;
   try {
     object = await bucket.get(key) as R2ObjectBody | null;
@@ -384,7 +384,7 @@ async function hashObject(bucket: R2Bucket, key: string): Promise<{ sha256: stri
       const next = await reader.read();
       if (next.done) break;
       size += next.value.byteLength;
-      if (size > MAX_UPLOAD_SIZE) {
+      if (size > limit) {
         await reader.cancel();
         throw new WorkerProtocolError(409, 'Completed upload is too large');
       }

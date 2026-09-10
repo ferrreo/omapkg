@@ -1,14 +1,15 @@
 import type { Architecture, Source } from '../model';
 import { canonicalJson } from '../canonical-json';
 import { packageFilename, parseOutputContract, parseOutputMetadata, type OutputContract, type OutputMetadata } from '../output-contract';
-import { assertRuntimeEvidence, type RuntimeException } from './runtime-evidence';
+import { assertRuntimeEvidence, assertRuntimeAnalysis, preparedEnvironment, type RuntimeException } from './runtime-evidence';
+import { assertFrozenEvidence, type FrozenEvidence } from '../frozen-inputs';
 import { parseDependencyPlan, type DependencyPlan } from './dependency-plan';
 
 export interface OutputEvidence {
   schemaVersion: 2; attempt: number; outputContract: OutputContract;
   buildId: string; revisionId: string; workerId: string; recipeSha256: string; architecture: Architecture;
   imageDigest: string; sourceDateEpoch: number; sources: Source[]; network: 'disabled'; startedAt: string; finishedAt: string;
-  dependencyPlan?: DependencyPlan | null; buildEnvironment: unknown;
+  dependencyPlan?: DependencyPlan | null; frozenInputs?: FrozenEvidence; buildEnvironment: unknown;
   outputs: { pkgbase: string; filename: string; artifactSha256: string; packageMetadata: OutputMetadata }[];
   runtimeTests: { outputs: string[]; environment: { baseImage: string; preparedImage: string }; smokePassed: true;
     analyses: { name: string; runtimeAnalysis: { elf: { machine: string }[]; nativeCode: string[]; payloadSha256: string } }[] }[];
@@ -23,7 +24,7 @@ function keys(value: unknown, required: string[], optional: string[] = []): void
 // Shared by ingestion, the isolated signer and the offline verifier; no database authority is inferred here.
 export async function assertOutputEvidence(value: unknown, exceptions: RuntimeException[]): Promise<OutputEvidence> {
   keys(value, ['schemaVersion', 'attempt', 'outputContract', 'buildId', 'revisionId', 'workerId', 'recipeSha256', 'architecture', 'imageDigest',
-    'sourceDateEpoch', 'sources', 'network', 'startedAt', 'finishedAt', 'buildEnvironment', 'runtimeTests', 'outputs'], ['dependencyPlan']);
+    'sourceDateEpoch', 'sources', 'network', 'startedAt', 'finishedAt', 'buildEnvironment', 'runtimeTests', 'outputs'], ['dependencyPlan', 'frozenInputs']);
   const report = value as OutputEvidence;
   if (report.schemaVersion !== 2 || !Number.isSafeInteger(report.attempt) || report.attempt < 1 ||
       !['x86_64', 'aarch64'].includes(report.architecture) || !hash.test(report.recipeSha256) || !/^sha256:[a-f0-9]{64}$/.test(report.imageDigest) ||
@@ -50,6 +51,12 @@ export async function assertOutputEvidence(value: unknown, exceptions: RuntimeEx
   }
   if (pkgbases.size !== 1 || !Number.isSafeInteger(installedSize)) throw new Error('Inconsistent output package base or size');
   if (!Array.isArray(report.runtimeTests) || report.runtimeTests.length !== contract.runtimeGroups.length) throw new Error('Native installation test matrix is incomplete');
+  if (report.frozenInputs !== undefined) {
+    if (report.dependencyPlan) throw new Error('Frozen inputs cannot include a live dependency plan');
+    await assertFrozenEvidence(report.frozenInputs, { architecture: report.architecture, recipeSha256: report.recipeSha256,
+      cohortSha256: contract.cohort.manifestSha256, sourceDateEpoch: report.sourceDateEpoch, imageDigest: report.imageDigest,
+      environments: [preparedEnvironment(report.buildEnvironment), ...report.runtimeTests.map((test) => preparedEnvironment(test.environment))] });
+  }
   const payloads = new Map<string, string>();
   for (const [index, test] of report.runtimeTests.entries()) {
     keys(test, ['outputs', 'environment', 'analyses', 'smokePassed']);
@@ -60,7 +67,8 @@ export async function assertOutputEvidence(value: unknown, exceptions: RuntimeEx
       keys(item, ['name', 'runtimeAnalysis']);
       if (typeof item.name !== 'string' || !group.includes(item.name) || checked.has(item.name)) throw new Error('Output analysis is missing or duplicated');
       checked.add(item.name);
-      await assertRuntimeEvidence({ buildEnvironment: report.buildEnvironment, runtimeEnvironment: test.environment, runtimeAnalysis: item.runtimeAnalysis }, report.imageDigest, exceptions);
+      if (report.frozenInputs) await assertRuntimeAnalysis(item.runtimeAnalysis, exceptions);
+      else await assertRuntimeEvidence({ buildEnvironment: report.buildEnvironment, runtimeEnvironment: test.environment, runtimeAnalysis: item.runtimeAnalysis }, report.imageDigest, exceptions);
       const analysis = item.runtimeAnalysis;
       if (!hash.test(analysis.payloadSha256) || (payloads.has(item.name) && payloads.get(item.name) !== analysis.payloadSha256)) throw new Error('Package payload comparison digest is missing or inconsistent');
       payloads.set(item.name, analysis.payloadSha256);
@@ -73,6 +81,16 @@ export async function assertOutputEvidence(value: unknown, exceptions: RuntimeEx
 }
 
 export function outputResolvedDependencies(report: OutputEvidence) {
+  if (report.frozenInputs) {
+    const { lock, manifest } = report.frozenInputs;
+    return [
+      ...report.sources.map((source) => ({ name: source.name, uri: source.url, digest: { sha256: source.sha256 } })),
+      ...[{ name: 'input-lock', ...lock }, { name: 'helper-archive', ...manifest.helperArchive }, { name: 'makepkg-config', ...manifest.makepkgConfig },
+        ...manifest.environments.flatMap((environment) => environment.chunks.map((ref, index) => ({ name: `${environment.name}-packages-${index}`, ...ref })))].map((ref) => ({
+        name: ref.name, uri: `urn:sha256:${ref.sha256}`, digest: { sha256: ref.sha256 }, annotations: { size: String(ref.size) },
+      })),
+    ];
+  }
   return [
     ...report.sources.map((source) => ({ name: source.name, uri: source.url, digest: { sha256: source.sha256 } })),
     { name: 'builder-image', digest: { sha256: report.imageDigest.replace(/^sha256:/, '') } },

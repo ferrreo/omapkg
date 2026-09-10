@@ -28,6 +28,7 @@ export interface Build {
   smoke_passed: number; error: string | null; created_at: number; started_at: number | null; finished_at: number | null;
   dependency_blockers_json?: string | null;
   output_contract_json?: string | null;
+  input_lock_sha256?: string | null;
 }
 export interface Worker {
   id: string; name: string; architecture: Architecture; public_key: string;

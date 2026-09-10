@@ -11,6 +11,7 @@ import { verifyOutputProvenance } from './build-output-evidence';
 import { getBuildForWorker } from './worker-protocol';
 import { assertReviewed, joinedBuild, signingRequest } from './release-evidence';
 import { attestationKey, releaseAttestation } from './release-attestation';
+import { selectedInputLock } from './input-locks';
 
 export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, buildId: string) {
   const joined = await joinedBuild(env as Env, buildId);
@@ -42,11 +43,15 @@ export async function currentNativeBuild(env: Pick<Env, 'DB' | 'ARTIFACTS'>, bui
       if (review.kind === 'security') requireSecurity(actor);
     }
   }
-  const attempt = await env.DB.prepare(`SELECT a.worker_public_key,a.output_contract_json,a.dependency_plan_json,r.provenance,r.provenance_signature,r.installed_size,r.status
+  if (build.input_lock_sha256) {
+    const selected = await selectedInputLock(env, revision.id, build.architecture, contract);
+    if (selected?.sha256 !== build.input_lock_sha256) throw new PolicyError(409, 'Native input lock is no longer selected.');
+  }
+  const attempt = await env.DB.prepare(`SELECT a.worker_public_key,a.output_contract_json,a.dependency_plan_json,a.input_lock_sha256,r.provenance,r.provenance_signature,r.installed_size,r.status
     FROM build_attempts a JOIN build_attempt_results r USING(build_id,attempt) WHERE a.build_id=? AND a.attempt=?`).bind(build.id, build.attempt)
-    .first<{ worker_public_key: string; output_contract_json: string; dependency_plan_json: string | null; provenance: string; provenance_signature: string; installed_size: number; status: string }>();
+    .first<{ worker_public_key: string; output_contract_json: string; dependency_plan_json: string | null; input_lock_sha256: string | null; provenance: string; provenance_signature: string; installed_size: number; status: string }>();
   if (!attempt || attempt.status !== 'succeeded' || attempt.worker_public_key !== worker.public_key || attempt.output_contract_json !== build.output_contract_json ||
-      attempt.dependency_plan_json !== build.dependency_plan_json || attempt.provenance !== build.provenance || attempt.provenance_signature !== build.provenance_signature ||
+      attempt.dependency_plan_json !== build.dependency_plan_json || attempt.input_lock_sha256 !== (build.input_lock_sha256 ?? null) || attempt.provenance !== build.provenance || attempt.provenance_signature !== build.provenance_signature ||
       attempt.installed_size !== build.installed_size) throw new PolicyError(409, 'Native signing must match immutable attempt evidence.');
   const artifacts = await buildArtifacts(env.DB, build);
   await verifyOutputProvenance(worker, build, artifacts, build.provenance, build.provenance_signature, build.installed_size ?? undefined);

@@ -24,7 +24,7 @@ export function runtimeExceptions(value: unknown): RuntimeException[] {
   });
 }
 
-function environment(value: unknown): { baseImage: string; preparedImage: string; packages: string[] } {
+export function preparedEnvironment(value: unknown): { baseImage: string; preparedImage: string; packages: string[] } {
   const item = value as Record<string, unknown> | undefined;
   if (!item || typeof item.baseImage !== 'string' || item.baseImage.length > 1024 || !/^.+@sha256:[a-f0-9]{64}$/.test(item.baseImage) ||
       typeof item.preparedImage !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(item.preparedImage) ||
@@ -33,16 +33,20 @@ function environment(value: unknown): { baseImage: string; preparedImage: string
       new Set(item.packages.map((entry: string) => entry.split(' ')[0])).size !== item.packages.length) {
     throw new Error('Exact prepared environment identity and package inventory are required');
   }
-  return item as ReturnType<typeof environment>;
+  return item as ReturnType<typeof preparedEnvironment>;
 }
 
 export async function assertRuntimeEvidence(provenance: Record<string, unknown>, imageDigest: string, exceptions: RuntimeException[]): Promise<void> {
-  const build = environment(provenance.buildEnvironment);
-  const runtime = environment(provenance.runtimeEnvironment);
+  const build = preparedEnvironment(provenance.buildEnvironment);
+  const runtime = preparedEnvironment(provenance.runtimeEnvironment);
   if (!build.baseImage.endsWith(`@${imageDigest}`) || runtime.baseImage === build.baseImage || runtime.preparedImage === build.preparedImage) {
     throw new Error('Runtime checks require a separate minimal image from the reviewed builder');
   }
-  const analysis = provenance.runtimeAnalysis as Record<string, unknown> | undefined;
+  await assertRuntimeAnalysis(provenance.runtimeAnalysis, exceptions);
+}
+
+export async function assertRuntimeAnalysis(value: unknown, exceptions: RuntimeException[]): Promise<void> {
+  const analysis = value as Record<string, unknown> | undefined;
   if (!analysis || analysis.schemaVersion !== 1 || analysis.tool !== 'namcap' || typeof analysis.toolVersion !== 'string' || !analysis.toolVersion || analysis.toolVersion.length > 128 ||
       analysis.runtimeClosureComplete !== false || !Array.isArray(analysis.unknowns) || !analysis.unknowns.length || analysis.unknowns.length > 32 || analysis.unknowns.some((item) => typeof item !== 'string' || !item || item.length > 4096) ||
       !Array.isArray(analysis.elf) || analysis.elf.length > 4096 || !Array.isArray(analysis.findings) || analysis.findings.length > 1024 ||

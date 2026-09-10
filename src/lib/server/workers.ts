@@ -1,4 +1,5 @@
 import { cohortOutputContract, storedOutputContract } from './build-outputs';
+import { selectedInputLock } from './input-locks';
 import { revisionRecipePolicy } from '../../../services/pipeline/recipe-policy';
 import { sha256, id, now, audit } from './db';
 import type { Worker, Architecture, Build, Actor } from '../model';
@@ -317,7 +318,7 @@ export async function retryBuild(db: D1Database, actor: Actor | null, buildId: s
   }
 }
 
-async function reviewedCandidate(db: D1Database, architecture: Architecture, timestamp: number, multiOutput: boolean): Promise<CandidateBuild | null> {
+async function reviewedCandidate(db: D1Database, architecture: Architecture, timestamp: number, multiOutput: boolean, frozenInputs: boolean): Promise<CandidateBuild | null> {
   try {
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
@@ -336,6 +337,8 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
       WHERE b.architecture = ?
         AND q.status IN ('queued', 'building')
         AND (?=1 OR r.surface='recipe' OR NOT EXISTS(SELECT 1 FROM cohort_recipe_ownership WHERE recipe_revision_id=r.id))
+        AND NOT EXISTS(SELECT 1 FROM build_input_selections s JOIN cohorts c ON c.id=s.cohort_id AND c.current_revision=s.cohort_revision
+          WHERE s.recipe_revision_id=r.id AND s.architecture=b.architecture AND (?=0 OR NOT EXISTS(SELECT 1 FROM current_input_locks l WHERE l.sha256=s.lock_sha256)))
         AND NOT EXISTS (SELECT 1 FROM cohort_recipe_ownership owned JOIN cohorts cohort ON cohort.id=owned.cohort_id
           WHERE owned.recipe_revision_id=r.id AND (cohort.phase<>'build' OR cohort.condition NOT IN ('ready','blocked')
             OR NOT EXISTS(SELECT 1 FROM cohort_members member WHERE member.cohort_id=cohort.id
@@ -346,7 +349,7 @@ async function reviewedCandidate(db: D1Database, architecture: Architecture, tim
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'area' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
         AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'security' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
       ORDER BY b.created_at ASC, b.id ASC
-      LIMIT 1`).bind(architecture, Number(multiOutput), timestamp).first<CandidateBuild>();
+      LIMIT 1`).bind(architecture, Number(multiOutput), Number(frozenInputs), timestamp).first<CandidateBuild>();
   } catch (cause) {
     return databaseFailure(cause);
   }
@@ -361,7 +364,7 @@ export async function claimJob(
   const timestamp = now();
   await refreshWorkerMetadata(db, worker, metadata, timestamp);
   const capabilities = metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]');
-  const candidate = await reviewedCandidate(db, worker.architecture, timestamp, capabilities.includes('multi-output-v2'));
+  const candidate = await reviewedCandidate(db, worker.architecture, timestamp, capabilities.includes('multi-output-v2'), Boolean(dependencyContext) && capabilities.includes('frozen-inputs-v1'));
   if (!candidate) return null;
   if (revisionRecipePolicy(candidate.revision_sbom_json).recorded &&
       !(metadata?.capabilities ?? JSON.parse(worker.capabilities_json ?? '[]')).includes('runtime-analysis-v1')) return null;
@@ -375,10 +378,11 @@ export async function claimJob(
   }
   const outputContract = candidate.revision_surface === 'binary' ? await cohortOutputContract(db, { id: candidate.revision_id, version: candidate.revision_version, pkgrel: candidate.revision_pkgrel, sbom_json: candidate.revision_sbom_json }, worker.architecture) : null;
   const outputContractJSON = outputContract ? JSON.stringify(outputContract) : null;
+  const inputLock = outputContract && dependencyContext ? await selectedInputLock({ DB: db, ARTIFACTS: dependencyContext.ARTIFACTS }, candidate.revision_id, worker.architecture, outputContract) : null;
   let dependencyPlan: DependencyPlan | null = null;
   let planDigest: string | null = null;
   let dependencyReleaseIds: string[] = [];
-  if (dependencyContext) {
+  if (dependencyContext && !inputLock) {
     try {
       const planned = await planDependencies({ DB: db, ...dependencyContext }, {
         architecture: worker.architecture,
@@ -399,7 +403,7 @@ export async function claimJob(
     await db.batch([
       db.prepare(`UPDATE builds AS b SET status = 'leased', worker_id = ?, lease_token = ?, lease_expires_at = ?,
         attempt = attempt + 1, started_at = ?, finished_at = NULL, error = NULL,
-        artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = ?, output_contract_json = ?,
+        artifact_key = NULL, artifact_sha256 = NULL, artifact_size = NULL, artifact_filename = NULL, installed_size = NULL, dependency_plan_json = ?, output_contract_json = ?, input_lock_sha256 = ?,
         provenance = NULL, provenance_signature = NULL, smoke_passed = 0, dependency_blockers_json = NULL
         WHERE id = ? AND architecture = ?
           AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))
@@ -409,13 +413,14 @@ export async function claimJob(
           AND EXISTS (SELECT 1 FROM revisions r WHERE r.id = b.revision_id AND r.pr_url IS NOT NULL AND r.commit_sha IS NOT NULL AND length(r.image_digest) > 0)
           AND EXISTS (SELECT 1 FROM requests q WHERE q.id = (SELECT request_id FROM revisions WHERE id = b.revision_id) AND q.status IN ('queued', 'building'))
           AND EXISTS (SELECT 1 FROM workers w WHERE w.id = ? AND w.status = 'active' AND w.accepting_jobs = 1 AND w.removed_at IS NULL)`)
-        .bind(worker.id, leaseToken, leaseExpiresAt, timestamp, dependencyPlanJSON, outputContractJSON, candidate.id, worker.architecture, timestamp,
+        .bind(worker.id, leaseToken, leaseExpiresAt, timestamp, dependencyPlanJSON, outputContractJSON, inputLock?.sha256 ?? null, candidate.id, worker.architecture, timestamp,
           candidate.revision_manifest_sha256, candidate.revision_manifest_sha256, worker.id),
       db.prepare(`INSERT INTO audit_events(actor, action, target, detail, created_at)
         SELECT ?, 'worker.job_claimed', ?, ?, ? WHERE changes() = 1`)
         .bind(`worker:${worker.id}`, candidate.id, JSON.stringify({
           requestId: candidate.revision_request_id, architecture: worker.architecture, attempt: candidate.attempt + 1, revisionId: candidate.revision_id,
           dependencyPlanSha256: planDigest, dependencyReleaseIds,
+          inputLockSha256: inputLock?.sha256 ?? null,
           dependencyPlanRefs: dependencyPlan?.packages.map((item) => ({ releaseId: item.releaseId, url: item.url, signatureUrl: item.signatureUrl, sha256: item.sha256, size: item.size })) ?? [],
         }), timestamp),
       db.prepare(`UPDATE requests SET status='building',updated_at=? WHERE id=? AND status='queued'
@@ -458,6 +463,7 @@ export async function claimJob(
     if (!claimedDependencyPlan) throw new WorkerProtocolError(500, 'Stored OPR dependency plan is invalid');
   }
   return {
+    ...(inputLock ? { inputLock } : {}),
     ...(storedOutputContract(claimed) ? { outputContract: storedOutputContract(claimed)!, attempt: claimed.attempt } : {}),
     id: claimed.id,
     leaseToken,

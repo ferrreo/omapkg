@@ -15,6 +15,7 @@ export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public
   try { report = await assertOutputEvidence(JSON.parse(provenance), reviewedRuntimeExceptions(build.revision_sbom_json)); }
   catch (cause) { throw new WorkerProtocolError(409, cause instanceof Error ? cause.message : 'Invalid output evidence'); }
   const { imageDigest } = workerImage(build);
+  if ((report.frozenInputs?.lock.sha256 ?? null) !== (build.input_lock_sha256 ?? null)) throw new WorkerProtocolError(409, 'Frozen input lock differs from lease');
   if (report.schemaVersion !== 2 || report.attempt !== build.attempt || !sameJson(report.outputContract, contract) || report.buildId !== build.id ||
       report.revisionId !== build.revision_id || report.workerId !== worker.id || report.recipeSha256 !== build.revision_recipe_sha256 ||
       report.architecture !== build.architecture || report.imageDigest !== imageDigest || report.network !== 'disabled' ||

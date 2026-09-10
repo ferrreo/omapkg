@@ -254,8 +254,56 @@ fresh installation inside its own OCI container runs package scripts/hooks with
 working `/proc` and `/dev`.
 
 [The input contract](../frozen-build-inputs.md) records limits and acceptance.
-This capability is not yet advertised: registration/review UI, lease freezing,
-central/offline verification and native ARM acceptance remain in progress.
-Existing v2 ingestion rejects this new evidence until authority checks land.
+At the worker checkpoint, registration/review UI, lease freezing and
+central/offline verification were still pending; those integrations follow below.
 These captures and native runs are local bootstrap validation, not production
 approval or owned-only release qualification. Full-plan completion is unproven.
+
+## Frozen input authority and coordinator acceptance
+
+Migration 0035 retains verified input objects and bounded canonical documents,
+immutable lock indexes, independent human reviews, selected build inputs and
+native package origins. Every attempt freezes its lock digest. Review or origin
+revocation fences affected active leases, including their input ancestry; a
+selected job cannot fall back to live repositories. Native package origins retain
+their original reviewed attempt when newer recipe/build attempts are proposed.
+
+Maintainers can upload a capture folder, inspect source records, keys and exact
+environment inventories, review/select a lock, sign completed native outputs,
+retain them as private inputs and assemble an owned lock of matching package
+versions. Different archive hashes require an explicit artifact choice. New locks
+require independent review; classification or selection does not bypass cohort
+ABI/reproducibility/release gates. Import and input pages remain private.
+
+Real local acceptance on 2026-09-10 uploaded 459 objects (766,521,848 bytes)
+through the browser, including the retained OCI helper. Separate explicitly
+labelled local test identities reviewed and selected the lock. A real x86_64
+daemon claimed it, fetched retained objects with signed lease requests, prepared
+215 build packages and 108 runtime packages offline, built both fixture outputs,
+passed native installation checks and completed through the coordinator in
+59 seconds. Both archive hashes matched earlier same-host runs:
+
+- `opr-frozen-docs-1.0-1-any.pkg.tar.zst`:
+  `84b607dda35e0e280fe33765da5a3a6465ee4b107ee538b5fabb14cd12af2fb7`
+- `opr-frozen-native-1.0-1-x86_64.pkg.tar.zst`:
+  `8bd2cec0a1d67d0619e42fca4db64ead0f940918d3992eae074d7498a9e50bb2`
+
+An ephemeral local signer signed both actual packages and the build statement.
+GnuPG verified both package signatures; the offline statement verifier verified
+both subjects and the `bootstrap` classification. Both outputs entered the
+private native input registry. This used the existing HTTP signer transport;
+temporary preview configuration was restored and the test signer stopped.
+No production admission, signing key, repository membership or cutover changed.
+
+Browser checks passed at 320/375/414/768/1440/1920 pixels, including resumable
+uploads, review/selection, private downloads and anonymous access denial. Live
+acceptance found and fixed a missing binary `Content-Type` and D1's expression
+depth limit of 100. A runnable check now compiles 30 native queries at that limit.
+Batch document/index operations avoid one storage request or insert per package.
+
+Validation: 230 application tests, 12 signer tests, Svelte/pipeline/signer type
+checks, Go tests/vet and ARM cross-compilation. Tests cover bootstrap relabelling,
+missing native providers, immutable attempts, ancestor revocation, distinct
+reviewers, stale leases, complete signatures and offline evidence substitution.
+Native ARM execution, independent reproduction, full source/catalog and ABI
+qualification, release/client integration and human cutover remain open.

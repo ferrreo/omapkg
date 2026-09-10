@@ -64,6 +64,7 @@ interface SignIntent {
     securityApproved: boolean;
     runtimeExceptions?: RuntimeException[];
     outputContract?: OutputContract;
+    inputLockSha256?: string;
   };
   attestation: {
     provenance: string;
@@ -278,6 +279,7 @@ async function verifyAttestation(intent: SignIntent): Promise<void> {
     const provenance = JSON.parse(intent.attestation.provenance);
     if (provenance.schemaVersion === 2) {
       const report = await assertOutputEvidence(provenance, intent.review.runtimeExceptions ?? []);
+      if (report.frozenInputs?.lock.sha256 !== intent.review.inputLockSha256) throw new Error('Native frozen inputs differ from reviewed signing lock');
       if (report.attempt !== intent.build.attempt || canonicalJson(report.outputContract) !== canonicalJson(intent.review.outputContract) ||
           (intent.kind === 'package' && !report.outputs.some((output) => output.filename === intent.artifact.filename && output.artifactSha256 === intent.artifact.sha256))) {
         throw new Error('Native signing subject or output contract differs from reviewed attempt');
