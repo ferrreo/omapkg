@@ -170,6 +170,7 @@ jobs:
           docker run --rm --privileged --network none \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v "$FACTORY_EVIDENCE/oci:/work/oci:rw" \
+            -e OPR_IMAGE_REPRO_OUTER_NETWORK_NONE=1 \
             "$FACTORY_IMAGE_TOOLCHAIN" bash -lc '
               set -euo pipefail
               test "$(uname -m)" = x86_64
@@ -198,16 +199,25 @@ jobs:
           mkdir -p "$FACTORY_EVIDENCE"
           upload="$RUNNER_TEMP/factory-upload-x86"
           mkdir -p "$upload"
-          while IFS= read -r -d '' file; do
-            relative=${file#"$FACTORY_EVIDENCE"/}
-            destination="$upload/$relative"
-            mkdir -p "$(dirname "$destination")"
-            cp -- "$file" "$destination"
-          done < <(
-            find "$FACTORY_EVIDENCE" -type f \
-              \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
-              -print0
-          )
+          copy_allowed() {
+            local root=$1
+            local depth=${2:-}
+            [[ -d "$root" ]] || return 0
+            while IFS= read -r -d '' file; do
+              relative=${file#"$FACTORY_EVIDENCE"/}
+              destination="$upload/$relative"
+              mkdir -p "$(dirname "$destination")"
+              sudo cat -- "$file" >"$destination"
+            done < <(
+              sudo find "$root" $depth -type f \
+                \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
+                -print0
+            )
+          }
+          copy_allowed "$FACTORY_EVIDENCE" -maxdepth 1
+          for root in "$FACTORY_EVIDENCE/template-matrix" "$FACTORY_EVIDENCE/oci" "$FACTORY_EVIDENCE/filesystem"; do
+            copy_allowed "$root"
+          done
           (
             find "$upload" -type f -print0 \
               | sort -z \
@@ -241,7 +251,7 @@ jobs:
             tar_args+=(--directory /tmp "$(basename "$root")")
           done < <(find /tmp -maxdepth 1 -type d -name 'opr-reproducibility-*' -print0)
           archive="$archive_dir/factory-failure-x86.tar.gz.gpg"
-          tar --sparse --create --gzip --file - "${tar_args[@]}" \
+          sudo tar --sparse --create --gzip --file - "${tar_args[@]}" \
             | GNUPGHOME="$gpg_home" gpg --batch --no-tty --trust-model always --recipient "$recipient" --encrypt --output "$archive"
           jq -cS -n --arg fingerprint "$recipient" --arg archive "$(basename "$archive")" --arg sha256 "$(sha256sum "$archive" | awk '{print $1}')" \
             '{schemaVersion:1,kind:"factory-failure-evidence",recipientFingerprint:$fingerprint,archive:$archive,sha256:$sha256}' \
@@ -390,16 +400,25 @@ jobs:
           mkdir -p "$FACTORY_EVIDENCE"
           upload="$RUNNER_TEMP/factory-upload-arm"
           mkdir -p "$upload"
-          while IFS= read -r -d '' file; do
-            relative=${file#"$FACTORY_EVIDENCE"/}
-            destination="$upload/$relative"
-            mkdir -p "$(dirname "$destination")"
-            cp -- "$file" "$destination"
-          done < <(
-            find "$FACTORY_EVIDENCE" -type f \
-              \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
-              -print0
-          )
+          copy_allowed() {
+            local root=$1
+            local depth=${2:-}
+            [[ -d "$root" ]] || return 0
+            while IFS= read -r -d '' file; do
+              relative=${file#"$FACTORY_EVIDENCE"/}
+              destination="$upload/$relative"
+              mkdir -p "$(dirname "$destination")"
+              sudo cat -- "$file" >"$destination"
+            done < <(
+              sudo find "$root" $depth -type f \
+                \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
+                -print0
+            )
+          }
+          copy_allowed "$FACTORY_EVIDENCE" -maxdepth 1
+          for root in "$FACTORY_EVIDENCE/template-matrix"; do
+            copy_allowed "$root"
+          done
           (
             find "$upload" -type f -print0 \
               | sort -z \
@@ -433,7 +452,7 @@ jobs:
             tar_args+=(--directory /tmp "$(basename "$root")")
           done < <(find /tmp -maxdepth 1 -type d -name 'opr-reproducibility-*' -print0)
           archive="$archive_dir/factory-failure-arm.tar.gz.gpg"
-          tar --sparse --create --gzip --file - "${tar_args[@]}" \
+          sudo tar --sparse --create --gzip --file - "${tar_args[@]}" \
             | GNUPGHOME="$gpg_home" gpg --batch --no-tty --trust-model always --recipient "$recipient" --encrypt --output "$archive"
           jq -cS -n --arg fingerprint "$recipient" --arg archive "$(basename "$archive")" --arg sha256 "$(sha256sum "$archive" | awk '{print $1}')" \
             '{schemaVersion:1,kind:"factory-failure-evidence",recipientFingerprint:$fingerprint,archive:$archive,sha256:$sha256}' \

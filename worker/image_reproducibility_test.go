@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +95,11 @@ func runOCIImageReproducibility(t *testing.T, repoRoot, profile, outputRoot stri
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Fatalf("incomplete: jq is required: %v", err)
 	}
+	if os.Getenv("OPR_IMAGE_REPRO_OUTER_NETWORK_NONE") == "1" {
+		if err := assertLoopbackOnlyNetwork(); err != nil {
+			t.Fatalf("incomplete: outer network isolation is not loopback-only: %v", err)
+		}
+	}
 	version := buildahVersion()
 	versionFields := strings.Fields(version)
 	versionMatches := false
@@ -119,7 +125,7 @@ func runOCIImageReproducibility(t *testing.T, repoRoot, profile, outputRoot stri
 	deterministic := runReproducibilityPair(t, filepath.Join(outputRoot, "deterministic"), gap, ociBuilder(repoRoot, profile, profileValue.SourceDateEpoch, false))
 	if deterministic.result.Status != ReproducibilityIndependentlyReproduced || deterministic.result.Gap < gap {
 		writeImageMismatchArtifacts(deterministic)
-		t.Fatalf("deterministic OCI fixture did not reproduce: status=%s gap=%s differences=%+v", deterministic.result.Status, deterministic.result.Gap, deterministic.result.Differences)
+		t.Fatalf("deterministic OCI fixture did not reproduce: status=%s gap=%s err=%v differences=%+v log=%s", deterministic.result.Status, deterministic.result.Gap, deterministic.err, deterministic.result.Differences, deterministic.result.Primary.Log)
 	}
 
 	nondeterministic := runReproducibilityPair(t, filepath.Join(outputRoot, "nondeterministic"), gap, ociBuilder(repoRoot, profile, profileValue.SourceDateEpoch, true))
@@ -128,6 +134,20 @@ func runOCIImageReproducibility(t *testing.T, repoRoot, profile, outputRoot stri
 		t.Fatalf("nondeterministic OCI fixture was not detected: status=%s err=%v", nondeterministic.result.Status, nondeterministic.err)
 	}
 	writeImageMismatchArtifacts(nondeterministic)
+}
+
+func assertLoopbackOnlyNetwork() error {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return err
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		return fmt.Errorf("interface %s exists outside loopback", iface.Name)
+	}
+	return nil
 }
 
 type pairRun struct {
@@ -192,7 +212,11 @@ func ociBuilder(repoRoot, profile string, sourceDateEpoch int64, nondeterministi
 		start := time.Now().UTC()
 		tag := "localhost/omapkg-repro-" + request.Attempt + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ":fixture"
 		global := []string{"--root", storageRoot, "--runroot", runRoot, "--storage-driver=vfs"}
-		buildArgs := append(append([]string{}, global...), "bud", "--format", "oci", "--network", "none", "--no-cache", "--pull=never", "--timestamp", strconv.FormatInt(sourceDateEpoch, 10), "--arch", "amd64", "--os", "linux", "--file", filepath.Join(contextRoot, "Dockerfile"), "--tag", tag, contextRoot)
+		networkMode := "none"
+		if os.Getenv("OPR_IMAGE_REPRO_OUTER_NETWORK_NONE") == "1" {
+			networkMode = "host"
+		}
+		buildArgs := append(append([]string{}, global...), "bud", "--format", "oci", "--network", networkMode, "--no-cache", "--pull=never", "--timestamp", strconv.FormatInt(sourceDateEpoch, 10), "--arch", "amd64", "--os", "linux", "--file", filepath.Join(contextRoot, "Dockerfile"), "--tag", tag, contextRoot)
 		buildOutput, buildErr := runImageCommand(ctx, builder, buildArgs, request.Root)
 		if buildErr == nil {
 			pushArgs := append(append([]string{}, global...), "push", "--quiet", tag, "oci:"+layoutRoot+":latest")
@@ -223,7 +247,11 @@ func ociBuilder(repoRoot, profile string, sourceDateEpoch int64, nondeterministi
 
 func runImageCommand(ctx context.Context, command string, args []string, tempRoot string) (string, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Env = append(os.Environ(), "BUILDAH_ISOLATION=chroot", "BUILDAH_LAYERS=false", "TMPDIR="+filepath.Join(tempRoot, "tmp"))
+	isolation := "oci"
+	if os.Getenv("OPR_IMAGE_REPRO_OUTER_NETWORK_NONE") == "1" {
+		isolation = "chroot"
+	}
+	cmd.Env = append(os.Environ(), "BUILDAH_ISOLATION="+isolation, "BUILDAH_LAYERS=false", "TMPDIR="+filepath.Join(tempRoot, "tmp"))
 	if err := os.MkdirAll(filepath.Join(tempRoot, "tmp"), 0o700); err != nil {
 		return "", err
 	}

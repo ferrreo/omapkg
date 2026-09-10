@@ -57,7 +57,7 @@ func TestRunReproducibilityPairUsesFreshRootsGapAndPreservesMismatch(t *testing.
 	if !errors.Is(err, ErrReproducibilityMismatch) {
 		t.Fatalf("error = %v, want mismatch", err)
 	}
-	if result.Status != ReproducibilityMismatch || result.Gap < 10*time.Millisecond || result.FailureRoot != root {
+	if result.Status != ReproducibilityMismatch || result.Gap < 10*time.Millisecond || result.FailureRoot != filepath.Clean(root) {
 		t.Fatalf("result = %+v", result)
 	}
 	if result.Primary.Root == result.Secondary.Root || result.Primary.Outputs[0].Path == result.Secondary.Outputs[0].Path {
