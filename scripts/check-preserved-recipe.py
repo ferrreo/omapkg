@@ -101,17 +101,21 @@ LocalFileSigLevel = Required
 GPGDir = /etc/pacman.d/gnupg
 DownloadUser = root
 DisableSandboxFilesystem
+DisableSandboxSyscalls
 [core]
 Server = {mirror}
 [extra]
 Server = {mirror}
 """)
-    command("podman", "run", "--rm", "--read-only", "--network=slirp4netns:allow_host_loopback=false,enable_ipv6=false",
+    preparation = ["podman", "run", "--rm", "--read-only", "--network=bridge",
             "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
             "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
             "--mount", f"type=bind,src={frozen},dst=/capture",
             "--mount", f"type=bind,src={PROJECT / 'services/pipeline/capture-bootstrap-inputs.py'},dst=/capture.py,ro",
-            image, "python3", "/capture.py", "--output", "/capture", "--architecture", architecture,
+            image]
+    probe = mirror.replace("$repo", "core").replace("$arch", architecture) + "/core.db"
+    command(*preparation, "python3", "-c", f"import urllib.request; r=urllib.request.urlopen({probe!r},timeout=20); print('Native preparation HTTPS status:',r.status); r.close()")
+    command(*preparation, "python3", "/capture.py", "--output", "/capture", "--architecture", architecture,
             "--helper-image", helper, "--helper-archive", "/capture/helper.tar", "--makepkg-config", "/capture/makepkg.conf",
             "--pacman-config", "/capture/resolver.conf", "--recipe-sha256", RECIPE_SHA256, "--cohort-sha256", "a" * 64,
             "--source-date-epoch", str(epoch), "--transfer-limit-bytes", str(16 << 30),
