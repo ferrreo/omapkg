@@ -5,14 +5,21 @@ import {
 } from './archive-safety';
 
 export const MAX_SOURCE_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
+
 export const MAX_SOURCE_ARCHIVE_ENTRIES = 20_000;
+
 export const MAX_SOURCE_ARCHIVE_PATH_BYTES = 4_096;
+
 export const MAX_SOURCE_ARCHIVE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024;
+
 export const MAX_SOURCE_ARCHIVE_MANIFEST_BYTES = 8 * 1024 * 1024;
+
 export const MAX_SOURCE_ARCHIVE_INVENTORY_ENTRIES = 200;
+
 export const SOURCE_ARCHIVE_TIMEOUT_SECONDS = 180;
 
 export type SourceArchiveFormat = 'tar' | 'zip';
+
 export type SourceArchiveEntryKind = 'file' | 'directory' | 'symlink' | 'hardlink';
 
 export interface SourceArchiveEntry {
@@ -45,7 +52,9 @@ export interface SourceArchiveCommandOptions {
 }
 
 const SHA256 = /^[0-9a-f]{64}$/;
+
 const formats: readonly SourceArchiveFormat[] = ['tar', 'zip'];
+
 const kinds: readonly SourceArchiveEntryKind[] = ['file', 'directory', 'symlink', 'hardlink'];
 
 function workspaceRoot(value = '/workspace'): string {
@@ -53,6 +62,7 @@ function workspaceRoot(value = '/workspace'): string {
     !/^[A-Za-z0-9._+@%/-]+$/.test(value) || value.split('/').includes('..') || value.endsWith('/')) {
     throw new Error('source archive workspace root is invalid');
   }
+
   return value;
 }
 
@@ -61,6 +71,7 @@ function sandboxPath(value: string, label: string, root: string): string {
     !/^[A-Za-z0-9._+@%/-]+$/.test(value) || value.endsWith('/') || value.includes('//') || value.split('/').includes('..')) {
     throw new Error(`${label} must be an absolute workspace path`);
   }
+
   return value;
 }
 
@@ -70,6 +81,7 @@ function shellQuote(value: string): string {
 
 function assertLimit(value: number, maximum: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) throw new Error(`${label} is invalid`);
+
   return value;
 }
 
@@ -89,15 +101,19 @@ export function validateSourceArchiveEntries(
   const maxExpandedBytes = limits.maxExpandedBytes ?? MAX_SOURCE_ARCHIVE_EXPANDED_BYTES;
   assertLimit(maxEntries, MAX_SOURCE_ARCHIVE_ENTRIES, 'source archive entry limit');
   assertLimit(maxExpandedBytes, MAX_SOURCE_ARCHIVE_EXPANDED_BYTES, 'source archive expansion limit');
+
   if (rawEntries.length === 0) throw new Error('source archive is empty');
+
   if (rawEntries.length > maxEntries) throw new Error('source archive contains too many entries');
 
   const entries = rawEntries.map((entry) => {
     if (!entry || !kinds.includes(entry.kind) || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > maxExpandedBytes) {
       throw new Error('source archive entry is invalid');
     }
+
     const path = normalizePath(entry.path);
     let target: string | null = null;
+
     if (entry.kind === 'symlink') {
       target = entry.target;
       resolveArchiveLinkTarget(path, target ?? '', MAX_SOURCE_ARCHIVE_PATH_BYTES);
@@ -106,59 +122,76 @@ export function validateSourceArchiveEntries(
     } else if (entry.target !== null && entry.target !== undefined && entry.target !== '') {
       throw new Error('source archive regular entry has a link target');
     }
+
     return { path, kind: entry.kind, size: entry.size, target };
   });
 
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
+
   if (byPath.size !== entries.length) throw new Error('source archive contains duplicate entries');
   let expandedSize = 0;
+
   for (const entry of entries) {
     if (expandedSize > maxExpandedBytes - entry.size) throw new Error('source archive exceeds the expansion limit');
     expandedSize += entry.size;
     let parent = entry.path;
+
     while (parent.includes('/')) {
       parent = parent.slice(0, parent.lastIndexOf('/'));
       const parentEntry = byPath.get(parent);
+
       if (parentEntry && parentEntry.kind !== 'directory') throw new Error('source archive has a non-directory parent');
     }
+
     if (entry.kind === 'hardlink') {
       const target = byPath.get(entry.target ?? '');
+
       if (!target || target.kind !== 'file') {
         throw new Error('source archive hardlink target is missing or not a regular file');
       }
     }
   }
+
   for (const entry of entries) {
     if (entry.kind === 'symlink') {
       const parent = entry.path.includes('/') ? entry.path.slice(0, entry.path.lastIndexOf('/')) : '';
       resolveCanonicalArchivePath(parent, entry.target ?? '', byPath);
     }
   }
+
   return entries;
 }
 
 function parseMetadata(raw: string): Map<string, string> {
   if (typeof raw !== 'string' || raw.length > 32 * 1024) throw new Error('source archive metadata is too large');
   const values = new Map<string, string>();
+
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const separator = line.indexOf('=');
+
     if (separator <= 0) throw new Error('source archive metadata is invalid');
     const key = line.slice(0, separator);
     const value = line.slice(separator + 1);
-    if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key) || /[\u0000\r\n\t]/.test(value) || values.has(key)) {
+
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key) || value.includes('\u0000') || value.includes('\r') || value.includes('\n') || value.includes('\t') || values.has(key)) {
       throw new Error('source archive metadata is invalid');
     }
+
     values.set(key, value);
   }
+
   return values;
 }
 
 function metadataInteger(values: Map<string, string>, key: string, maximum: number): number {
   const value = values.get(key) ?? '';
+
   if (!/^\d+$/.test(value)) throw new Error(`source archive ${key} is invalid`);
   const parsed = Number(value);
+
   if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) throw new Error(`source archive ${key} is invalid`);
+
   return parsed;
 }
 
@@ -168,25 +201,33 @@ export function parseSourceArchiveManifest(
   root = '/workspace',
 ): SourceArchiveManifest {
   const base = workspaceRoot(root);
+
   if (typeof entriesRaw !== 'string' || entriesRaw.length > MAX_SOURCE_ARCHIVE_MANIFEST_BYTES) {
     throw new Error('source archive entry manifest is too large');
   }
+
   const values = parseMetadata(metadataRaw);
+
   if (values.get('schemaVersion') !== '1' || !formats.includes(values.get('format') as SourceArchiveFormat)) {
     throw new Error('source archive metadata version or format is invalid');
   }
+
   const sourcePath = sandboxPath(values.get('sourcePath') ?? '', 'source archive path', base);
   const sourceSize = metadataInteger(values, 'sourceSize', MAX_SOURCE_ARCHIVE_BYTES);
   const expandedSize = metadataInteger(values, 'expandedSize', MAX_SOURCE_ARCHIVE_EXPANDED_BYTES);
   const sourceSha256 = values.get('sourceSha256') ?? '';
+
   if (!SHA256.test(sourceSha256)) throw new Error('source archive digest is invalid');
   const entries: SourceArchiveEntry[] = [];
+
   for (const line of entriesRaw.split('\n')) {
     if (!line) continue;
     const fields = line.split('\t');
+
     if (fields.length !== 4 || !/^(?:file|directory|symlink|hardlink)$/.test(fields[0] ?? '') || !/^\d+$/.test(fields[2] ?? '')) {
       throw new Error('source archive entry manifest is invalid');
     }
+
     entries.push({
       kind: fields[0] as SourceArchiveEntryKind,
       path: fields[1] ?? '',
@@ -194,9 +235,12 @@ export function parseSourceArchiveManifest(
       target: fields[3] || null,
     });
   }
+
   const validated = validateSourceArchiveEntries(entries);
   const calculatedSize = validated.reduce((total, entry) => total + entry.size, 0);
+
   if (calculatedSize !== expandedSize) throw new Error('source archive expansion total does not match metadata');
+
   return {
     schemaVersion: 1,
     format: values.get('format') as SourceArchiveFormat,
@@ -218,8 +262,11 @@ export function sourceArchiveReadablePaths(manifest: SourceArchiveManifest): str
 
 function inventoryPriority(path: string): number {
   const basename = path.slice(path.lastIndexOf('/') + 1);
+
   if (/^(?:PKGBUILD|Makefile|GNUmakefile|CMakeLists\.txt|meson\.build|configure|go\.mod|Cargo\.toml|package\.json)$/i.test(basename)) return 0;
+
   if (/^(?:license|copying|notice|readme)(?:[._ -].*)?$/i.test(basename)) return 1;
+
   return path.includes('/') ? 3 : 2;
 }
 
@@ -230,6 +277,7 @@ export function sourceArchiveInventory(
   if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_SOURCE_ARCHIVE_INVENTORY_ENTRIES) {
     throw new Error('source archive inventory limit is invalid');
   }
+
   return sourceArchiveReadablePaths(manifest)
     .sort((left, right) => inventoryPriority(left) - inventoryPriority(right) || left.localeCompare(right))
     .slice(0, limit);
@@ -241,7 +289,9 @@ export function assertSourceArchiveReadPaths(
 ): string[] {
   const paths = [...new Set(rawPaths.map(normalizePath))];
   const allowed = new Set(sourceArchiveReadablePaths(manifest));
+
   if (paths.some((path) => !allowed.has(path))) throw new Error('source file was not listed by archive inspection');
+
   return paths;
 }
 
@@ -250,6 +300,7 @@ export function sourceArchiveManifestSizeCheckCommand(options: SourceArchiveComm
   const entries = sandboxPath(options.entriesPath ?? `${root}/source-archive.entries`, 'source archive entries path', root);
   const metadata = sandboxPath(options.metadataPath ?? `${root}/source-archive.meta`, 'source archive metadata path', root);
   const q = shellQuote;
+
   return String.raw`#!/usr/bin/env bash
 set -eu
 for path in ${q(entries)} ${q(metadata)}; do
@@ -266,6 +317,7 @@ function sourceArchiveScript(options: SourceArchiveCommandOptions, materialize: 
   const destination = sandboxPath(options.destination ?? `${root}/source`, 'source archive destination', root);
   const entries = sandboxPath(options.entriesPath ?? `${root}/source-archive.entries`, 'source archive entries path', root);
   const metadata = sandboxPath(options.metadataPath ?? `${root}/source-archive.meta`, 'source archive metadata path', root);
+
   if (new Set([source, destination, entries, metadata]).size !== 4) throw new Error('source archive paths must be distinct');
   const maxBytes = assertLimit(options.maxBytes ?? MAX_SOURCE_ARCHIVE_BYTES, MAX_SOURCE_ARCHIVE_BYTES, 'source archive size limit');
   const maxEntries = assertLimit(options.maxEntries ?? MAX_SOURCE_ARCHIVE_ENTRIES, MAX_SOURCE_ARCHIVE_ENTRIES, 'source archive entry limit');
@@ -274,6 +326,7 @@ function sourceArchiveScript(options: SourceArchiveCommandOptions, materialize: 
   const q = shellQuote;
   const actual = `${root}/.source-archive.actual`;
   const entriesTmp = `${entries}.tmp`;
+
   const archiveScript = String.raw`
 awk -v max_entries=${maxEntries} -v max_path=${MAX_SOURCE_ARCHIVE_PATH_BYTES} -v max_expanded=${maxExpandedBytes} '
 function fail(message) { print message > "/dev/stderr"; exit 65 }
@@ -325,6 +378,7 @@ function link_inside(path, target, parent, count, i, part, depth, pieces) {
 END { if (count == 0) fail("source archive is empty") }
 '
 `;
+
   const relationshipScript = String.raw`
 awk -F '\t' '
 function fail(message) { print message > "/dev/stderr"; exit 65 }
@@ -348,6 +402,7 @@ END {
 }
 '
 `;
+
 const extraction = materialize ? String.raw`
 rm -rf ${q(destination)}
 mkdir -p ${q(destination)}
@@ -376,6 +431,7 @@ END {
 expanded_size=$(awk -F '\t' '$1 == "f" { total += $3 } END { printf "%.0f\n", total + 0 }' ${q(actual)})
 [[ "$expanded_size" =~ ^[0-9]+$ ]] && (( expanded_size <= max_expanded )) || fail 'extracted tree exceeds the expansion limit'
 ` : '';
+
   return String.raw`#!/usr/bin/env bash
 set -euo pipefail
 export LC_ALL=C

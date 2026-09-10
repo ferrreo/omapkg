@@ -3,11 +3,15 @@
   import GitHubSignIn from './GitHubSignIn.svelte';
 
   export let user: { id: string; name?: string; image?: string | null; githubUsername?: string | null } | null = null;
+
   export let role = 'public';
+
   export let packages: Array<{ name: string; version?: string; channel?: string; architecture?: string }> = [];
 
   let searchOpen = false;
+
   let query = '';
+
   let dialog: HTMLDialogElement;
 
   $: filteredPackages = packages
@@ -27,16 +31,22 @@
 
   function packageHref(pkg: { name: string; channel?: string; architecture?: string }) {
     const params = new URLSearchParams();
+
     if (pkg.channel === 'dev') params.set('channel', 'dev');
+
     if (pkg.architecture === 'x86_64' || pkg.architecture === 'aarch64') params.set('architecture', pkg.architecture);
     const queryString = params.toString();
+
     return `/packages/${encodeURIComponent(pkg.name)}${queryString ? `?${queryString}` : ''}`;
   }
 
   function handleKeydown(event: KeyboardEvent) {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
-      searchOpen ? closeSearch() : openSearch();
+
+      if (searchOpen) closeSearch();
+
+      else openSearch();
     }
 
     if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName)) {

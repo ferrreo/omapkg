@@ -13,8 +13,10 @@ const schema = ['0001_initial.sql', '0007_core_guards.sql', '0013_github_identit
 
 test('team membership grants all-area security, admin hierarchy, and immediate role removal', async () => {
   const db = new TestD1(schema);
+
   const env: Env = { DB: asD1(db), ARTIFACTS: {} as R2Bucket, PUBLIC_ORIGIN: 'https://omapkg.example',
     MAINTAINER_GITHUB_IDS: '101', SECURITY_GITHUB_IDS: '101', QUARANTINE_HOURS: '48' };
+
   try {
     db.prepare('INSERT INTO user(id,name,email,createdAt,updatedAt) VALUES(?,?,?,?,?)').bind('team-user', 'Test user', 'team@example.com', 1, 1).run();
     db.prepare('INSERT INTO account(id,accountId,providerId,issuer,userId,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)')
@@ -30,6 +32,7 @@ test('team membership grants all-area security, admin hierarchy, and immediate r
     const security = await actorFor(env, 'team-user');
     expect(security.role).toBe('security');
     expect(security.areas).toEqual(areas);
+
     for (const area of areas) expect(requireMaintainer(security, area)).toBe(security);
     expect(requireSecurity(security)).toBe(security);
     await expect(promoteBatch(env, security, [], 'Review test')).rejects.toMatchObject({ status: 400 });

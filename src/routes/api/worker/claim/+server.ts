@@ -16,15 +16,19 @@ import {
 export const POST: RequestHandler = async (event) => {
   try {
     const env = event.platform?.env;
+
     if (!env) throw new WorkerProtocolError(500, 'Worker protocol unavailable');
     requireJsonContentType(event.request);
     const body = await readBody(event.request, MAX_JSON_BODY_BYTES);
     const input = parseJsonRequest(body);
+
     if (Object.keys(input).some((key) => !['version', 'runtime', 'capabilities'].includes(key))) throw new WorkerProtocolError(400, 'Unexpected claim field');
     const metadata = parseWorkerMetadata(input);
     const auth = await authenticateWorker(env.DB, event.request, event.url.pathname + event.url.search, body);
     const inspection = await claimRecipeInspection(env.DB, auth.worker, metadata);
+
     if (inspection) return json({ job: inspection });
+
     return json({ job: await claimJob(env.DB, auth.worker, metadata, {
       ARTIFACTS: env.ARTIFACTS,
       PUBLIC_ORIGIN: env.PUBLIC_ORIGIN,

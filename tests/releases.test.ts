@@ -6,7 +6,6 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { manifestDigest } from '../src/lib/server/policy';
 import { promoteBatch, publishBuild, publicRelease, quarantineRelease, rollbackRelease } from '../src/lib/server/releases';
 import { sha256 } from '../src/lib/server/db';
-import type { Env } from '../src/lib/server/env';
 import { claimJob } from '../src/lib/server/workers';
 import { asD1, TestD1 } from './d1';
 
@@ -28,6 +27,7 @@ describe('release boundary', () => {
     const db = new TestD1(schema);
     const recipe = 'pkgname=hello\n';
     const sources = [{ name: 'hello.tar.gz', url: 'https://example.org/hello.tar.gz', sha256: 'a'.repeat(64) }];
+
     const revision = {
       id: 'revision-1', request_id: 'request-1', version: '1.0.0-1', recipe, recipe_sha256: await sha256(recipe), manifest_sha256: '',
       sources_json: JSON.stringify(sources), dependencies_json: '[]', smoke_commands_json: '["hello --version"]', architectures_json: '["x86_64"]',
@@ -35,6 +35,7 @@ describe('release boundary', () => {
       explanation: 'hello', sbom_json: '{}', lint_json: '{"passed":true}', upstream_commit: null,
       pr_url: 'https://github.com/example-owner/recipes/pull/1', commit_sha: 'c'.repeat(40), created_at: 1,
     };
+
     revision.manifest_sha256 = await manifestDigest(revision);
     const provenance = JSON.stringify({ buildId: 'build-1', revisionId: revision.id, architecture: 'x86_64', recipeSha256: revision.recipe_sha256, artifactSha256: 'd'.repeat(64), imageDigest: revision.image_digest.split('@').at(-1), sourceDateEpoch: revision.source_date_epoch, network: 'disabled', ...runtimeEvidence(revision.image_digest.split('@').at(-1)!), sources });
     db.prepare('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)').bind('request-1', 'hello', sources[0].url, 'archive', 'development', 'github:1', 'queued', 1, 1).run();
@@ -44,7 +45,7 @@ describe('release boundary', () => {
       revision.license, revision.surface, revision.explanation, revision.sbom_json, revision.lint_json, revision.upstream_commit, revision.pr_url,
       revision.commit_sha, revision.created_at, null,
     ).run();
-    db.prepare('INSERT INTO builds VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('build-1', revision.id, 'succeeded', 'x86_64', null, 'private/build-1/hello.pkg.tar.zst', 'd'.repeat(64), 10, null, null, 'hello-1.0.0-1-x86_64.pkg.tar.zst', provenance, 'AA==', 1, 1).run();
+    db.prepare('INSERT INTO builds VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('build-1', revision.id, 'succeeded', 'x86_64', null, 'private/build-1/hello.pkg.tar.zst', 'd'.repeat(64), 10, null, null, 'hello-1.0.0-1-x86_64.pkg.tar.zst', provenance, 'AA==', 1, 1, 0).run();
     db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?)').bind('approval-area', revision.id, 'github:1', 'area', revision.manifest_sha256, 1, null, null).run();
     db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?)').bind('approval-security', revision.id, 'github:2', 'security', revision.manifest_sha256, 1, null, null).run();
     await expect(publishBuild(env(db), { id: 'github:1', role: 'maintainer', areas: ['development'] }, 'build-1')).rejects.toThrow('Signing service is not configured');
@@ -58,6 +59,7 @@ describe('release boundary', () => {
     const source = [{ name: 'hello.tar.gz', url: 'https://example.org/hello.tar.gz', sha256: 'a'.repeat(64) }];
     const recipe = 'pkgname=hello\npkgver=1.0\npkgrel=1\n';
     const imageDigest = `ghcr.io/opr/builder@sha256:${'b'.repeat(64)}`;
+
     const revision = {
       id: 'revision-multiarch', request_id: 'request-multiarch', version: '1.0', recipe,
       recipe_sha256: await sha256(recipe), manifest_sha256: '', public_recipe: null, public_recipe_sha256: null,
@@ -66,16 +68,21 @@ describe('release boundary', () => {
       image_digest: imageDigest, license: 'MIT', surface: 'recipe' as const, explanation: 'hello', sbom_json: '{}', lint_json: '{"passed":true}',
       upstream_commit: null, pr_url: 'https://github.com/example-owner/recipes/pull/1', commit_sha: 'c'.repeat(40), created_at: timestamp,
     };
+
     revision.manifest_sha256 = await manifestDigest(revision);
     const x86Keys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
     const armKeys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
-    const x86Worker = { id: 'worker-x86', name: 'x86', architecture: 'x86_64' as const, public_key: base64(await crypto.subtle.exportKey('raw', x86Keys.publicKey)), status: 'active' as const, enrolled_at: timestamp, last_seen_at: timestamp, daemon_version: null, runtime: null, capabilities_json: null, accepting_jobs: 1, paused_at: null, removed_at: null };
-    const armWorker = { id: 'worker-arm', name: 'arm', architecture: 'aarch64' as const, public_key: base64(await crypto.subtle.exportKey('raw', armKeys.publicKey)), status: 'active' as const, enrolled_at: timestamp, last_seen_at: timestamp, daemon_version: null, runtime: null, capabilities_json: null, accepting_jobs: 1, paused_at: null, removed_at: null };
+    const x86Worker = { id: 'worker-x86', name: 'x86', architecture: 'x86_64' as const, public_key: base64(await crypto.subtle.exportKey('raw', x86Keys.publicKey)), status: 'active' as const, enrolled_at: timestamp, last_seen_at: timestamp, daemon_version: null, runtime: null, capabilities_json: JSON.stringify(['single-build-reproducibility-v1']), accepting_jobs: 1, paused_at: null, removed_at: null };
+    const armWorker = { id: 'worker-arm', name: 'arm', architecture: 'aarch64' as const, public_key: base64(await crypto.subtle.exportKey('raw', armKeys.publicKey)), status: 'active' as const, enrolled_at: timestamp, last_seen_at: timestamp, daemon_version: null, runtime: null, capabilities_json: JSON.stringify(['single-build-reproducibility-v1']), accepting_jobs: 1, paused_at: null, removed_at: null };
+
     const provenance = async (buildId: string, worker: typeof x86Worker | typeof armWorker, keys: CryptoKeyPair) => {
       const value = JSON.stringify({ buildId, revisionId: revision.id, workerId: worker.id, recipeSha256: revision.recipe_sha256, artifactSha256: null, architecture: worker.architecture, imageDigest: imageDigest.split('@').at(-1), sourceDateEpoch: timestamp, sources: source, network: 'disabled', ...runtimeEvidence(revision.image_digest.split('@').at(-1)!), startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:01:00Z' });
+
       return { value, signature: base64(await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(value))) };
     };
+
     const x86Provenance = await provenance('build-multiarch-x86', x86Worker, x86Keys);
+
     try {
       db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at,factory_run_id)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(revision.request_id, 'hello', source[0].url, 'archive', 'development', 'github:1', 'building', timestamp, timestamp, revision.id).run();
@@ -88,14 +95,17 @@ describe('release boundary', () => {
         revision.pkgrel, revision.source_date_epoch, revision.image_digest, revision.license, revision.surface, revision.explanation, revision.sbom_json,
         revision.lint_json, revision.upstream_commit, revision.pr_url, revision.commit_sha, revision.created_at, revision.public_recipe, revision.public_recipe_sha256,
       ).run();
+
       for (const approval of [['area', 'github:1'], ['security', 'github:2']] as const) {
         db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
           .bind(`approval-${approval[0]}`, revision.id, approval[1], approval[0], revision.manifest_sha256, timestamp).run();
       }
+
       for (const worker of [x86Worker, armWorker]) {
         db.prepare(`INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,last_seen_at,daemon_version,runtime,capabilities_json,accepting_jobs,paused_at,removed_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(worker.id, worker.name, worker.architecture, worker.public_key, worker.status, worker.enrolled_at, worker.last_seen_at, worker.daemon_version, worker.runtime, worker.capabilities_json, worker.accepting_jobs, worker.paused_at, worker.removed_at).run();
       }
+
       db.prepare(`INSERT INTO builds(id,revision_id,architecture,status,worker_id,lease_token,lease_expires_at,attempt,artifact_key,artifact_sha256,artifact_size,artifact_filename,provenance,provenance_signature,smoke_passed,error,created_at,started_at,finished_at,installed_size,dependency_plan_json)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind('build-multiarch-x86', revision.id, 'x86_64', 'succeeded', x86Worker.id, null, null, 1, null, null, null, null, x86Provenance.value, x86Provenance.signature, 1, null, timestamp, timestamp, timestamp + 1, null, null).run();
       db.prepare(`INSERT INTO builds(id,revision_id,architecture,status,worker_id,lease_token,lease_expires_at,attempt,created_at)
@@ -108,13 +118,16 @@ describe('release boundary', () => {
         expect(input.objectKind).toBe('attestation');
         const key = `${input.objectKey}.sig`;
         artifacts.objects.set(key, new Uint8Array([1]));
+
         return Response.json({ signature: { key, sha256: 'a'.repeat(64) } });
       } } as Fetcher;
       const originalHead = artifacts.head.bind(artifacts);
       artifacts.head = async (key: string) => {
         const object = await originalHead(key);
+
         return object && key.endsWith('.sig') ? { ...object, customMetadata: { signatureSha256: 'a'.repeat(64) } } : object;
       };
+
       const maintainer = { id: 'github:1', role: 'maintainer' as const, areas: ['development'] };
       await publishBuild(service, maintainer, 'build-multiarch-x86');
       expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(revision.request_id).first<{ status: string }>()?.status).toBe('queued');
@@ -138,6 +151,7 @@ describe('release boundary', () => {
       recipe_key: 'recipes/hello/1.0.0-1/x86_64/PKGBUILD', sbom_key: 'metadata/releases/release-1/sbom.json', provenance_key: 'metadata/releases/release-1/provenance.json',
       published_at: 1, stable_at: null, batch_id: null, previous_release_id: null,
     };
+
     const withArtifact = { ...release, artifact_filename: 'hello-1.0.0-1-x86_64.pkg.tar.zst', artifact_sha256: 'd'.repeat(64), artifact_size: 10 };
     expect(publicRelease(withArtifact, 'https://opr.example')).toBeNull();
     expect(publicRelease(withArtifact, 'https://opr.example', true)?.artifact?.url).toBe('https://opr.example/repo/dev/x86_64/hello-1.0.0-1-x86_64.pkg.tar.zst');
@@ -149,6 +163,7 @@ describe('release boundary', () => {
       CREATE TABLE repository_snapshots(id TEXT PRIMARY KEY,architecture TEXT,channel TEXT,db_key TEXT,db_signature_key TEXT,batch_id TEXT,created_at INTEGER,active INTEGER);
       CREATE TABLE promotion_batches(id TEXT PRIMARY KEY,actor TEXT,release_ids_json TEXT,reason TEXT,created_at INTEGER);
       CREATE TABLE distribution_assertions(expected INTEGER,actual INTEGER,CHECK(expected=actual));`);
+
     const r2 = new MemoryR2();
     r2.objects.set('signatures/package.sig', new Uint8Array([1, 2, 3]));
     r2.objects.set('signatures/database.sig', new Uint8Array([4, 5, 6]));
@@ -156,13 +171,14 @@ describe('release boundary', () => {
     envValue.ARTIFACTS = r2 as unknown as R2Bucket;
     envValue.SIGNER = { fetch: async (request: Request) => {
       const input = await request.json() as { objectKind: string };
+
       return Response.json({ signature: { key: input.objectKind === 'database' ? 'signatures/database.sig' : 'signatures/package.sig', sha256: 'a'.repeat(64) } });
     } } as unknown as Fetcher;
     db.prepare('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)').bind('request-2', 'demo', 'https://example.org/demo', 'archive', 'development', 'github:1', 'built', 1, 1).run();
     db.prepare('INSERT INTO revisions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('revision-2', 'request-2', '1.0.0-1', 'pkgname=demo\n', 'a'.repeat(64), 'b'.repeat(64), '[{"name":"demo.tar.gz","url":"https://example.org/demo.tar.gz","sha256":"' + 'c'.repeat(64) + '"}]', '["demo=1.0.0"]', '[]', '["x86_64"]', 1, 'ghcr.io/opr/builder@sha256:' + 'd'.repeat(64), 'MIT', 'binary', 'demo', '{}', '{"passed":true}', null, 'https://github.com/example-owner/recipes/pull/2', 'e'.repeat(40), 1, null).run();
-    db.prepare('INSERT INTO builds VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('build-2', 'revision-2', 'succeeded', 'x86_64', null, 'private/demo', 'f'.repeat(64), 3, 10, null, 'demo-1.0.0-1-x86_64.pkg.tar.zst', JSON.stringify({
+    db.prepare('INSERT INTO builds VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('build-2', 'revision-2', 'succeeded', 'x86_64', null, 'private/demo', 'f'.repeat(64), 3, 10, null, 'demo-1.0.0-1-x86_64.pkg.tar.zst', JSON.stringify({
       packageMetadata: { name: 'demo', fullVersion: '1.0.0-1', architecture: 'x86_64', installedSize: 10, depends: ['demo=1.0.0'], provides: [], conflicts: [], replaces: [] },
-    }), 'AA==', 1, 1).run();
+    }), 'AA==', 1, 1, 0).run();
     db.prepare('INSERT INTO releases VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind('release-2', 'build-2', 'demo', '1.0.0-1', 'x86_64', 'binary', 'dev', 'packages/x86_64/demo-1.0.0-1-x86_64.pkg.tar.zst', 'signatures/package.sig', 'recipes/demo/1.0.0-1/x86_64/PKGBUILD', 'metadata/sbom', 'metadata/provenance', 1, null, null, null).run();
     db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?)').bind('approval-area-2', 'revision-2', 'github:1', 'area', 'b'.repeat(64), 1, null, null).run();
     db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?)').bind('approval-security-2', 'revision-2', 'github:2', 'security', 'b'.repeat(64), 1, null, null).run();
@@ -212,6 +228,7 @@ describe('release boundary', () => {
       CREATE TABLE repository_snapshots(id TEXT PRIMARY KEY,architecture TEXT,channel TEXT,db_key TEXT,db_signature_key TEXT,batch_id TEXT,created_at INTEGER,active INTEGER);
       CREATE TABLE promotion_batches(id TEXT PRIMARY KEY,actor TEXT,release_ids_json TEXT,reason TEXT,created_at INTEGER);
       CREATE TABLE distribution_assertions(expected INTEGER,actual INTEGER,CHECK(expected=actual));`);
+
     const r2 = new MemoryR2();
     r2.objects.set('signatures/package.sig', new Uint8Array([1, 2, 3]));
     r2.objects.set('signatures/database.sig', new Uint8Array([4, 5, 6]));
@@ -219,6 +236,7 @@ describe('release boundary', () => {
     service.ARTIFACTS = r2 as unknown as R2Bucket;
     service.SIGNER = { fetch: async (request: Request) => {
       const input = await request.json() as { objectKind: string };
+
       return Response.json({ signature: { key: input.objectKind === 'database' ? 'signatures/database.sig' : 'signatures/package.sig', sha256: 'a'.repeat(64) } });
     } } as unknown as Fetcher;
     insertBinaryRelease(db, {
@@ -227,6 +245,7 @@ describe('release boundary', () => {
     });
     const result = await promoteBatch(service, { id: 'github:1', role: 'maintainer', areas: ['development'] }, ['release-native-relations'], 'quarantine and smoke checks passed');
     const databaseKey = [...r2.objects.keys()].find((key) => key.startsWith('repo/stable/x86_64/'));
+
     if (!databaseKey) throw new Error('expected development repository database');
     const databaseBytes = gunzipSync(r2.objects.get(databaseKey)!);
     const database = new TextDecoder().decode(databaseBytes);
@@ -243,6 +262,7 @@ describe('release boundary', () => {
       CREATE TABLE repository_snapshots(id TEXT PRIMARY KEY,architecture TEXT,channel TEXT,db_key TEXT,db_signature_key TEXT,batch_id TEXT,created_at INTEGER,active INTEGER);
       CREATE TABLE promotion_batches(id TEXT PRIMARY KEY,actor TEXT,release_ids_json TEXT,reason TEXT,created_at INTEGER);
       CREATE TABLE distribution_assertions(expected INTEGER,actual INTEGER,CHECK(expected=actual));`);
+
     const r2 = new MemoryR2();
     r2.objects.set('signatures/package.sig', new Uint8Array([1, 2, 3]));
     r2.objects.set('signatures/database.sig', new Uint8Array([4, 5, 6]));
@@ -250,6 +270,7 @@ describe('release boundary', () => {
     service.ARTIFACTS = r2 as unknown as R2Bucket;
     service.SIGNER = { fetch: async (request: Request) => {
       const input = await request.json() as { objectKind: string };
+
       return Response.json({ signature: { key: input.objectKind === 'database' ? 'signatures/database.sig' : 'signatures/package.sig', sha256: 'a'.repeat(64) } });
     } } as unknown as Fetcher;
     insertBinaryRelease(db, { id: 'release-foo-1', name: 'foo', version: '1.0-1', dependencies: [], channel: 'dev' });
@@ -260,6 +281,7 @@ describe('release boundary', () => {
     const result = await promoteBatch(service, { id: 'github:1', role: 'maintainer', areas: ['development'] }, ['release-bar-1'], 'index newest development packages');
     expect(result.releaseIds).toEqual(['release-bar-1']);
     const databaseKey = [...r2.objects.keys()].find((key) => key.startsWith('repo/dev/x86_64/'));
+
     if (!databaseKey) throw new Error('expected development repository database');
     const database = new TextDecoder().decode(gunzipSync(r2.objects.get(databaseKey)!));
     expect(database.match(/%NAME%\nfoo\n/g) ?? []).toHaveLength(1);
@@ -274,6 +296,7 @@ describe('release boundary', () => {
       CREATE TABLE release_rollbacks(release_id TEXT,previous_release_id TEXT,manifest_key TEXT,created_at INTEGER);
       CREATE TABLE repository_snapshots(id TEXT PRIMARY KEY,architecture TEXT,channel TEXT,db_key TEXT,db_signature_key TEXT,batch_id TEXT,created_at INTEGER,active INTEGER);
       CREATE TABLE distribution_assertions(expected INTEGER,actual INTEGER,CHECK(expected=actual));`);
+
     const r2 = new MemoryR2();
     r2.objects.set('signatures/package.sig', new Uint8Array([1, 2, 3]));
     const service = env(db);
@@ -294,6 +317,7 @@ describe('release boundary', () => {
 
   test('crash demotion rejects removing a provider needed by a retained package', async () => {
     const db = new TestD1(schema);
+
     try {
       insertBinaryRelease(db, { id: 'release-libfoo-crash', name: 'libfoo', version: '1.0-1', dependencies: [], nativeProvides: ['lib:libfoo.so.1'], channel: 'stable' });
       insertBinaryRelease(db, { id: 'release-app-crash', name: 'app', version: '1.0-1', dependencies: ['lib:libfoo.so.1'], nativeDependencies: ['lib:libfoo.so.1'], channel: 'stable' });

@@ -5,13 +5,19 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
 
   const defaultTeams = ['desktop', 'development', 'gaming', 'multimedia', 'productivity', 'system', 'security', 'release', 'admin'] as const;
+
   type TeamName = (typeof defaultTeams)[number];
+
   type MemberRecord = { accountId: string; github_username: string; avatar_url?: string | null; team: string; canRevoke: boolean };
+
   type UserSuggestion = { username: string; name?: string | null; avatarUrl?: string | null };
+
   type MemberGroup = { accountId: string; username: string; members: MemberRecord[] };
+
   type TeamData = { teams?: unknown; members?: unknown; suggestions?: unknown };
 
   $: raw = data as unknown as TeamData;
@@ -24,15 +30,20 @@
   $: result = form && typeof form === 'object' ? form as { success?: boolean; error?: string } : {};
 
   let githubUsername = '';
+
   let selectedTeams: string[] = [];
+
   let lookupState: 'idle' | 'checking' | 'valid' | 'invalid' = 'idle';
+
   let lookupMessage = '';
+
   let validationSequence = 0;
 
   const teamLabels: Record<TeamName, string> = {
     desktop: 'Desktop', development: 'Development', gaming: 'Gaming', multimedia: 'Multimedia',
     productivity: 'Productivity', system: 'System', security: 'Security', release: 'Release', admin: 'Admin'
   };
+
   const teamDescriptions: Record<TeamName, string> = {
     desktop: 'Review desktop package requests.',
     development: 'Review development package requests.',
@@ -56,20 +67,26 @@
   function normalizeMember(value: unknown): MemberRecord | null {
     if (!value || typeof value !== 'object') return null;
     const row = value as Record<string, unknown>;
+
     if (typeof row.accountId !== 'string' || typeof row.github_username !== 'string') return null;
     const team = typeof row.team === 'string' ? row.team : typeof row.area === 'string' ? row.area : '';
+
     if (!team) return null;
+
     return { accountId: row.accountId, github_username: row.github_username, avatar_url: typeof row.avatar_url === 'string' ? row.avatar_url : null, team, canRevoke: row.canRevoke === true };
   }
 
   function groupMembers(rows: MemberRecord[]): MemberGroup[] {
     const grouped = new Map<string, MemberGroup>();
+
     for (const member of rows) {
       const group = grouped.get(member.accountId) || { accountId: member.accountId, username: member.github_username, members: [] };
       group.members.push(member);
+
       if (group.username === 'GitHub user' && member.github_username !== 'GitHub user') group.username = member.github_username;
       grouped.set(member.accountId, group);
     }
+
     return [...grouped.values()];
   }
 
@@ -83,19 +100,25 @@
 
   async function validateUsername() {
     const username = githubUsername.trim().replace(/^@/, '');
+
     if (!username || !isAdmin) {
       validationSequence += 1;
       lookupState = 'idle';
       lookupMessage = '';
+
       return;
     }
+
     const sequence = ++validationSequence;
     lookupState = 'checking';
     lookupMessage = 'Checking GitHub…';
+
     try {
       const response = await fetch(`/api/admin/github-users?username=${encodeURIComponent(username)}`, { headers: { Accept: 'application/json' } });
       const body = await response.json().catch(() => ({})) as { exists?: boolean; username?: string; name?: string | null; error?: string };
+
       if (sequence !== validationSequence || githubUsername.trim().replace(/^@/, '') !== username) return;
+
       if (!response.ok || body.exists !== true || !body.username) throw new Error(body.error || 'GitHub user was not found.');
       githubUsername = body.username;
       lookupState = 'valid';

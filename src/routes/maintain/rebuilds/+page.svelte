@@ -5,12 +5,18 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
+
   let report = '';
+
   let cohortId = '';
+
   let busy = false;
+
   $: if (!cohortId && data.cohorts[0]) cohortId = data.cohorts[0].id;
   $: preview = form && 'preview' in form ? form.preview : null;
+
   const age = (value: number | null) => value === null ? 'Unmeasured' : `${value}s`;
 </script>
 

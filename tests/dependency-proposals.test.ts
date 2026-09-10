@@ -6,7 +6,9 @@ import { decideDependencyProposal, getDependencyProposal, listDependencyProposal
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
   .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
+
 const owner = { id: 'github:1', role: 'maintainer' as const, areas: ['development'] };
+
 async function block(db: TestD1, name: string, relation = 'needed>=2') {
   db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at,factory_run_id)
     VALUES(?,?,'https://example.org/source.git','git','development','github:1','generating',1,1,?)`).bind(name, name, `run-${name}`).run();
@@ -16,6 +18,7 @@ async function block(db: TestD1, name: string, relation = 'needed>=2') {
 
 test('missing providers create shared inert proposals; human admission creates only a pending request and preserves parent blockers', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
+
   try {
     await block(db, 'first'); await block(db, 'second');
     const proposals = await listDependencyProposals(d1);
@@ -26,8 +29,10 @@ test('missing providers create shared inert proposals; human admission creates o
     await expect(decideDependencyProposal(d1, owner, proposal.id, proposal.manifest_sha256, 'admit', 'Needs a source')).rejects.toThrow('upstream URL');
     await expect(reviseDependencyProposal(d1, owner, proposal.id, proposal.manifest_sha256,
       { ...manifest, upstreamUrl: 'https://aur.archlinux.org/needed.git', sourceKind: 'git' }, 'Use AUR')).rejects.toThrow('reference evidence');
+
     const revised = await reviseDependencyProposal(d1, owner, proposal.id, proposal.manifest_sha256,
       { ...manifest, upstreamUrl: 'https://example.org/needed.git', sourceKind: 'git', origin: 'alarm-reference', referenceUrl: 'https://archlinuxarm.org/packages/needed' }, 'Review source and ARM adaptation');
+
     await expect(decideDependencyProposal(d1, { ...owner, id: 'factory' }, revised.proposalId, revised.manifestSha256, 'admit', 'Agent decision')).rejects.toMatchObject({ status: 403 });
     await expect(decideDependencyProposal(d1, owner, proposal.id, proposal.manifest_sha256, 'admit', 'Stale source')).rejects.toMatchObject({ status: 409 });
     const result = await decideDependencyProposal(d1, owner, revised.proposalId, revised.manifestSha256, 'admit', 'Admit upstream for normal packaging review');
@@ -43,6 +48,7 @@ test('missing providers create shared inert proposals; human admission creates o
 
 test('declined proposals stay blocked; a multi-parent cycle cannot partially create a request or link', async () => {
   const db = new TestD1(schema); const d1 = asD1(db);
+
   try {
     await block(db, 'parent');
     const draft = (await listDependencyProposals(d1))[0];

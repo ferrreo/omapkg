@@ -3,7 +3,10 @@
   import FrozenInputUpload from '$lib/components/FrozenInputUpload.svelte';
   import { enhance } from '$app/forms';
   import type { PageData, ActionData } from './$types';
-  export let data: PageData; export let form: ActionData;
+
+  export let data: PageData;
+
+ export let form: ActionData;
 </script>
 <svelte:head><title>Frozen build inputs · omapkg</title></svelte:head>
 <MaintainerShell active="inputs" user={data.user}>

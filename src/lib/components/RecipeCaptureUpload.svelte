@@ -3,31 +3,59 @@
   import type { InputObject } from '$lib/frozen-inputs';
   import type { ImportSource } from '$lib/imports';
   import { postCaptureRequest, uploadCaptureObjects } from '$lib/input-upload';
+
   export let importId: string;
+
   export let sources: ImportSource[];
+
   let files: FileList | undefined;
+
   let reference: InputObject | null = null;
-  let pkgbase = ''; let commit = ''; let sourceId = ''; let reason = ''; let busy = false; let error = ''; let message = ''; let completed = 0; let total = 0;
+
+  let pkgbase = '';
+
+ let commit = '';
+
+ let sourceId = '';
+
+ let reason = '';
+
+ let busy = false;
+
+ let error = '';
+
+ let message = '';
+
+ let completed = 0;
+
+ let total = 0;
+
   async function readCapture(event: Event) {
     files = (event.currentTarget as HTMLInputElement).files ?? undefined;
     reference = null; pkgbase = ''; commit = ''; error = '';
+
     try {
       const entries = Array.from(files ?? []);
       const header = entries.find((file) => file.webkitRelativePath.split('/').length === 2 && file.name === 'manifest.json');
       const ref = entries.find((file) => file.webkitRelativePath.split('/').length === 2 && file.name === 'reference.json');
+
       if (!header || !ref || header.size > 512 * 1024 || ref.size > 1024) throw new Error('Choose the recipe capture folder containing manifest.json, reference.json and objects.');
       const parsed = JSON.parse(await header.text()); const root = JSON.parse(await ref.text());
+
       if (parsed.kind !== 'recipe-capture' || typeof parsed.pkgbase !== 'string' || typeof parsed.commit !== 'string' || !/^[a-f0-9]{64}$/.test(root.sha256)) throw new Error('Invalid recipe capture header.');
       reference = root; pkgbase = parsed.pkgbase; commit = parsed.commit;
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Could not read recipe capture.'; }
   }
+
   async function upload() {
     if (busy || !reference || !sourceId) return;
     busy = true; error = ''; completed = 0;
+
     try {
       await uploadCaptureObjects(files, (progress) => { completed = progress.completed; total = progress.total; message = progress.message; });
       message = 'Verifying original Git directory and comparing captured package metadata…';
       const result = await postCaptureRequest<{ sha256: string }>('/api/maintain/recipes/captures', { capture: reference, importId, sourceId, reason });
+
       if (!/^[a-f0-9]{64}$/.test(result.sha256)) throw new Error('Invalid retained recipe response.');
       await goto(`/maintain/recipes/${result.sha256}`);
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Recipe capture could not be retained.'; }

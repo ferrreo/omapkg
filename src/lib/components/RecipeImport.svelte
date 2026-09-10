@@ -1,13 +1,23 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import type { Architecture } from '$lib/model';
+
   export let targets: Architecture[];
+
   export let blocked: string | null;
+
   export let canImport: boolean;
+
   export let bundles: Array<{ sha256: string; architecture: string; created_at: number; current: number }>;
+
   export let imports: Array<{ id: string; request_id: string; status: string; reason: string; pr_url: string | null; current: number }>;
+
   let busy = false;
-  const pending = () => { busy = true; return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
+  const pending = () => { busy = true;
+
+ return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
   $: missingTargets = targets.filter((target) => !bundles.some((bundle) => bundle.current && bundle.architecture === target));
   $: active = imports.some((item) => !['built', 'failed', 'rejected'].includes(item.status));
   $: previous = imports.filter((item) => ['built', 'rejected'].includes(item.status));

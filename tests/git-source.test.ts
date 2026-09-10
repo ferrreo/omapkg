@@ -19,6 +19,7 @@ function result(command: string, prependPath?: string): number {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: prependPath ? { ...process.env, PATH: `${prependPath}:${process.env.PATH ?? ''}` } : process.env,
     });
+
     return 0;
   } catch (cause) {
     return (cause as { status?: number }).status ?? 1;
@@ -35,6 +36,7 @@ function gitRepository(workspace: string, setup?: (source: string) => void): str
   setup?.(source);
   execFileSync('git', ['-C', source, 'add', '.']);
   execFileSync('git', ['-C', source, 'commit', '-qm', 'test']);
+
   return source;
 }
 
@@ -45,12 +47,14 @@ function policy(workspace: string): string {
 describe('Git source policy boundary', () => {
   test('complete inspection seals Git before replacing checkout with verified archive bytes', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-git-inspect-'));
+
     try {
       const repository = gitRepository(join(root, 'upstream'), (path) => {
         writeFileSync(join(path, '.gitattributes'), 'ignored.txt export-ignore\nVERSION export-subst\n');
         writeFileSync(join(path, 'ignored.txt'), 'excluded\n');
         writeFileSync(join(path, 'VERSION'), '$Format:%H$\n');
       });
+
       const commit = execFileSync('git', ['-C', repository, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
       const nativeGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
       const bin = join(root, 'bin');
@@ -67,6 +71,7 @@ for argument in "$@"; do
 done
 exec ${shellQuote(nativeGit)} "\${args[@]}"
 `, { mode: 0o700 });
+
       for (const requestedCommit of [undefined, commit]) {
         const workspace = join(root, requestedCommit ? 'pinned' : 'default');
         mkdirSync(workspace);
@@ -86,12 +91,14 @@ exec ${shellQuote(nativeGit)} "\${args[@]}"
 
   test('records a bounded tree and permits safe symlinks', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-git-safe-'));
+
     try {
       const source = gitRepository(join(root, 'workspace'), (path) => {
         mkdirSync(join(path, 'src'));
         writeFileSync(join(path, 'src', 'main'), 'main\n');
         symlinkSync('main', join(path, 'src', 'current'));
       });
+
       const workspace = join(root, 'workspace');
       expect(result(policy(workspace))).toBe(0);
       const entries = parseGitSourceEntries(readFileSync(join(workspace, 'git-source.entries'), 'utf8'));
@@ -107,6 +114,7 @@ exec ${shellQuote(nativeGit)} "\${args[@]}"
   test('accepts a real source tree with the Sandbox image awk implementation', () => {
     if (!existsSync('/usr/bin/mawk')) return;
     const root = mkdtempSync(join(tmpdir(), 'omapkg-git-mawk-'));
+
     try {
       const workspace = join(root, 'workspace');
       gitRepository(workspace);
@@ -121,6 +129,7 @@ exec ${shellQuote(nativeGit)} "\${args[@]}"
 
   test('rejects root and chained symlinks that resolve outside checkout', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-git-links-'));
+
     try {
       const rootWorkspace = join(root, 'root-workspace');
       gitRepository(rootWorkspace, (source) => symlinkSync('../outside', join(source, 'escape')));
@@ -143,6 +152,7 @@ exec ${shellQuote(nativeGit)} "\${args[@]}"
     expect(() => validateGitSourceEntries([{ path: '.gitmodules', kind: 'file', size: 1, target: null }])).toThrow();
 
     const root = mkdtempSync(join(tmpdir(), 'omapkg-git-reject-'));
+
     try {
       const lfsWorkspace = join(root, 'lfs-workspace');
       gitRepository(lfsWorkspace, (source) => {
@@ -182,23 +192,28 @@ exec ${shellQuote(nativeGit)} "\${args[@]}"
 
   test('inspects the exact git archive bytes used by workers', () => {
     const root = mkdtempSync(join(tmpdir(), 'omapkg-git-archive-'));
+
     try {
       const workspace = join(root, 'workspace');
+
       const source = gitRepository(workspace, (path) => {
         writeFileSync(join(path, '.gitattributes'), 'ignored.txt export-ignore\nVERSION export-subst\n');
         writeFileSync(join(path, 'ignored.txt'), 'should not be archived\n');
         writeFileSync(join(path, 'VERSION'), '$Format:%H$\n');
       });
+
       expect(result(policy(workspace))).toBe(0);
       const commit = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
       const archive = join(workspace, 'source.tar');
       writeFileSync(archive, execFileSync('git', ['-C', source, 'archive', '--format=tar', 'HEAD']));
       execFileSync('bash', ['-c', materializeSourceArchiveCommand({ workspaceRoot: workspace, sourcePath: archive })], { stdio: 'pipe' });
+
       const manifest = parseSourceArchiveManifest(
         readFileSync(join(workspace, 'source-archive.meta'), 'utf8'),
         readFileSync(join(workspace, 'source-archive.entries'), 'utf8'),
         workspace,
       );
+
       const paths = manifest.entries.map((entry) => entry.path);
       expect(paths).toContain('VERSION');
       expect(paths).not.toContain('ignored.txt');

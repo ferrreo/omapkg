@@ -30,10 +30,13 @@ function service(db: TestD1, create: () => Promise<{ id: string }>): Env {
 
 test('publication dispatch cannot overwrite a workflow that completed during enqueue', async () => {
   const db = new TestD1(schema);
+
   const env = service(db, async () => {
     await db.prepare("UPDATE publication_jobs SET status='completed',last_error=NULL WHERE build_id=?").bind('build-race').run();
+
     return { id: 'publish-build-race' };
   });
+
   const result = await enqueuePublication(env, 'build-race');
   expect(result.dispatched).toBe(true);
   expect(db.prepare('SELECT status FROM publication_jobs WHERE build_id=?').bind('build-race').first<{ status: string }>()?.status).toBe('completed');
@@ -42,10 +45,12 @@ test('publication dispatch cannot overwrite a workflow that completed during enq
 
 test('dispatch failure cannot overwrite a completed workflow', async () => {
   const db = new TestD1(schema);
+
   const env = service(db, async () => {
     await db.prepare("UPDATE publication_jobs SET status='completed',last_error=NULL WHERE build_id=?").bind('build-failure-race').run();
     throw new Error('workflow create failed');
   });
+
   await expect(enqueuePublication(env, 'build-failure-race')).rejects.toThrow('workflow create failed');
   expect(db.prepare('SELECT status,last_error FROM publication_jobs WHERE build_id=?').bind('build-failure-race').first<{ status: string; last_error: string | null }>()).toEqual({ status: 'completed', last_error: null });
   db.close();

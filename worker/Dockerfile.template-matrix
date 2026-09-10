@@ -1,0 +1,8 @@
+# Private native acceptance image. Keep separate from production worker image.
+FROM docker.io/library/archlinux@sha256:694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34
+
+RUN pacman -Syu --noconfirm --needed \
+    arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools shellcheck \
+    cmake meson ninja rust python python-build python-installer python-setuptools npm go \
+    pnpm=11.26.0-1 yarn=1.22.22-2 electron43=43.6.0-1 xorg-server-xvfb=21.1.24-1 \
+    && pacman -Scc --noconfirm

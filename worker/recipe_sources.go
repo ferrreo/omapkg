@@ -19,8 +19,13 @@ const maxRecipeSourceObject int64 = 32 << 30
 const maxRecipeSourceEntries = 200000
 
 type preservedBuildInputs struct {
-	Capture      inputObject `json:"capture"`
-	SourceBundle inputObject `json:"sourceBundle"`
+	Capture      inputObject  `json:"capture"`
+	SourceBundle inputObject  `json:"sourceBundle"`
+	Recipe       *inputObject `json:"recipe,omitempty"`
+	Inspection   *struct {
+		SrcinfoSHA256 string            `json:"srcinfoSha256"`
+		Architectures map[string]string `json:"architectures,omitempty"`
+	} `json:"inspection,omitempty"`
 }
 type plannedRecipeSource struct {
 	Kind      string            `json:"kind"`
@@ -197,8 +202,26 @@ func materializePreservedRecipe(ctx context.Context, job Job, directory, workdir
 	if err != nil {
 		return nil, err
 	}
+	if job.PreservedRecipe.Recipe != nil {
+		if !validInputObject(*job.PreservedRecipe.Recipe, maxRecipeBytes) {
+			return nil, errors.New("recipe override exceeds its size budget")
+		}
+		override := filepath.Join(directory, "recipe-override")
+		if err := get(ctx, *job.PreservedRecipe.Recipe, override); err != nil {
+			return nil, err
+		}
+		if err := os.Remove(filepath.Join(workdir, "PKGBUILD")); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(override, filepath.Join(workdir, "PKGBUILD")); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(filepath.Join(workdir, "PKGBUILD"), 0o644); err != nil {
+			return nil, err
+		}
+	}
 	recipe, err := os.ReadFile(filepath.Join(workdir, "PKGBUILD"))
-	if err != nil || string(recipe) != job.Recipe || hashBytes(recipe) != job.RecipeSHA256 {
+	if err != nil || hashBytes(recipe) != job.RecipeSHA256 {
 		return nil, errors.New("captured PKGBUILD differs from reviewed recipe")
 	}
 	for _, name := range []string{"objects", "sources", "caches", "keys", "build"} {

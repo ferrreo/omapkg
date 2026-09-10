@@ -12,10 +12,12 @@ import {
 import { TestD1, asD1 } from './d1';
 
 const schema = 'CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);';
+
 const actor: Actor = { id: 'github:1', role: 'admin', areas: [] };
 
 function event(db: TestD1, pathname: string, status: number, headers: Record<string, string> = {}) {
   const request = new Request(`https://opr.test${pathname}`, { headers });
+
   return {
     request,
     url: new URL(request.url),
@@ -26,11 +28,13 @@ function event(db: TestD1, pathname: string, status: number, headers: Record<str
 
 test('central hook audits protected denials with a redacted route and correlation ID', async () => {
   const db = new TestD1(schema);
+
   try {
     const response = await handle({
       event: event(db, '/api/admin/github-users?username=secret-token', 403, { 'x-correlation-id': 'corr-123' }),
       resolve: async () => new Response('denied', { status: 403 }),
     } as any);
+
     expect(response.status).toBe(403);
     expect(response.headers.get('X-Correlation-ID')).toBe('corr-123');
     const row = await db.prepare("SELECT actor,action,target,detail FROM audit_events WHERE action='http.denied'").first<{ actor: string; action: string; target: string; detail: string }>();
@@ -57,6 +61,7 @@ test('OAuth and worker protocol denials are audited without request data', async
   expect(normalizedRoute('/api/admin/123/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('/api/admin/:id/:id');
 
   const db = new TestD1(schema);
+
   try {
     for (const [pathname, status] of [
       ['/api/auth/callback/github?code=oauth-secret', 400],
@@ -67,6 +72,7 @@ test('OAuth and worker protocol denials are audited without request data', async
         resolve: async () => new Response('denied', { status }),
       } as any);
     }
+
     const rows = (await db.prepare("SELECT actor,target,detail FROM audit_events WHERE action='http.denied' ORDER BY id").all<{ actor: string; target: string; detail: string }>()).results;
     expect(rows).toHaveLength(2);
     expect(rows[0]?.actor).toBe('anonymous');
@@ -90,11 +96,13 @@ test('audit failure becomes safe 503 and does not expose request data', async ()
 
 test('successful responses never create central denial events', async () => {
   const db = new TestD1(schema);
+
   try {
     const response = await handle({
       event: event(db, '/maintain/team', 200),
       resolve: async () => new Response('ok', { status: 200 }),
     } as any);
+
     expect(response.status).toBe(200);
     expect((await db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='http.denied'").first<{ count: number }>())?.count).toBe(0);
   } finally {
@@ -104,17 +112,21 @@ test('successful responses never create central denial events', async () => {
 
 test('public pages and layout data cannot cache signed-in user information', async () => {
   const db = new TestD1(schema);
+
   try {
     for (const path of ['/', '/packages/hello/__data.json']) {
       for (const signedIn of [false, true]) {
         const requestEvent = event(db, path, 200);
+
         const response = await handle({
           event: requestEvent,
           resolve: async () => {
             requestEvent.locals.user = signedIn ? { id: 'viewer', name: 'viewer' } : null;
+
             return Response.json({ user: requestEvent.locals.user }, { headers: { 'Cache-Control': 'public, max-age=60' } });
           },
         } as any);
+
         expect(response.headers.get('Cache-Control')).toBe(signedIn ? 'private, no-store' : 'public, max-age=60');
       }
     }

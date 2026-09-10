@@ -10,6 +10,7 @@ test('MiniMax M3 requests use Cloudflare OpenRouter BYOK without a provider auth
   const model = models.getModel('openrouter', 'minimax/minimax-m3')!;
   expect(DEFAULT_MODEL).toBe('openrouter/minimax/minimax-m3');
   let called = false;
+
   const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     called = true;
     expect(String(input)).toBe(`https://gateway.ai.cloudflare.com/v1/${env.AI_GATEWAY_ACCOUNT_ID}/opr/openrouter/chat/completions`);
@@ -18,12 +19,15 @@ test('MiniMax M3 requests use Cloudflare OpenRouter BYOK without a provider auth
     expect(headers.get('cf-aig-authorization')).toBe('Bearer gateway-test-token');
     expect(headers.get('cf-aig-byok-alias')).toBe('default');
     expect(JSON.parse(String(init?.body)).model).toBe('minimax/minimax-m3');
+
     const chunks = [
       { id: 'test', choices: [{ index: 0, delta: { role: 'assistant', content: 'OK' }, finish_reason: null }] },
       { id: 'test', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }
     ];
+
     return new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
   };
+
   const result = await models.completeSimple(model, { messages: [{ role: 'user', content: 'Say OK.', timestamp: 0 }] }, { fetch: fetch as typeof globalThis.fetch });
   expect(called).toBe(true);
   expect(result.stopReason).toBe('stop');

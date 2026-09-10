@@ -11,6 +11,9 @@ import { finalDescription } from '../src/lib/server/descriptions';
 import type { Env } from '../src/lib/server/env';
 import type { Revision } from '../src/lib/model';
 import { asD1, TestD1 } from './d1';
+import { normalizeFactorySuccessorRecipe } from '../src/lib/server/preserved-factory';
+import { assertFactoryRepairMetadata } from '../src/lib/server/preserved-factory';
+import { parseSrcinfo } from '../src/lib/srcinfo';
 
 const requestSchema = `
 CREATE TABLE rateLimit(id TEXT PRIMARY KEY,key TEXT NOT NULL UNIQUE,count INTEGER NOT NULL,lastRequest INTEGER NOT NULL);
@@ -33,18 +36,24 @@ const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] }
 
 test('revision persistence rolls back when generation changes between read and write', async () => {
   const db = new TestD1(readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n'));
+
   try {
     db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at,factory_run_id)
       VALUES('request-1','hello','https://example.org/hello.tar.gz','archive','system','MIT','github:1','generating',1,1,'old-generation')`).run();
+
     const draft: FactoryRevisionDraft = { revision: revision(), manifest: { requestId: 'request-1', packageName: 'hello', version: '1.0.0',
       sourceKind: 'archive', sources: [], dependencies: [], makeDependencies: [], smokeCommands: ['hello --version'], architectures: ['x86_64'],
       buildImages: {}, pkgrel: 1, sourceDateEpoch: 1700000000, imageDigest: revision().image_digest, license: 'MIT', surface: 'binary', description: 'Hello', publicRecipeSha256: null },
       lint: { passed: true, checks: [], repairAttempts: 0 } };
+
     const database = asD1(db);
+
     const raced = { ...env(db), DB: { prepare: database.prepare.bind(database), async batch(statements: D1PreparedStatement[]) {
       db.prepare("UPDATE requests SET factory_run_id='new-generation' WHERE id='request-1'").run();
+
       return database.batch(statements);
     } } as D1Database };
+
     await expect(persistFactoryRevision(raced, draft, 'factory', 'old-generation')).rejects.toThrow('CHECK constraint');
     expect(db.prepare('SELECT COUNT(*) AS n FROM revisions').first<{ n: number }>()).toEqual({ n: 0 });
     expect(db.prepare('SELECT status,factory_run_id FROM requests').first<{ status: string; factory_run_id: string }>()).toEqual({ status: 'generating', factory_run_id: 'new-generation' });
@@ -63,8 +72,28 @@ function revision(overrides: Partial<Revision> = {}): Revision {
 }
 
 describe('core security regressions', () => {
+  test('factory repair normalizes pkgrel before retaining candidate bytes', async () => {
+    const base = revision({ pkgrel: 1, recipe: 'pkgname=hello\npkgver=1.0\npkgrel=1\n' });
+    const raw = `${base.recipe}# bounded repair\n`;
+    const normalized = normalizeFactorySuccessorRecipe(base, raw);
+    expect(normalized).toContain('pkgrel=2');
+    expect(await sha256(normalized)).toBe(await sha256(normalizeFactorySuccessorRecipe(base, normalized)));
+  });
+
+  test('factory repair metadata permits only the expected pkgrel bump', () => {
+    const reviewed = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 1\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\npkgname = hello\n');
+    const recipe = 'pkgname=hello\npkgver=1.0\npkgrel=2\n';
+    const observed = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 2\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\npkgname = hello\n');
+    expect(() => assertFactoryRepairMetadata(reviewed, observed, recipe)).not.toThrow();
+    const drift = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 2\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\n\tdepends = openssl\npkgname = hello\n');
+    expect(() => assertFactoryRepairMetadata(reviewed, drift, recipe)).toThrow('policy');
+    const newerReviewed = parseSrcinfo('pkgbase = hello\n\tpkgver = 1.0\n\tpkgrel = 3.2\n\tarch = x86_64\n\tlicense = MIT\n\tdepends = glibc\npkgname = hello\n');
+    expect(() => assertFactoryRepairMetadata(newerReviewed, observed, recipe)).toThrow('increase');
+  });
+
   test('a failed factory run can restart without a revision and records the reason', async () => {
     const db = new TestD1(requestSchema + 'ALTER TABLE requests ADD COLUMN factory_run_id TEXT;');
+
     try {
       const service = env(db);
       service.PIPELINE = { fetch: async () => new Response('{}') } as unknown as Fetcher;
@@ -105,6 +134,7 @@ describe('core security regressions', () => {
 
   test('source URLs reject credential query parameters while allowing ordinary queries', () => {
     expect(publicSourceURL('https://example.com/source.tar.gz?download=1')).toContain('download=1');
+
     for (const parameter of ['token', 'api_key', 'client_secret', 'private_key', 'password', 'signature', 'x-amz-credential']) {
       expect(() => publicSourceURL(`https://example.com/source.tar.gz?${parameter}=secret`)).toThrow();
     }
@@ -132,6 +162,7 @@ describe('core security regressions', () => {
         aarch64: `ghcr.io/opr/builder-aarch64@sha256:${'d'.repeat(64)}`,
       }),
     });
+
     multi.manifest_sha256 = await manifestDigest(multi);
     await validateRevision(multi);
     expect(revisionImage(multi, 'aarch64')).toContain('builder-aarch64');
@@ -145,6 +176,7 @@ describe('core security regressions', () => {
 
   test('factory revisions emit a standard SPDX document with runtime and build dependencies', async () => {
     const image = `ghcr.io/opr/builder@sha256:${'b'.repeat(64)}`;
+
     const draft = await createFactoryRevision({
       request: { id: 'request-spdx', name: 'hello', upstreamUrl: 'https://example.org/hello.tar.gz', sourceKind: 'archive', area: 'system', declaredLicense: 'unknown' },
       version: '2.12', sources: [{ name: 'hello.tar.gz', url: 'https://example.org/hello.tar.gz', sha256: 'a'.repeat(64) }],
@@ -153,6 +185,7 @@ describe('core security regressions', () => {
       imageDigest: image, license: 'GPL-3.0-or-later', surface: 'binary', buildCommands: ['make'],
       packageCommands: ['install -Dm755 hello "$pkgdir/usr/bin/hello"'], description: 'GNU Hello prints a friendly greeting.', explanation: 'test',
     });
+
     const sbom = JSON.parse(draft.revision.sbom_json) as Record<string, any>;
     expect(sbom).toMatchObject({ spdxVersion: 'SPDX-2.3', dataLicense: 'CC0-1.0', SPDXID: 'SPDXRef-DOCUMENT' });
     expect(sbom.documentDescribes).toEqual(['SPDXRef-Package-1']);
@@ -179,6 +212,7 @@ describe('core security regressions', () => {
   test('vendor SPDX evidence stays in a standard comment with valid npm checksum and reference', async () => {
     const image = `ghcr.io/opr/builder@sha256:${'b'.repeat(64)}`;
     const integrity = `sha512-${btoa(String.fromCharCode(...new Uint8Array(64).fill(7)))}`;
+
     const draft = await createFactoryRevision({
       request: { id: 'request-vendor-spdx', name: 'vendor', upstreamUrl: 'https://example.org/vendor.tar.gz', sourceKind: 'archive', area: 'system', declaredLicense: 'unknown' },
       version: '1.0.0', sources: [{ name: 'vendor.tar.gz', url: 'https://example.org/vendor.tar.gz', sha256: 'a'.repeat(64) }],
@@ -191,6 +225,7 @@ describe('core security regressions', () => {
         vendorBundle: { kind: 'npm', source: { name: 'opr-vendor-npm.tar', url: 'https://omapkg.example/sources/a.tar', sha256: 'c'.repeat(64) }, components: [{ name: 'left-pad', version: '1.3.0', source: 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz', integrity, license: 'SEE LICENSE IN LICENSE' }] },
       },
     });
+
     const sbom = JSON.parse(draft.revision.sbom_json) as Record<string, any>;
     const component = sbom.packages.at(-1);
     expect(sbom).not.toHaveProperty('oprEvidence');
@@ -226,6 +261,7 @@ describe('core security regressions', () => {
       INSERT INTO requests VALUES('a','demo'),('b','demo'),('c','other');
       INSERT INTO revisions VALUES('a','1.0',5),('b','1.0',2),('c','1.0',99),('a','2.0',7);
     `);
+
     try {
       const database = asD1(db);
       expect(await nextPackageRelease({ DB: database }, 'demo', '1.0')).toBe(6);
@@ -239,6 +275,7 @@ describe('core security regressions', () => {
 
   test('request quota is enforced inside the write batch', async () => {
     const db = new TestD1(requestSchema);
+
     try {
       const service = env(db);
       await Promise.all(Array.from({ length: 20 }, (_, index) => submitRequest(service, actor, {
@@ -253,6 +290,7 @@ describe('core security regressions', () => {
 
   test('Better Auth account issuer and approval revocation columns are migrated', () => {
     const migration = readFileSync(new URL('../migrations/0007_core_guards.sql', import.meta.url), 'utf8');
+
     const db = new TestD1(`
       CREATE TABLE account(id TEXT PRIMARY KEY,accountId TEXT NOT NULL,providerId TEXT NOT NULL,userId TEXT NOT NULL,
         accessToken TEXT,refreshToken TEXT,idToken TEXT,accessTokenExpiresAt INTEGER,refreshTokenExpiresAt INTEGER,scope TEXT,password TEXT,createdAt INTEGER NOT NULL,updatedAt INTEGER NOT NULL,
@@ -262,6 +300,7 @@ describe('core security regressions', () => {
         UNIQUE(revision_id,kind));
       ${migration}
     `);
+
     try {
       expect(db.prepare('SELECT issuer FROM account WHERE accountId=?').bind('test-github-id').first<{ issuer: string }>()?.issuer).toBe('local:oauth:github');
       const columns = db.prepare('PRAGMA table_info(approvals)').all<{ name: string }>().results.map((column) => column.name);
@@ -271,12 +310,9 @@ describe('core security regressions', () => {
     }
   });
 
-  test('queued finalization can resume only when no worker job exists', async () => {
-    const schema = readFileSync(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0005_factory_run_id.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0007_core_guards.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0011_build_images.sql', import.meta.url), 'utf8') +
-      readFileSync(new URL('../migrations/0022_public_recipes.sql', import.meta.url), 'utf8');
+  test('review finalization starts one bounded private build before merging', async () => {
+    const schema = readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n');
+
     const db = new TestD1(schema);
     const item = revision({ id: 'generation-1', request_id: 'request-1', recipe_sha256: await sha256('pkgname=hello\n') });
     item.manifest_sha256 = await manifestDigest(item);
@@ -294,24 +330,38 @@ describe('core security regressions', () => {
     db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
       .bind('approval-security', item.id, 'github:2', 'security', item.manifest_sha256, 1).run();
     const service = { ...env(db), GITHUB_REPOSITORY: 'opr/recipes', GITHUB_REPO_TOKEN: 'github_pat_test' };
+    let dispatched = 0;
+    service.PIPELINE = { fetch: async (request: Request) => {
+      dispatched += 1;
+      const input = await request.json() as { workflowId: string };
+      return Response.json({ workflowId: input.workflowId });
+    } } as unknown as Fetcher;
     const previousFetch = globalThis.fetch;
+    let githubCalls = 0;
     globalThis.fetch = (async (input) => {
+      githubCalls += 1;
       if (String(input).endsWith('/pulls/1')) return Response.json({ head: { sha: item.commit_sha }, merged: true });
+
       return new Response('unexpected request', { status: 500 });
     }) as typeof globalThis.fetch;
+
     try {
       await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'x'.repeat(2_001)))
         .rejects.toMatchObject({ status: 400 });
       db.prepare("UPDATE approvals SET revoked_at=2 WHERE revision_id=? AND kind='security'").bind(item.id).run();
       await approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'Security review checked source and build evidence.', true);
-      expect(db.prepare('SELECT status FROM requests WHERE id=?').bind(item.request_id).first<{ status: string }>()?.status).toBe('queued');
       expect(db.prepare('SELECT status FROM builds WHERE revision_id=?').bind(item.id).first<{ status: string }>()?.status).toBe('queued');
+      expect(db.prepare('SELECT private_candidate FROM builds WHERE revision_id=?').bind(item.id).first<{ private_candidate: number }>()?.private_candidate).toBe(1);
+      expect(db.prepare('SELECT attempt_count FROM factory_runs').first<{ attempt_count: number }>()?.attempt_count).toBe(1);
+      expect(dispatched).toBe(1);
+      expect(githubCalls).toBe(0);
       const approvalRows = db.prepare("SELECT detail FROM audit_events WHERE action='revision.approved' ORDER BY id DESC LIMIT 1").all<{ detail: string }>().results;
       expect(JSON.parse(approvalRows[0]?.detail ?? '{}').reason).toBe('Security review checked source and build evidence.');
-      const auditRows = db.prepare("SELECT detail FROM audit_events WHERE action='revision.finalizing'").all<{ detail: string }>().results;
-      expect(JSON.parse(auditRows.at(-1)?.detail ?? '{}').resumed).toBe(true);
-      await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security'))
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='factory.unit_dispatched'").first<{ n: number }>()?.n).toBe(1);
+      await expect(approveRevision(service, { id: 'github:2', role: 'security', areas: [] }, item.request_id, item.id, 'security', 'Same review, pending build.', true))
         .rejects.toMatchObject({ status: 409 });
+      expect(dispatched).toBe(1);
+      expect(db.prepare('SELECT attempt_count FROM factory_runs').first<{ attempt_count: number }>()?.attempt_count).toBe(1);
     } finally {
       globalThis.fetch = previousFetch;
       db.close();

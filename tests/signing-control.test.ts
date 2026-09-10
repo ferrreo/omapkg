@@ -13,19 +13,22 @@ import { TestD1, asD1 } from './d1';
 
 const schema = [
   '0001_initial.sql', '0003_distribution.sql', '0007_core_guards.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql', '0026_release_attestations.sql',
-].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n') + '\nALTER TABLE signing_intents ADD COLUMN build_attempt INTEGER; ALTER TABLE builds ADD COLUMN output_contract_json TEXT; ALTER TABLE builds ADD COLUMN input_lock_sha256 TEXT;';
+].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n') + '\nALTER TABLE signing_intents ADD COLUMN build_attempt INTEGER; ALTER TABLE builds ADD COLUMN output_contract_json TEXT; ALTER TABLE builds ADD COLUMN input_lock_sha256 TEXT; ALTER TABLE builds ADD COLUMN private_candidate INTEGER NOT NULL DEFAULT 0; ALTER TABLE builds ADD COLUMN factory_run_id TEXT; ALTER TABLE builds ADD COLUMN factory_attempt INTEGER; CREATE TABLE factory_run_attempts(run_id TEXT,attempt INTEGER,input_sha256 TEXT);';
 
 class MemoryR2 {
   readonly objects = new Map<string, { body: Uint8Array; customMetadata: Record<string, string> }>();
 
   async head(key: string) {
     const object = this.objects.get(key);
+
     return object ? { size: object.body.byteLength, customMetadata: object.customMetadata } : null;
   }
 
   async get(key: string) {
     const object = this.objects.get(key);
+
     if (!object) return null;
+
     return {
       size: object.body.byteLength,
       customMetadata: object.customMetadata,
@@ -36,7 +39,9 @@ class MemoryR2 {
 
 function base64(bytes: Uint8Array): string {
   let value = '';
+
   for (const byte of bytes) value += String.fromCharCode(byte);
+
   return btoa(value);
 }
 
@@ -49,6 +54,7 @@ test('claims only current reviewed evidence and completes signing idempotently',
   const artifactSha256 = await sha256(artifact);
   const source = [{ name: 'hello.tar.gz', url: 'https://example.org/hello.tar.gz', sha256: 'b'.repeat(64) }];
   const recipe = 'pkgname=hello\npkgver=1.0.0\npkgrel=1\n';
+
   const revision = {
     id: 'revision-1', request_id: 'request-1', version: '1.0.0', recipe,
     recipe_sha256: await sha256(recipe), manifest_sha256: '', sources_json: JSON.stringify(source),
@@ -57,7 +63,9 @@ test('claims only current reviewed evidence and completes signing idempotently',
     license: 'MIT', surface: 'binary' as const, explanation: 'hello', sbom_json: '{}', lint_json: '{"passed":true}',
     upstream_commit: 'd'.repeat(40), pr_url: 'https://github.com/example-owner/recipes/pull/1', commit_sha: 'e'.repeat(40), created_at: 1,
   };
+
   revision.manifest_sha256 = await manifestDigest(revision);
+
   const provenance = JSON.stringify({
     buildId: 'build-1', revisionId: revision.id, workerId: 'worker-1', recipeSha256: revision.recipe_sha256,
     artifactSha256, architecture: 'x86_64', imageDigest: `sha256:${'c'.repeat(64)}`,
@@ -67,11 +75,14 @@ test('claims only current reviewed evidence and completes signing idempotently',
       depends: ['runtime-dep', 'lib:libOpenCL.so.1'], provides: [], conflicts: [], replaces: [] },
     startedAt: '2026-09-04T20:00:00.000Z', finishedAt: '2026-09-04T20:01:00.000Z',
   });
+
   const workerKeys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const workerPublicKey = base64(new Uint8Array(await crypto.subtle.exportKey('raw', workerKeys.publicKey)));
+
   const provenanceSignature = base64(new Uint8Array(await crypto.subtle.sign(
     'Ed25519', workerKeys.privateKey, new TextEncoder().encode(provenance),
   )));
+
   const objectKey = 'packages/x86_64/hello-1.0.0-1-x86_64.pkg.tar.zst';
   artifacts.objects.set(objectKey, { body: artifact, customMetadata: { sha256: artifactSha256 } });
   const timestamp = Math.floor(Date.now() / 1000);
@@ -98,9 +109,11 @@ test('claims only current reviewed evidence and completes signing idempotently',
   db.prepare(`INSERT INTO signing_intents(id,build_id,revision_id,object_key,object_kind,artifact_sha256,artifact_filename,manifest_sha256,created_at)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind('intent-1', 'build-1', revision.id, objectKey, 'package', artifactSha256,
       'hello-1.0.0-1-x86_64.pkg.tar.zst', revision.manifest_sha256, timestamp).run();
+
   const env = {
     DB: db, ARTIFACTS: artifacts, CONTROL_TOKEN: 'control-token', PACKAGE_SIGNING_FINGERPRINT: fingerprint,
   } as unknown as SigningControlEnv;
+
   try {
     const first = await claimSigningIntent(env, 'intent-1');
     expect(first.status).toBe('ready');
@@ -145,39 +158,49 @@ test('claims only current reviewed evidence and completes signing idempotently',
     const signature = new Uint8Array([1, 2, 3, 4]);
     const signatureSha256 = await sha256(signature);
     artifacts.objects.set(signatureKey, { body: signature, customMetadata: { signatureSha256 } });
+
     const event = {
       action: 'signing.completed' as const, intentId: 'intent-1', kind: 'package' as const, buildId: 'build-1', revisionId: revision.id,
       artifactKey: objectKey, artifactSha256, signatureKey, signatureSha256, signatureFilename: 'hello-1.0.0-1-x86_64.pkg.tar.zst.sig',
       publicKeyKey: 'keys/opr-package-signing.asc', fingerprint, keyId: 'opr-package-signing-v1', mode: 'cloudflare-worker-secret' as const,
     };
+
     expect(await completeSigningIntent(env, event)).toEqual({ idempotent: false });
     expect(await completeSigningIntent(env, event)).toEqual({ idempotent: true });
     expect((await db.prepare('SELECT status FROM signing_intents WHERE id=?').bind('intent-1').first<{ status: string }>())?.status).toBe('signed');
     expect((await db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='signing.completed'").first<{ count: number }>())?.count).toBe(1);
+
     for (const surface of ['binary', 'recipe'] as const) {
       const buildId = `build-${surface}`;
       const publishedRecipe = surface === 'recipe' ? `${recipe}# published source\n` : null;
+
       const revised = { ...revision, id: `revision-${surface}`, created_at: timestamp + (surface === 'binary' ? 1 : 2), surface,
         public_recipe: publishedRecipe, public_recipe_sha256: publishedRecipe ? await sha256(publishedRecipe) : null };
+
       revised.manifest_sha256 = await manifestDigest(revised);
       const columns = Object.keys(revised);
       db.prepare(`INSERT INTO revisions(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`).bind(...Object.values(revised)).run();
+
       for (const kind of ['area', 'security']) {
         db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
           .bind(`${kind}-${surface}`, revised.id, 'github:1', kind, revised.manifest_sha256, timestamp).run();
       }
+
       const report = JSON.stringify({ ...JSON.parse(provenance), buildId, revisionId: revised.id,
         artifactSha256: surface === 'binary' ? artifactSha256 : null });
+
       const reportSignature = base64(new Uint8Array(await crypto.subtle.sign('Ed25519', workerKeys.privateKey, new TextEncoder().encode(report))));
       const filename = surface === 'binary' ? 'hello-1.0.0-1-x86_64.pkg.tar.zst' : null;
       db.prepare(`INSERT INTO builds(id,revision_id,status,architecture,worker_id,artifact_sha256,artifact_filename,provenance,provenance_signature,smoke_passed,created_at,installed_size)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(buildId, revised.id, 'succeeded', 'x86_64', 'worker-1', surface === 'binary' ? artifactSha256 : null,
           filename, report, reportSignature, 1, timestamp, surface === 'binary' ? 4096 : null).run();
+
       const statement = await releaseAttestation({
         buildId, revisionId: revised.id, surface, artifactFilename: filename, artifactSha256: surface === 'binary' ? artifactSha256 : null,
         recipe: publishedRecipe ?? recipe, recipeSha256: revised.recipe_sha256, manifestSha256: revised.manifest_sha256,
         sbom: revised.sbom_json, provenance: report, provenanceSignature: reportSignature, workerPublicKey,
       });
+
       const key = attestationKey(buildId);
       const statementSha256 = await sha256(statement);
       artifacts.objects.set(key, { body: new TextEncoder().encode(statement), customMetadata: { sha256: statementSha256 } });

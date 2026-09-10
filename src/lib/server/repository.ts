@@ -1,3 +1,4 @@
+import * as v from 'valibot';
 import type { Release, Architecture } from '../model';
 import { type PackageMetadata, parseArchRelation, satisfiesArchRelation, parseArchDependency, archRelationCovers } from './arch';
 import type { Env } from './env';
@@ -49,12 +50,16 @@ export type RepositoryDatabasePackage = {
 };
 
 export function binaryReleases(rows: ReleaseRow[]): BinaryRelease[] {
-  return rows.filter((row) => row.surface === 'binary').map((row) => {
+  return rows.flatMap((row) => {
+    if (row.surface !== 'binary') return [];
+
     const { artifact_key, signature_key, artifact_sha256, artifact_size, artifact_filename } = row;
+
     if (!artifact_key || !signature_key || !artifact_sha256 || artifact_size === null || !artifact_filename) {
       fail(409, `Release ${row.id} has incomplete artifact metadata.`);
     }
-    return { ...row, surface: 'binary', artifact_key, signature_key, artifact_sha256, artifact_size, artifact_filename };
+
+    return [{ ...row, surface: 'binary', artifact_key, signature_key, artifact_sha256, artifact_size, artifact_filename }];
   });
 }
 
@@ -62,8 +67,8 @@ export type RepositorySnapshot = { id: string; architecture: Architecture; chann
 
 export const PACKAGE_FILENAME = /^[A-Za-z0-9][A-Za-z0-9._+:-]{0,220}\.pkg\.tar\.zst$/;
 
-function textValue(value: unknown, fallback = ''): string {
-  return typeof value === 'string' ? value.replace(/[\u0000\r\n]+/g, ' ').trim() : fallback;
+function textValue(value: string): string {
+  return value.replaceAll('\u0000', ' ').replaceAll('\r', ' ').replaceAll('\n', ' ').trim();
 }
 
 export async function releaseRows(env: Env, where: string, ...values: unknown[]): Promise<ReleaseRow[]> {
@@ -80,55 +85,65 @@ function releasePackage(row: BinaryRelease): ReleasePackage {
   const metadata = row.package_metadata ?? packageMetadataFromProvenance(row.provenance, {
     name: row.name, version: row.version, architecture: row.architecture, installedSize: row.installed_size,
   });
-  return { row, metadata };
-}
 
-function relationText(value: unknown, label: string): string {
-  if (typeof value !== 'string') fail(409, `${label} contains a non-string relation.`);
-  return value;
+  return { row, metadata };
 }
 
 export function assertDependencyGraph(candidates: ReleaseRow[], current: ReleaseRow[], final: ReleaseRow[]) {
   const finalPackages = binaryReleases(final).map(releasePackage);
   const knownPackages = binaryReleases([...current, ...candidates]).map(releasePackage);
   const knownNames = new Set<string>();
+
   for (const { row, metadata } of knownPackages) {
     knownNames.add(row.name);
+
     for (const value of metadata.provides) {
       const relation = parseArchRelation(value);
+
       if (relation) knownNames.add(relation.name);
     }
   }
+
   const providersFor = (architecture: Architecture) => finalPackages.filter((item) => item.row.architecture === architecture);
-  const checkDependency = (owner: ReleasePackage, value: unknown, label: string) => {
-    const text = relationText(value, label);
+
+  const checkDependency = (owner: ReleasePackage, text: string, label: string) => {
     const dependency = parseArchRelation(text);
+
     if (!dependency) {
       if (label === 'dependency manifest') fail(409, `Invalid Arch dependency constraint ${text}.`);
       fail(409, `Invalid Arch ${label.toLowerCase()} ${text}.`);
     }
+
     const providers = providersFor(owner.row.architecture);
+
     if (providers.some((provider) => satisfiesArchRelation(dependency, provider.metadata))) return;
+
     // Unknown names are supplied by Arch core/extra or another configured base
     // repository. Only fail when OPR previously advertised this capability.
     if (knownNames.has(dependency.name)) {
       const available = providers.flatMap((provider) => {
         if (provider.metadata.name === dependency.name) return [provider.metadata.fullVersion];
+
         return provider.metadata.provides.flatMap((value) => {
           const provided = parseArchRelation(value);
+
           return provided?.name === dependency.name ? [provided.version ?? provider.metadata.fullVersion] : [];
         });
       })[0] ?? 'the final package set';
+
       fail(409, `Dependency ${text} is not satisfied by ${available} for ${owner.row.name} on ${owner.row.architecture}.`);
     }
   };
 
   for (const owner of finalPackages) {
     for (const value of owner.metadata.depends) checkDependency(owner, value, 'package dependency');
+
     for (const value of owner.metadata.conflicts) {
-      const text = relationText(value, 'Package conflict');
+      const text = value;
       const conflict = parseArchDependency(text);
+
       if (!conflict) fail(409, `Invalid Arch package conflict ${text}.`);
+
       if (providersFor(owner.row.architecture).some((provider) => provider.row.id !== owner.row.id && satisfiesArchRelation(conflict, provider.metadata))) {
         fail(409, `Package ${owner.row.name} conflicts with ${text} on ${owner.row.architecture}.`);
       }
@@ -137,16 +152,27 @@ export function assertDependencyGraph(candidates: ReleaseRow[], current: Release
 
   for (const candidate of binaryReleases(candidates)) {
     const owner = finalPackages.find((item) => item.row.id === candidate.id);
+
     if (!owner) continue;
-    for (const value of jsonArray(candidate.dependencies_json, 'Dependency manifest')) {
-      const text = relationText(value, 'Dependency manifest');
+
+    const dependencyManifest = jsonArray(candidate.dependencies_json, 'Dependency manifest').flatMap((value) => {
+      const parsed = v.safeParse(v.string(), value);
+
+      if (!parsed.success) fail(409, 'Dependency manifest contains a non-string relation.');
+
+      return [parsed.output];
+    });
+
+    for (const text of dependencyManifest) {
       checkDependency(owner, text, 'dependency manifest');
+
       if (!owner.metadata.depends.some((native) => archRelationCovers(native, text))) {
         fail(409, `Native package metadata does not contain reviewed dependency ${text}.`);
       }
     }
+
     for (const value of owner.metadata.replaces) {
-      if (!parseArchDependency(relationText(value, 'Package replacement'))) fail(409, `Invalid Arch package replacement ${String(value)}.`);
+      if (!parseArchDependency(value)) fail(409, `Invalid Arch package replacement ${value}.`);
     }
   }
 }
@@ -161,6 +187,7 @@ function checksum(value: number): string {
 
 function ascii(target: Uint8Array, offset: number, width: number, value: string) {
   const bytes = new TextEncoder().encode(value);
+
   if (bytes.length > width) throw new Error('tar field too long');
   target.set(bytes, offset);
 }
@@ -170,6 +197,7 @@ function tarHeader(path: string, size: number): Uint8Array {
   const split = path.lastIndexOf('/');
   const prefix = split > 0 ? path.slice(0, split) : '';
   const name = split > 0 ? path.slice(split + 1) : path;
+
   if (name.length > 100 || prefix.length > 155) throw new Error('repository entry path too long');
   ascii(header, 0, 100, name);
   ascii(header, 100, 8, octal(0o644, 8));
@@ -183,8 +211,10 @@ function tarHeader(path: string, size: number): Uint8Array {
   ascii(header, 263, 2, '00');
   ascii(header, 345, 155, prefix);
   let sum = 0;
+
   for (const byte of header) sum += byte;
   ascii(header, 148, 8, checksum(sum));
+
   return header;
 }
 
@@ -192,56 +222,69 @@ function tar(entries: Array<{ path: string; body: Uint8Array }>): Uint8Array {
   const size = entries.reduce((total, entry) => total + 512 + Math.ceil(entry.body.length / 512) * 512, 1024);
   const result = new Uint8Array(size);
   let offset = 0;
+
   for (const entry of entries) {
     result.set(tarHeader(entry.path, entry.body.length), offset);
     offset += 512;
     result.set(entry.body, offset);
     offset += Math.ceil(entry.body.length / 512) * 512;
   }
+
   return result;
 }
 
 async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
   const stream = new CompressionStream('gzip');
   const writer = stream.writable.getWriter();
-  await writer.write(bytes as unknown as BufferSource);
+  await writer.write(bytes as BufferSource);
   await writer.close();
+
   return new Uint8Array(await new Response(stream.readable).arrayBuffer());
 }
 
 function field(name: string, values: string | string[]): string {
   const list = Array.isArray(values) ? values : [values];
+
   return `%${name}%\n${list.filter(Boolean).join('\n')}\n\n`;
 }
 
 export async function repositoryDatabaseForPackages(env: Env, packages: readonly RepositoryDatabasePackage[]): Promise<Uint8Array> {
   const entries: Array<{ path: string; body: Uint8Array }> = [];
+
   for (const item of [...packages].sort((a, b) => `${a.name}-${a.version}-${a.architecture}`.localeCompare(`${b.name}-${b.version}-${b.architecture}`))) {
     if (!item.artifactFilename || !PACKAGE_FILENAME.test(item.artifactFilename) || !SHA256.test(item.artifactSha256) || !Number.isSafeInteger(item.artifactSize) || item.artifactSize < 1) {
       fail(409, `Release ${item.id} has incomplete artifact metadata.`);
     }
+
     const signature = await env.ARTIFACTS.get(item.signatureKey);
+
     if (!signature) fail(409, `Release ${item.id} has no package signature.`);
     const signatureBytes = new Uint8Array(await signature.arrayBuffer());
+
     if (!signatureBytes.length || signatureBytes.length > 16_384) fail(409, `Release ${item.id} has invalid package signature.`);
+
     if (item.installedSize !== null && (!Number.isSafeInteger(item.installedSize) || item.installedSize < 1)) {
       fail(409, `Release ${item.id} has invalid installed package size.`);
     }
+
     const packageDir = `${item.name}-${item.version}`;
     const metadata = item.metadata;
+
     const desc = [
       field('FILENAME', item.artifactFilename), field('NAME', item.name), field('BASE', item.name), field('VERSION', item.version),
       field('DESC', item.description), field('CSIZE', String(item.artifactSize)),
       item.installedSize === null ? '' : field('ISIZE', String(item.installedSize)),
       field('SHA256SUM', item.artifactSha256), field('PGPSIG', base64(signatureBytes)), field('URL', item.upstreamUrl),
-      field('LICENSE', textValue(item.license, 'unknown')), field('ARCH', item.architecture), field('BUILDDATE', String(item.sourceDateEpoch)),
+      field('LICENSE', textValue(item.license)), field('ARCH', item.architecture), field('BUILDDATE', String(item.sourceDateEpoch)),
       field('PACKAGER', 'omapkg'), metadata.depends.length ? field('DEPENDS', metadata.depends) : '',
       metadata.provides.length ? field('PROVIDES', metadata.provides) : '',
       metadata.conflicts.length ? field('CONFLICTS', metadata.conflicts) : '',
       metadata.replaces.length ? field('REPLACES', metadata.replaces) : '',
     ].join('');
+
     entries.push({ path: `${packageDir}/desc`, body: new TextEncoder().encode(desc) });
   }
+
   return gzip(tar(entries));
 }
 
@@ -250,6 +293,7 @@ async function repositoryDatabase(env: Env, rows: BinaryRelease[]): Promise<Uint
     const metadata = row.package_metadata ?? packageMetadataFromProvenance(row.provenance, {
       name: row.name, version: row.version, architecture: row.architecture, installedSize: row.installed_size,
     });
+
     return {
       id: row.id, name: row.name, version: row.version, architecture: row.architecture,
       artifactKey: row.artifact_key, signatureKey: row.signature_key, artifactSha256: row.artifact_sha256,
@@ -270,14 +314,17 @@ export async function currentDev(env: Env): Promise<ReleaseRow[]> {
 
 export function finalStable(current: ReleaseRow[], candidates: ReleaseRow[]): ReleaseRow[] {
   const replaced = new Set(candidates.map((row) => `${row.name}:${row.architecture}`));
+
   return [...current.filter((row) => !replaced.has(`${row.name}:${row.architecture}`)), ...candidates];
 }
 
 export function latestPerPackage(rows: ReleaseRow[]): ReleaseRow[] {
   const latest = new Map<string, ReleaseRow>();
+
   for (const row of [...rows].sort((left, right) => left.published_at - right.published_at || left.id.localeCompare(right.id))) {
     latest.set(`${row.name}:${row.architecture}`, row);
   }
+
   return [...latest.values()];
 }
 
@@ -286,9 +333,11 @@ export async function snapshot(env: Env, rows: ReleaseRow[], architecture: Archi
   const digest = await sha256(database);
   const dbKey = `repo/${channel}/${architecture}/${batchId}/opr.db.tar.gz`;
   await immutableBytes(env, dbKey, database, digest, 'application/gzip');
+
   const signed = await signingRequest(env, {
     buildId: context.build_id, revisionId: context.revision_id, manifestSha256: context.manifest_sha256,
     objectKey: dbKey, objectKind: 'database', artifactSha256: digest, artifactSize: database.byteLength, artifactFilename: 'opr.db.tar.gz',
   });
+
   return { id: id(), architecture, channel, dbKey, dbSignatureKey: signed.signatureKey, dbSha256: digest, batchId };
 }

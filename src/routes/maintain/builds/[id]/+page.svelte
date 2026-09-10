@@ -12,11 +12,15 @@
   import type { PageData, ActionData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
 
   type DependencyPackage = { releaseId: string; name: string; version: string; architecture: string; filename: string; url: string; sha256: string; size: number; signatureUrl: string; signatureSha256: string };
+
   type DependencyPlan = { channel: 'stable' | 'dev'; publicKeyUrl: string; publicKeyFingerprint: string; packages: DependencyPackage[] };
+
   type BuildWithDependencyPlan = Build & { dependency_plan_json?: string | null };
+
   $: build = data?.build as BuildWithDependencyPlan | null;
   $: revision = data?.revision as Revision | null;
   $: logs = Array.isArray(data?.logs) ? data.logs : [];
@@ -30,6 +34,7 @@
 
   function pretty(value: string | null | undefined) {
     if (!value) return '—';
+
     try {
       return JSON.stringify(JSON.parse(value), null, 2);
     } catch {
@@ -39,12 +44,17 @@
 
   function parseDependencyPlan(value: string | null | undefined): DependencyPlan | null {
     if (!value) return null;
+
     try {
       const parsed = JSON.parse(value) as Record<string, unknown>;
+
       if ((parsed.channel !== 'stable' && parsed.channel !== 'dev') || typeof parsed.publicKeyUrl !== 'string' || typeof parsed.publicKeyFingerprint !== 'string' || !Array.isArray(parsed.packages)) return null;
       const packages = parsed.packages.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+
       if (packages.length !== parsed.packages.length) return null;
+
       if (!packages.every((item) => ['releaseId', 'name', 'version', 'architecture', 'filename', 'url', 'sha256', 'signatureUrl', 'signatureSha256'].every((key) => typeof item[key] === 'string') && typeof item.size === 'number' && Number.isFinite(item.size) && item.size >= 0)) return null;
+
       return {
         channel: parsed.channel,
         publicKeyUrl: parsed.publicKeyUrl,

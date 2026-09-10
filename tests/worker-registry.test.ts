@@ -13,13 +13,18 @@ import { TestD1, asD1 } from './d1';
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((file) => file.endsWith('.sql')).sort()
   .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n');
+
 const account = 'a'.repeat(32);
+
 const imageDigest = 'd'.repeat(64);
+
 const imageRef = `registry.cloudflare.com/${account}/omarpkg-arch-builder:stable@sha256:${imageDigest}`;
 
 function base64(bytes: ArrayBuffer): string {
   let binary = '';
+
   for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+
   return btoa(binary);
 }
 
@@ -28,13 +33,15 @@ async function fixture(options: { privateImage?: boolean; imageRef?: string } = 
   const db = asD1(holder);
   const keys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const token = await createEnrollmentToken(db, 'maintainer', 'x86_64', 300);
+
   const enrolled = await enrollWorker(db, {
     token: token.token,
     name: 'registry-worker',
     architecture: 'x86_64',
     publicKey: base64(await crypto.subtle.exportKey('raw', keys.publicKey)),
-    version: 'v0.1.0', runtime: 'podman', capabilities: ['offline-oci', 'registry-pull']
+    version: 'v0.1.0', runtime: 'podman', capabilities: ['offline-oci', 'registry-pull', 'single-build-reproducibility-v1']
   });
+
   const worker = await db.prepare('SELECT * FROM workers WHERE id=?').bind(enrolled.id).first<Worker>();
   const requestId = crypto.randomUUID();
   const revisionId = crypto.randomUUID();
@@ -59,6 +66,7 @@ async function fixture(options: { privateImage?: boolean; imageRef?: string } = 
   await db.prepare('INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES(?,?,?,?,?)')
     .bind(buildId, revisionId, 'x86_64', 'queued', timestamp).run();
   const env = { DB: db, REGISTRY_ACCOUNT_ID: account, REGISTRY_API_TOKEN: 'registry-runtime-token' } as Parameters<typeof issueRegistryCredentials>[0];
+
   return { holder, db, worker: worker!, env, buildId, imageRef };
 }
 
@@ -78,13 +86,16 @@ test('registry credentials are least privilege, short lived, scoped to approved 
   let request: { input: RequestInfo | URL; init?: RequestInit } | undefined;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     request = { input, init };
+
     return Response.json({
       success: true,
       result: { account_id: account, registry_host: 'registry.cloudflare.com', username: 'pull-user', password: 'pull-secret' }
     });
   }) as unknown as typeof fetch;
+
   try {
     const job = await claimJob(db, worker);
+
     if (!job) throw new Error('job was not claimed');
     const requestedAt = Date.now();
     const credentials = await issueRegistryCredentials(env, worker, buildId, { leaseToken: job.leaseToken });
@@ -113,13 +124,18 @@ test('registry credentials reject public images, mismatched namespaces, and arbi
   const namespaceFixture = await fixture({ imageRef: `registry.cloudflare.com/${'b'.repeat(32)}/other@sha256:${imageDigest}` });
   let calls = 0;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => { calls += 1; return Response.json({ success: true }); }) as unknown as typeof fetch;
+  globalThis.fetch = (async () => { calls += 1;
+
+ return Response.json({ success: true }); }) as unknown as typeof fetch;
+
   try {
     const publicJob = await claimJob(publicFixture.db, publicFixture.worker);
+
     if (!publicJob) throw new Error('public job was not claimed');
     await expectProtocolError(issueRegistryCredentials(publicFixture.env, publicFixture.worker, publicFixture.buildId, { leaseToken: publicJob.leaseToken }), 409);
     await expectProtocolError(issueRegistryCredentials(publicFixture.env, publicFixture.worker, publicFixture.buildId, { leaseToken: publicJob.leaseToken, permissions: ['pull'] }), 400);
     const namespaceJob = await claimJob(namespaceFixture.db, namespaceFixture.worker);
+
     if (!namespaceJob) throw new Error('namespace job was not claimed');
     await expectProtocolError(issueRegistryCredentials(namespaceFixture.env, namespaceFixture.worker, namespaceFixture.buildId, { leaseToken: namespaceJob.leaseToken }), 409);
     expect(calls).toBe(0);

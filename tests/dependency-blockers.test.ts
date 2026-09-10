@@ -5,8 +5,11 @@ import { blockerStatements, getDependencyBlockers, linkDependencyRequest, parseD
 import type { Env } from '../src/lib/server/env';
 
 const files = readdirSync(new URL('../migrations', import.meta.url)).filter((name) => name.endsWith('.sql')).sort();
+
 const migration = (name: string) => readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8');
+
 const allSchema = files.map(migration).join('\n');
+
 const maintainer = { id: 'github:1', role: 'maintainer' as const, areas: ['development'] };
 
 function request(db: TestD1, id: string) {
@@ -17,11 +20,13 @@ function request(db: TestD1, id: string) {
 async function block(db: TestD1, id: string, relation: string) {
   await asD1(db).batch(await blockerStatements(asD1(db), { requestId: id, scopeId: `generation-${id}`, revisionId: null, architecture: 'x86_64', timestamp: 2 },
     parseDependencyBlockers([{ relation, phase: 'factory', resolution: 'dependency', detail: `Missing ${relation}` }]), 'factory'));
+
   return (await getDependencyBlockers(asD1(db), id))[0];
 }
 
 test('blocked-state migration preserves referenced request data with foreign keys enabled', () => {
   const db = new TestD1(files.filter((file) => file < '0027').map(migration).join('\n'));
+
   try {
     db.exec('PRAGMA foreign_keys=ON');
     request(db, 'parent');
@@ -38,6 +43,7 @@ test('blocked-state migration preserves referenced request data with foreign key
 test('factory detection blocks only its own generation; admission needs a maintainer and rejects cycles', async () => {
   const db = new TestD1(allSchema);
   const env = { DB: asD1(db) } as Env;
+
   try {
     request(db, 'parent');
     const parent = await block(db, 'parent', 'child>=2');
@@ -60,21 +66,26 @@ test('factory detection blocks only its own generation; admission needs a mainta
 test('simultaneous dependency links cannot introduce a cycle and depth budget checks ancestors', async () => {
   const db = new TestD1(allSchema);
   const env = { DB: asD1(db) } as Env;
+
   try {
     request(db, 'left'); request(db, 'right');
     const left = await block(db, 'left', 'right');
     const right = await block(db, 'right', 'left');
+
     const results = await Promise.allSettled([
       linkDependencyRequest(env, maintainer, 'left', left.id, 'right'),
       linkDependencyRequest(env, maintainer, 'right', right.id, 'left'),
     ]);
+
     expect(results.filter((result) => result.status === 'fulfilled').length).toBe(1);
     expect(db.prepare('SELECT count(*) AS count FROM dependency_blockers WHERE dependency_request_id IS NOT NULL').first<Record<string, unknown>>()).toEqual({ count: 1 });
     const chain = [];
+
     for (let index = 0; index < 9; index++) {
       request(db, `node-${index}`);
       chain.push(await block(db, `node-${index}`, `node-${index + 1}`));
     }
+
     for (let index = 0; index < 7; index++) await linkDependencyRequest(env, maintainer, `node-${index}`, chain[index].id, `node-${index + 1}`);
     await expect(linkDependencyRequest(env, maintainer, 'node-7', chain[7].id, 'node-8')).rejects.toThrow('8 levels');
   } finally { db.close(); }
@@ -83,6 +94,7 @@ test('simultaneous dependency links cannot introduce a cycle and depth budget ch
 test('resolution requires matching version, architecture and approvals and returns parent to review only', async () => {
   const db = new TestD1(allSchema);
   const env = { DB: asD1(db) } as Env;
+
   try {
     request(db, 'parent'); request(db, 'provider');
     await block(db, 'parent', 'library>=2');
@@ -114,15 +126,19 @@ test('resolution requires matching version, architecture and approvals and retur
 test('dependency graph rejects a 65th reachable request', async () => {
   const db = new TestD1(allSchema);
   const env = { DB: asD1(db) } as Env;
+
   try {
     request(db, 'root');
     const blocker = await block(db, 'root', 'last');
+
     for (let index = 0; index < 64; index++) {
       request(db, `leaf-${index}`);
+
       if (index < 63) db.prepare(`INSERT INTO dependency_blockers(id,request_id,scope_id,architecture,relation,phase,resolution,detail,dependency_request_id,status,created_at)
         VALUES(?,'root','generation-root','x86_64',?,'factory','dependency','missing',?,'open',1)`)
         .bind(`edge-${index}`, `leaf-${index}`, `leaf-${index}`).run();
     }
+
     await expect(linkDependencyRequest(env, maintainer, 'root', blocker.id, 'leaf-63')).rejects.toThrow('64 requests');
     expect((await getDependencyBlockers(asD1(db), 'root')).find((item) => item.id === blocker.id)?.dependency_request_id).toBeNull();
   } finally { db.close(); }

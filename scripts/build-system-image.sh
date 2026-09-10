@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${OMAPKG_IMAGE_CLEAN_ENV:-}" != 1 ]]; then
+  clean_env=(PATH=/usr/bin:/bin HOME=/tmp LANG=C LC_ALL=C TZ=UTC TMPDIR=/tmp OMAPKG_IMAGE_CLEAN_ENV=1)
+  exec env -i "${clean_env[@]}" "$0" "$@"
+fi
+
 repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+builder_script=${BASH_SOURCE[0]}
 mode=build
 lock=
+candidate_lock=
+candidate_id=
+native_plan=
+candidate_lock_signature=
+native_plan_signature=
+coordinator_binding=
+package_cache=
+candidate_mode=0
 profile=
 output=
 provenance=
@@ -22,12 +36,20 @@ usage() {
 usage: build-system-image.sh [--check] --manifest URL --key FILE --fingerprint HEX --profile FILE
        [--signature URL] [--release-lock FILE]
        [--output FILE --provenance FILE [--work-dir DIR] [--overwrite]]
+       build-system-image.sh [--check] --candidate-lock FILE --candidate-lock-signature FILE --candidate-id ID --native-plan FILE --native-plan-signature FILE --key FILE --fingerprint HEX --profile FILE
 EOF
 }
 while (($#)); do
   case $1 in
     --check) mode=check ;;
     --release-lock) lock=${2:-}; shift ;;
+    --candidate-lock) candidate_lock=${2:-}; candidate_mode=1; shift ;;
+    --candidate-lock-signature) candidate_lock_signature=${2:-}; candidate_mode=1; shift ;;
+    --candidate-id) candidate_id=${2:-}; candidate_mode=1; shift ;;
+    --native-plan) native_plan=${2:-}; candidate_mode=1; shift ;;
+    --native-plan-signature) native_plan_signature=${2:-}; candidate_mode=1; shift ;;
+    --coordinator-binding) coordinator_binding=${2:-}; candidate_mode=1; shift ;;
+    --package-cache) package_cache=${2:-}; shift ;;
     --profile) profile=${2:-}; shift ;;
     --manifest) manifest_url=${2:-}; shift ;;
     --signature) manifest_signature=${2:-}; shift ;;
@@ -46,7 +68,13 @@ while (($#)); do
 done
 
 [[ -n "$profile" && -f "$profile" ]] || die "--profile must name a regular file"
-[[ -n "$manifest_url" ]] || die "--manifest is required; image locks must be reverified by the manifest client"
+if [[ -n "$package_cache" ]]; then [[ -d "$package_cache" && ! -L "$package_cache" ]] || die "package cache must be a regular directory"; fi
+if (( ! candidate_mode )); then
+  [[ -n "$manifest_url" ]] || die "--manifest is required; image locks must be reverified by the manifest client"
+else
+  [[ -z "$manifest_url" && -n "$candidate_lock" && -n "$candidate_id" && -n "$native_plan" && ( -n "$coordinator_binding" || ( -n "$candidate_lock_signature" && -n "$native_plan_signature" ) ) ]] || die "private candidate builds require a coordinator binding or signed candidate inputs without --manifest"
+  [[ -n "$trusted_key" && -n "$trusted_fingerprint" ]] || die "private candidate builds require --key and --fingerprint for package signatures"
+fi
 command -v jq >/dev/null || die "missing jq"
 command -v sha256sum >/dev/null || die "missing sha256sum"
 
@@ -56,7 +84,71 @@ canonical_sha() {
 }
 sha256_value() { sha256sum "$1" | awk '{print $1}'; }
 hex64() { [[ "$1" =~ ^[a-f0-9]{64}$ ]]; }
+guid_from_hash() { local hex=${1:0:32}; printf '%s-%s-%s-%s-%s' "${hex:0:8}" "${hex:8:4}" "${hex:12:4}" "${hex:16:4}" "${hex:20:12}"; }
 safe_file() { [[ -f "$1" && ! -L "$1" ]] || die "expected regular file: $1"; }
+offline_exec() { unshare --net -- "$@"; }
+verify_reviewed_signature() {
+  local payload=$1 signature=$2 verify_root status
+  safe_file "$payload"; safe_file "$signature"
+  verify_root=$(mktemp -d "${TMPDIR:-/tmp}/omapkg-image-signature.XXXXXX")
+  cleanup_paths+=("$verify_root")
+  chmod 700 "$verify_root"
+  gpg --batch --no-tty --homedir "$verify_root" --import "$trusted_key" >/dev/null 2>&1 || die "cannot load trusted candidate authority key"
+  status=$(gpg --batch --no-tty --status-fd=1 --homedir "$verify_root" --verify "$signature" "$payload" 2>/dev/null || true)
+  grep -Eq "^\\[GNUPG:\\] VALIDSIG ${trusted_fingerprint^^}( |$)" <<<"$status" || die "candidate authority signature is invalid"
+}
+archive_paths_checked=0
+archive_metadata_checked=0
+timestamp_ownership_order_checked=0
+declare -A allowed_owners=()
+inspect_package_archive() {
+  local archive=$1 listing mtree entries duplicate owners owner
+  listing=$(bsdtar --list --file "$archive")
+  duplicate=$(printf '%s\n' "$listing" | LC_ALL=C sort | uniq -d | head -n1)
+  [[ -z "$duplicate" ]] || die "package archive contains duplicate member $duplicate: $(basename "$archive")"
+  awk '$0 ~ /^\// || $0 ~ /(^|\/)\.\.(\/|$)/ { bad=1 } END { exit bad+0 }' <<<"$listing" || die "package archive contains an unsafe path: $(basename "$archive")"
+  archive_paths_checked=1
+  mtree=$(bsdtar --extract --to-stdout --file "$archive" .MTREE | gzip --decompress)
+  entries=$(grep '^\.' <<<"$mtree" || true)
+  [[ -n "$entries" ]] || die "package archive has no mtree entries: $(basename "$archive")"
+  duplicate=$(printf '%s\n' "$entries" | LC_ALL=C sort | uniq -d | head -n1)
+  [[ -z "$duplicate" ]] || die "package archive mtree contains duplicate entry $duplicate: $(basename "$archive")"
+  awk '/^\./ { if ($0 !~ /time=[0-9]+(\.0)?/ || ($0 ~ /uid=/ && $0 !~ /uid=[0-9]+/) || ($0 ~ /gid=/ && $0 !~ /gid=[0-9]+/)) bad=1 } END { exit bad+0 }' <<<"$entries" || die "package archive timestamp or ownership metadata is not deterministic: $(basename "$archive")"
+  owners=$(awk '
+    $1 == "/unset" {
+      for (i=2; i<=NF; i++) {
+        if ($i == "all" || $i == "uid") default_uid=""
+        if ($i == "all" || $i == "gid") default_gid=""
+      }
+      next
+    }
+    $1 == "/set" || /^\./ {
+      uid=default_uid; gid=default_gid
+      for (i=2; i<=NF; i++) {
+        if ($i ~ /^uid=/) uid=substr($i,5)
+        if ($i ~ /^gid=/) gid=substr($i,5)
+      }
+      if ($1 == "/set") { default_uid=uid; default_gid=gid; next }
+      if (uid !~ /^[0-9]+$/ || gid !~ /^[0-9]+$/) exit 1
+      print uid ":" gid
+    }
+  ' <<<"$mtree") || die "package archive has incomplete ownership metadata: $(basename "$archive")"
+  while IFS= read -r owner; do allowed_owners["$owner"]=1; done <<<"$owners"
+  archive_metadata_checked=1
+  timestamp_ownership_order_checked=1
+}
+normalize_ext4_metadata() {
+  local device=$1 inodes=$2 epoch=$3 inode fs_time fsck_status
+  if e2fsck -fyD "$device" >/dev/null 2>&1; then fsck_status=0; else fsck_status=$?; fi
+  (( fsck_status < 2 )) || die "cannot verify ext4 image before normalization"
+  while IFS= read -r inode; do
+    [[ "$inode" =~ ^[0-9]+$ ]] || die "invalid staged inode identity"
+    printf '%s\n' "set_inode_field <$inode> atime $epoch" "set_inode_field <$inode> ctime $epoch" "set_inode_field <$inode> mtime $epoch" "set_inode_field <$inode> crtime $epoch" quit | debugfs -w "$device" >/dev/null 2>&1 || die "cannot normalize ext4 inode metadata: $inode"
+  done <"$inodes"
+  fs_time=$(date -u -d "@$epoch" +%Y%m%d%H%M%S)
+  tune2fs -T "$fs_time" "$device" >/dev/null 2>&1 || die "cannot normalize ext4 superblock time"
+  printf '%s\n' "set_super_value wtime $epoch" "set_super_value mtime $epoch" "set_super_value lastcheck $epoch" "set_super_value mkfs_time $epoch" quit | debugfs -w "$device" >/dev/null 2>&1 || die "cannot normalize ext4 superblock timestamps"
+}
 
 temporary_root=
 cleanup_paths=()
@@ -81,12 +173,31 @@ if [[ -n "$manifest_url" ]]; then
     [[ "$(canonical_sha "$lock")" == "$(canonical_sha "$temporary_root/lock/release-lock.json")" ]] || die "supplied release lock differs from newly verified manifest inputs"
   fi
   lock=$temporary_root/lock/release-lock.json
+elif (( candidate_mode )); then
+  lock=$candidate_lock
 fi
 safe_file "$lock"
 
 profile_sha256=$(canonical_sha "$profile")
 lock_sha256=$(canonical_sha "$lock")
-jq -e '.schemaVersion == 1 and .authority == "omarchy-manifest-client-v1" and (.packages | type == "array" and length > 0)' "$lock" >/dev/null || die "release lock is not a manifest-client image lock"
+if (( candidate_mode )); then
+  safe_file "$native_plan"
+  safe_file "$trusted_key"
+  if [[ -n "$coordinator_binding" ]]; then safe_file "$coordinator_binding"; else command -v gpg >/dev/null || die "missing gpg for candidate authority verification"; verify_reviewed_signature "$lock" "$candidate_lock_signature"; verify_reviewed_signature "$native_plan" "$native_plan_signature"; fi
+  jq -e --arg id "$candidate_id" '.schemaVersion == 1 and .authority == "factory-candidate-v1" and .candidate.executionScope == "private" and .candidate.id == $id and (.candidate.ownedUniverseSha256 | type == "string") and (.candidate.inputLockSha256 | type == "string") and (.candidate.nativePlanSha256 | type == "string") and (.packages | type == "array" and length > 0)' "$lock" >/dev/null || die "candidate lock is not a reviewed private image lock"
+  candidate_owned_universe=$(jq -er '.candidate.ownedUniverseSha256' "$lock"); candidate_input_lock=$(jq -er '.candidate.inputLockSha256' "$lock"); candidate_native_plan=$(jq -er '.candidate.nativePlanSha256' "$lock")
+  hex64 "$candidate_owned_universe" || die "candidate owned-universe digest is invalid"
+  hex64 "$candidate_input_lock" || die "candidate input-lock digest is invalid"
+  hex64 "$candidate_native_plan" || die "candidate native-plan digest is invalid"
+  [[ "$(canonical_sha "$native_plan")" == "$candidate_native_plan" ]] || die "native plan bytes do not match candidate lock"
+  jq -e --arg id "$candidate_id" --arg arch "$(jq -er '.architecture' "$profile")" --arg owned "$candidate_owned_universe" --arg input "$candidate_input_lock" '.schemaVersion == 1 and (.kind == "factory-image-native-plan" or .kind == "factory-image-construction-proof") and .candidateId == $id and .architecture == $arch and .inputLockSha256 == $input and .status == "reviewed" and ((.kind == "factory-image-native-plan" and .executionScope == "private" and .ownedUniverseSha256 == $owned) or (.kind == "factory-image-construction-proof" and (.runPolicySha256 | type == "string")))' "$native_plan" >/dev/null || die "native plan is not the exact reviewed private construction proof"
+  if [[ -n "$coordinator_binding" ]]; then jq -e --arg id "$candidate_id" --arg arch "$(jq -er '.architecture' "$profile")" --arg lock "$lock_sha256" --arg proof "$candidate_native_plan" --arg profile "$profile_sha256" '.schemaVersion == 1 and .kind == "factory-image-coordinator-binding" and .candidateId == $id and .architecture == $arch and .candidateLockSha256 == $lock and .constructionProofSha256 == $proof and .profileSha256 == $profile and (.policySha256 | test("^[a-f0-9]{64}$")) and (.inputSha256 | test("^[a-f0-9]{64}$"))' "$coordinator_binding" >/dev/null || die "coordinator construction binding is invalid"; fi
+else
+  jq -e '.schemaVersion == 1 and .authority == "omarchy-manifest-client-v1" and (.packages | type == "array" and length > 0)' "$lock" >/dev/null || die "release lock is not a manifest-client image lock"
+  candidate_owned_universe=
+  candidate_input_lock=
+  candidate_native_plan=
+fi
 architecture=$(jq -er '.architecture' "$profile")
 case "$architecture" in x86_64|aarch64) ;; *) die "profile architecture is unsupported" ;; esac
 jq -e --arg arch "$architecture" '.architecture == $arch and .requiresNative == true and .requiresKvm == true and .emulationAllowed == false and .platform == "uefi"' "$profile" >/dev/null || die "profile is not a native UEFI profile"
@@ -130,6 +241,14 @@ package_set=$(jq -cS '[.packages[]] | sort_by(.name,.architecture,.version,.sha2
 [[ "$package_set" == "$(jq -er '.packageSetSha256' "$lock")" ]] || die "package set digest does not match lock"
 jq -e '.packageCount == (.packages | length) and .sourcePackageCount >= .packageCount' "$lock" >/dev/null || die "release lock package counts do not match selected/source entries"
 source_date_epoch=$(jq -er '.sourceDateEpoch // 0 | numbers | select(. > 0 and . < 4102444800)' "$lock") || die "invalid sourceDateEpoch"
+image_seed=$(printf '%s\n%s\n%s\n%s\n%s\n' "$lock_sha256" "$profile_sha256" "$architecture" "$source_date_epoch" "${candidate_native_plan:-}" | sha256sum | awk '{print $1}')
+disk_guid=$(guid_from_hash "$image_seed")
+esp_partition_guid=$(guid_from_hash "$(printf '%s-esp' "$image_seed" | sha256sum | awk '{print $1}')")
+root_partition_guid=$(guid_from_hash "$(printf '%s-root' "$image_seed" | sha256sum | awk '{print $1}')")
+root_uuid=$(guid_from_hash "$(printf '%s-rootfs' "$image_seed" | sha256sum | awk '{print $1}')")
+esp_uuid_raw=$(printf '%s' "$image_seed" | cut -c1-8)
+esp_uuid="${esp_uuid_raw:0:4}-${esp_uuid_raw:4:4}"
+export SOURCE_DATE_EPOCH="$source_date_epoch" TZ=UTC LANG=C LC_ALL=C E2FSPROGS_FAKE_TIME="$source_date_epoch"
 
 for required in $(jq -er '.basePackages[]?, .kernel.package, .bootloader.package, .firmware.package' "$profile"); do
   jq -e --arg name "$required" '.packages | any(.[]; .name == $name)' "$lock" >/dev/null || die "release lock omits profile package: $required"
@@ -164,12 +283,13 @@ fi
 [[ "$output" != "$provenance" ]] || die "image and provenance paths must differ"
 [[ ! -L "$output" && ! -L "$provenance" ]] || die "output paths must not be symlinks"
 if [[ -e "$output" || -e "$provenance" ]] && (( ! overwrite )); then die "refusing to overwrite existing output; pass --overwrite"; fi
-output_parent=$(CDPATH='' cd -- "$(dirname -- "$output")" 2>/dev/null || true); [[ -n "$output_parent" && -d "$output_parent" ]] || die "output parent must exist"
-prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null || true); [[ -n "$prov_parent" && -d "$prov_parent" ]] || die "provenance parent must exist"
+output_parent=$(CDPATH='' cd -- "$(dirname -- "$output")" 2>/dev/null && pwd -P || true); [[ -n "$output_parent" && -d "$output_parent" ]] || die "output parent must exist"
+prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null && pwd -P || true); [[ -n "$prov_parent" && -d "$prov_parent" ]] || die "provenance parent must exist"
 [[ "$EUID" == 0 ]] || die "image build needs root for loop devices and filesystems"
 native_host=$(uname -m)
 case "$native_host" in x86_64) [[ "$architecture" == x86_64 ]] || die "x86_64 builder cannot produce aarch64 native image" ;; aarch64|arm64) [[ "$architecture" == aarch64 ]] || die "aarch64 builder cannot produce x86_64 native image" ;; *) die "unsupported native builder architecture: $native_host" ;; esac
-for command_name in curl qemu-img sgdisk losetup udevadm mkfs.fat mkfs.ext4 mount umount blkid pacman grub-install arch-chroot gpg realpath bsdtar; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
+for command_name in curl qemu-img sgdisk losetup partx udevadm mknod mkfs.fat mkfs.ext4 mount umount blkid pacman grub-install arch-chroot gpg realpath bsdtar gzip unshare debugfs e2fsck tune2fs mcopy truncate dd; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
+builder_script=$(realpath -e -- "$builder_script") || die "builder script path is unavailable"
 if [[ -n "$work_dir" ]]; then mkdir -p -- "$work_dir"; chmod 700 "$work_dir"; build_root=$(mktemp -d "$work_dir/build.XXXXXX"); else build_root=$(mktemp -d "${TMPDIR:-/tmp}/omapkg-system-image.XXXXXX"); fi
 cleanup_paths+=("$build_root"); temporary_root=$build_root
 chmod 700 "$temporary_root"
@@ -179,28 +299,72 @@ esp_size=$(jq -er '.disk.espSizeMiB | numbers | select(. >= 64)' "$profile")
 image_tmp=$temporary_root/image.raw
 qemu-img create -f raw "$image_tmp" "$disk_size" >/dev/null
 sgdisk --zap-all "$image_tmp" >/dev/null
-sgdisk --new=1:2048:+"${esp_size}"M --typecode=1:ef00 --change-name=1:ESP --new=2:0:0 --typecode=2:8300 --change-name=2:ROOT "$image_tmp" >/dev/null
+sgdisk --disk-guid="$disk_guid" --new=1:2048:+"${esp_size}"M --partition-guid=1:"$esp_partition_guid" --typecode=1:ef00 --change-name=1:ESP --new=2:0:0 --partition-guid=2:"$root_partition_guid" --typecode=2:8300 --change-name=2:ROOT "$image_tmp" >/dev/null
 loop=$(losetup --find --show --partscan "$image_tmp")
-mounted=0
+created_partition_nodes=()
+mounted=0; esp_mounted=0
 dev_mounted=0; proc_mounted=0; sys_mounted=0
+remove_partition_nodes() {
+  local node
+  for node in "${created_partition_nodes[@]}"; do
+    rm -f -- "$node"
+  done
+  created_partition_nodes=()
+}
+detach_partitioned_loop() {
+  remove_partition_nodes
+  if [[ -n "$loop" ]]; then
+    partx --delete "$loop" >/dev/null 2>&1 || true
+    losetup -d "$loop" 2>/dev/null || true
+    loop=
+  fi
+}
 detach() {
   if (( sys_mounted )); then umount -R "$temporary_root/root/sys" || return 1; fi
   if (( proc_mounted )); then umount -R "$temporary_root/root/proc" || return 1; fi
   if (( dev_mounted )); then umount -R "$temporary_root/root/dev" || return 1; fi
-  if (( mounted )); then umount "$temporary_root/root/boot/efi" || return 1; umount "$temporary_root/root" || return 1; mounted=0; fi
-  losetup -d "$loop" 2>/dev/null || true
+  if (( esp_mounted )); then umount "$temporary_root/root/boot/efi" || return 1; esp_mounted=0; fi
+  if (( mounted )); then umount "$temporary_root/root" || return 1; mounted=0; fi
+  detach_partitioned_loop
   cleanup_all
 }
 trap detach EXIT INT TERM
 udevadm settle
 esp_device=${loop}p1; root_device=${loop}p2
-mkfs.fat -F32 "$esp_device" >/dev/null
-mkfs.ext4 -F "$root_device" >/dev/null
+if [[ ! -b "$esp_device" || ! -b "$root_device" ]]; then
+  partx --add "$loop" >/dev/null 2>&1 || true
+  udevadm settle
+fi
+for device in "$esp_device" "$root_device"; do
+  if [[ ! -b "$device" ]]; then
+    sysdev="/sys/class/block/$(basename -- "$device")/dev"
+    for attempt in $(seq 1 20); do
+      [[ -r "$sysdev" ]] && break
+      sleep 0.1
+    done
+    if [[ -r "$sysdev" ]]; then
+      IFS=: read -r major minor <"$sysdev"
+      [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || die "invalid loop partition device identity: $device"
+      mknod --mode=660 "$device" b "$major" "$minor"
+      created_partition_nodes+=("$device")
+    fi
+  fi
+done
+if [[ ! -b "$esp_device" || ! -b "$root_device" ]]; then
+  partition_status=""
+  for device in "$esp_device" "$root_device"; do
+    sysdev="/sys/class/block/$(basename -- "$device")/dev"
+    partition_status+=" $device=$(cat "$sysdev" 2>/dev/null || printf absent)"
+  done
+  die "loop partition devices are unavailable:$partition_status"
+fi
+mkfs.fat -F32 -i "$esp_uuid_raw" "$esp_device" >/dev/null
+mkfs.ext4 -F -U "$root_uuid" -E lazy_itable_init=0,lazy_journal_init=0,hash_seed="$root_uuid" "$root_device" >/dev/null
 mkdir -p "$temporary_root/root"
 mount "$root_device" "$temporary_root/root"; mounted=1
 root=$temporary_root/root
 mkdir -p "$root/boot/efi" "$root/dev" "$root/proc" "$root/sys"
-mount "$esp_device" "$root/boot/efi"
+mount "$esp_device" "$root/boot/efi"; esp_mounted=1
 mount --rbind /dev "$root/dev"; mount --make-rslave "$root/dev"; dev_mounted=1
 mount -t proc proc "$root/proc"; proc_mounted=1
 mount -t sysfs sysfs "$root/sys"; sys_mounted=1
@@ -236,30 +400,79 @@ for filename in "${!selected_packages[@]}"; do
   row=$(jq -ce --arg filename "$filename" '.packages[] | select(.filename == $filename)' "$lock") || die "pacman selected unbound package: $filename"
   [[ "$(jq -r '.install' <<<"$row")" == true || "$filename" == "$firmware_filename" ]] || die "selected package is not installable: $filename"
   url=$(jq -er '.url' <<<"$row"); sig_url=$(jq -er '.signatureUrl' <<<"$row"); expected=$(jq -er '.sha256' <<<"$row")
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename" "$url"
+  if [[ -n "$package_cache" ]]; then
+    safe_file "$package_cache/$filename" || die "package cache is missing: $filename"
+    safe_file "$package_cache/$filename.sig" || die "package cache is missing signature: $filename.sig"
+    cp -- "$package_cache/$filename" "$cache/$filename"
+  else
+    curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename" "$url"
+  fi
   [[ "$(sha256_value "$cache/$filename")" == "$expected" ]] || die "package bytes changed: $filename"
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename.sig" "$sig_url"
+  if [[ -n "$package_cache" ]]; then cp -- "$package_cache/$filename.sig" "$cache/$filename.sig"; else curl --fail --location --proto '=https' --tlsv1.2 --output "$cache/$filename.sig" "$sig_url"; fi
   [[ "$(sha256_value "$cache/$filename.sig")" == "$(jq -er '.signatureSha256' <<<"$row")" ]] || die "package signature bytes changed: $filename.sig"
+  inspect_package_archive "$cache/$filename"
 done
-pacman --gpgdir "$gpgdir" --config "$pacman_conf" --root "$root" --dbpath "$root/var/lib/pacman" --cachedir "$cache" --noconfirm --needed -S "${package_roots[@]}"
+offline_exec pacman --gpgdir "$gpgdir" --config "$pacman_conf" --root "$root" --dbpath "$root/var/lib/pacman" --cachedir "$cache" --noconfirm --needed -S "${package_roots[@]}"
+rm -f -- "$root/etc/machine-id" "$root/var/lib/systemd/random-seed" "$root"/etc/ssh/ssh_host_* 2>/dev/null || true
+ln -s /run/machine-id "$root/etc/machine-id"
+[[ ! -e "$root/var/lib/systemd/random-seed" && -z "$(find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' -print -quit 2>/dev/null)" ]] || die "machine identity or host SSH material leaked into image"
 kernel_path=$(jq -er '.kernel.path' "$profile"); initramfs_path=$(jq -er '.kernel.initramfs[0]' "$profile"); boot_target=$(jq -er '.bootloader.target' "$profile")
 [[ -f "$root$kernel_path" && -f "$root$initramfs_path" ]] || die "profile kernel or initramfs was not installed"
-arch-chroot "$root" grub-install --target="$boot_target" --efi-directory=/boot/efi --boot-directory=/boot --removable --no-nvram --recheck >/dev/null
-root_uuid=$(blkid -s UUID -o value "$root_device")
-esp_uuid=$(blkid -s UUID -o value "$esp_device")
+offline_exec arch-chroot "$root" grub-install --target="$boot_target" --efi-directory=/boot/efi --boot-directory=/boot --removable --no-nvram --recheck >/dev/null
 filesystem=$(jq -er '.disk.filesystem' "$profile")
-printf '%s\n' "UUID=$root_uuid / $filesystem defaults 0 1" "UUID=$esp_uuid /boot/efi vfat umask=0077 0 2" >"$root/etc/fstab"
+printf '%s\n' "UUID=$root_uuid / $filesystem defaults 0 1" "UUID=$(blkid -s UUID -o value "$esp_device") /boot/efi vfat umask=0077 0 2" >"$root/etc/fstab"
 kernel_args=$(jq -er '.boot.kernelArguments' "$profile" | sed "s/{rootUuid}/$root_uuid/g")
 printf '%s\n' "search --no-floppy --fs-uuid --set=root $root_uuid" "linux $kernel_path $kernel_args" "initrd $initramfs_path" >"$root/boot/grub/grub.cfg"
+esp_epoch=$((source_date_epoch - source_date_epoch % 2))
+esp_stage="$temporary_root/esp-stage"
+mkdir -p "$esp_stage"
+cp -a "$root/boot/efi/." "$esp_stage/"
+umount -R "$root/sys"; sys_mounted=0; umount -R "$root/proc"; proc_mounted=0; umount -R "$root/dev"; dev_mounted=0
+umount "$root/boot/efi"; esp_mounted=0
+find "$root" -xdev -print0 | xargs -0 touch -h -d "@$source_date_epoch"
+find "$esp_stage" -print0 | xargs -0 touch -h -d "@$esp_epoch"
+declare -A image_uids=() image_gids=()
+safe_file "$root/etc/passwd"; safe_file "$root/etc/group"
+while IFS=: read -r _ _ uid _; do
+  if [[ "$uid" =~ ^[0-9]+$ ]]; then image_uids["$uid"]=1; fi
+done <"$root/etc/passwd"
+while IFS=: read -r _ _ gid _; do
+  if [[ "$gid" =~ ^[0-9]+$ ]]; then image_gids["$gid"]=1; fi
+done <"$root/etc/group"
+while IFS= read -r path; do
+  owner=$(stat -c '%u:%g' "$path")
+  uid=${owner%:*}; gid=${owner#*:}
+  [[ -n "${allowed_owners[$owner]:-}" || ( -n "${image_uids[$uid]:-}" && -n "${image_gids[$gid]:-}" ) ]] || die "image path has undeclared ownership: $path ($owner)"
+done < <(find "$root" -xdev -print)
+uncontrolled_timestamp=$(find "$root" -xdev -printf '%T@ %p\n' | awk -v epoch="$source_date_epoch" '$1 + 0 != epoch { print; exit }')
+[[ -z "$uncontrolled_timestamp" ]] || die "image root contains an uncontrolled timestamp: $uncontrolled_timestamp"
+uncontrolled_timestamp=$(find "$esp_stage" -printf '%T@ %p\n' | awk -v epoch="$esp_epoch" '$1 + 0 != epoch { print; exit }')
+[[ -z "$uncontrolled_timestamp" ]] || die "ESP contains an uncontrolled timestamp: $uncontrolled_timestamp"
+root_inodes="$temporary_root/root-inodes.txt"
+find "$root" -xdev -printf '%i\n' | sort -nu >"$root_inodes"
 sync
-umount -R "$root/sys"; sys_mounted=0; umount -R "$root/proc"; proc_mounted=0; umount -R "$root/dev"; dev_mounted=0; umount "$root/boot/efi"; umount "$root"; mounted=0; losetup -d "$loop"
+[[ "$(blkid -s UUID -o value "$root_device")" == "$root_uuid" ]] || die "root filesystem UUID changed during image build"
+[[ "$(blkid -s UUID -o value "$esp_device" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "ESP filesystem UUID changed during image build"
+umount "$root"; mounted=0
+normalize_ext4_metadata "$root_device" "$root_inodes" "$source_date_epoch"
+detach_partitioned_loop
+esp_image="$temporary_root/esp.img"
+truncate -s "$((esp_size * 1024 * 1024))" "$esp_image"
+mkfs.fat -F32 -i "$esp_uuid_raw" "$esp_image" >/dev/null
+mcopy -s -p -m -i "$esp_image" "$esp_stage"/* :: >/dev/null
+[[ "$(blkid -s UUID -o value "$esp_image" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "staged ESP filesystem UUID changed"
+dd if="$esp_image" of="$image_tmp" bs=512 seek=2048 conv=notrunc status=none
 install -m0644 "$image_tmp" "$output"
 image_sha256=$(sha256_value "$output")
-profile_recipe=$(sha256_value "$repo_root/scripts/build-system-image.sh")
+image_size=$(stat -c '%s' "$output")
+image_name=$(basename -- "$output")
+source_manifest_sha=$(jq -cS -n --arg system "$system_digest" --arg opr "$opr_digest" '[{name:"system",sha256:$system},{name:"opr",sha256:$opr}]' | tr -d '\n' | sha256sum | awk '{print $1}')
+image_output_set_sha=$(jq -cS -n --arg filename "$image_name" --arg sha "$image_sha256" --argjson size "$image_size" '[{filename:$filename,size:$size,sha256:$sha}]' | tr -d '\n' | sha256sum | awk '{print $1}')
+input_identity_sha=${candidate_input_lock:-$lock_sha256}
+profile_recipe=$(sha256_value "$builder_script")
 profile_arch=$(jq -er '.architecture' "$profile")
-firmware_code=$(realpath -e -- "$(jq -er '.firmware.codePath' "$profile")") || die "UEFI code path is unavailable"
-firmware_vars=$(realpath -e -- "$(jq -er '.firmware.varsTemplatePath' "$profile")") || die "UEFI variable template path is unavailable"
-safe_file "$firmware_code"; safe_file "$firmware_vars"
+firmware_code=$(jq -er '.firmware.codePath' "$profile")
+firmware_vars=$(jq -er '.firmware.varsTemplatePath' "$profile")
 firmware_package=$(jq -er '.firmware.package' "$profile")
 firmware_package_sha=$(jq -er --arg name "$firmware_package" '.packages[] | select(.name == $name) | .sha256' "$lock" | head -n1)
 firmware_filename=$(jq -er --arg name "$firmware_package" '.packages[] | select(.name == $name) | .filename' "$lock" | head -n1)
@@ -269,8 +482,8 @@ bsdtar --list --file "$firmware_archive" | grep -Fqx "${firmware_code#/}" || die
 bsdtar --list --file "$firmware_archive" | grep -Fqx "${firmware_vars#/}" || die "firmware variable template is not owned by pinned package $firmware_package"
 archive_code_sha=$(bsdtar --extract --to-stdout --file "$firmware_archive" -- "${firmware_code#/}" | sha256sum | awk '{print $1}')
 archive_vars_sha=$(bsdtar --extract --to-stdout --file "$firmware_archive" -- "${firmware_vars#/}" | sha256sum | awk '{print $1}')
-[[ "$archive_code_sha" == "$(sha256_value "$firmware_code")" ]] || die "host UEFI code bytes differ from pinned firmware package"
-[[ "$archive_vars_sha" == "$(sha256_value "$firmware_vars")" ]] || die "host UEFI variable template differs from pinned firmware package"
-jq -cS -n --arg profile "$profile_sha256" --arg profileId "$(jq -er '.id' "$profile")" --arg recipe "$profile_recipe" --arg lock "$lock_sha256" --arg transaction "$transaction_digest" --arg system "$system_digest" --arg opr "$opr_digest" --arg packageSet "$package_set" --arg image "$image_sha256" --arg architecture "$profile_arch" --arg version "$(jq -er '.systemVersion' "$lock")" --arg generation "$(jq -er '.oprGeneration' "$lock")" --arg kernel "$(jq -er '.kernel.path' "$profile")" --arg bootloader "$(jq -er '.bootloader.target' "$profile")" --arg firmware "$firmware_package" --arg firmwarePackageSHA "$firmware_package_sha" --arg codePath "$firmware_code" --arg codeSHA "$(sha256_value "$firmware_code")" --arg varsPath "$firmware_vars" --arg varsSHA "$(sha256_value "$firmware_vars")" --argjson epoch "$source_date_epoch" --slurpfile packageRows <(jq -cS '[.packages[]] | sort_by(.name,.architecture,.version,.sha256)' "$lock") --slurpfile repoRows <(jq -cS '.repositories' "$lock") '{schemaVersion:1,authority:"omarchy-manifest-client-v1",transactionSha256:$transaction,systemManifestSha256:$system,oprManifestSha256:$opr,packageSetSha256:$packageSet,releaseLockSha256:$lock,profileId:$profileId,profileSha256:$profile,platformProfile:$profileId,recipeSha256:$recipe,systemVersion:$version,oprGeneration:$generation,architecture:$architecture,nativeArchitecture:$architecture,sourceDateEpoch:$epoch,kernel:$kernel,bootloader:$bootloader,firmware:{package:$firmware,packageSha256:$firmwarePackageSHA,codePath:$codePath,codeSha256:$codeSHA,varsTemplatePath:$varsPath,varsTemplateSha256:$varsSHA},imageSha256:$image,repositories:$repoRows[0],packages:$packageRows[0]}' >"$provenance"
+jq -cS -n --arg profile "$profile_sha256" --arg profileId "$(jq -er '.id' "$profile")" --arg recipe "$profile_recipe" --arg lock "$lock_sha256" --arg inputLock "$input_identity_sha" --arg transaction "$transaction_digest" --arg system "$system_digest" --arg opr "$opr_digest" --arg packageSet "$package_set" --arg image "$image_sha256" --arg imageName "$image_name" --arg sourceManifest "$source_manifest_sha" --arg imageSet "$image_output_set_sha" --arg candidateId "$candidate_id" --arg candidateOwned "$candidate_owned_universe" --arg candidateInput "$candidate_input_lock" --arg candidatePlan "$candidate_native_plan" --arg architecture "$profile_arch" --arg version "$(jq -er '.systemVersion' "$lock")" --arg generation "$(jq -er '.oprGeneration' "$lock")" --arg kernel "$(jq -er '.kernel.path' "$profile")" --arg bootloader "$(jq -er '.bootloader.target' "$profile")" --arg firmware "$firmware_package" --arg firmwarePackageSHA "$firmware_package_sha" --arg codePath "$firmware_code" --arg codeSHA "$archive_code_sha" --arg varsPath "$firmware_vars" --arg varsSHA "$archive_vars_sha" --argjson imageSize "$image_size" --argjson epoch "$source_date_epoch" --slurpfile packageRows <(jq -cS '[.packages[]] | sort_by(.name,.architecture,.version,.sha256)' "$lock") --slurpfile repoRows <(jq -cS '.repositories' "$lock") --argjson candidateMode "$candidate_mode" '{schemaVersion:1,authority:(if ($candidateMode == 1) then "factory-candidate-v1" else "omarchy-manifest-client-v1" end),candidate:(if ($candidateMode == 1) then {id:$candidateId,executionScope:"private",ownedUniverseSha256:$candidateOwned,inputLockSha256:$candidateInput,nativePlanSha256:$candidatePlan} else null end),transactionSha256:$transaction,systemManifestSha256:$system,oprManifestSha256:$opr,packageSetSha256:$packageSet,releaseLockSha256:$lock,profileId:$profileId,profileSha256:$profile,platformProfile:$profileId,recipeSha256:$recipe,systemVersion:$version,oprGeneration:$generation,architecture:$architecture,nativeArchitecture:$architecture,sourceDateEpoch:$epoch,kernel:$kernel,bootloader:$bootloader,firmware:{package:$firmware,packageSha256:$firmwarePackageSHA,codePath:$codePath,codeSha256:$codeSHA,varsTemplatePath:$varsPath,varsTemplateSha256:$varsSHA},imageSha256:$image,repositories:$repoRows[0],packages:$packageRows[0],reproducibility:{schemaVersion:1,status:"reproducibility-contract-verified",mode:"single-build",target:$architecture,inputs:{recipeSha256:$recipe,sourceManifestSha256:$sourceManifest,inputLockSha256:$inputLock,dependencyPlanSha256:$transaction,imageDigest:("sha256:" + $profile),sourceDateEpoch:$epoch},controls:{network:"disabled",locale:"C",timezone:"UTC",umask:"022",hostSecrets:"excluded",writableCaches:"excluded",nativeTarget:$architecture,archivePathsChecked:true,filesystemIds:"derived-from-inputs",timestamps:"SOURCE_DATE_EPOCH+E2FSPROGS_FAKE_TIME",partitionLayout:"reviewed-profile",ordering:"sorted-lock-and-pacman"},outputs:{setSha256:$imageSet,files:[{filename:$imageName,size:$imageSize,sha256:$image}],unexpected:[],prohibitedPaths:[]},limitations:["one image execution does not establish independent byte reproduction","bootloader and filesystem tools remain constrained by their reviewed native environment"]}}' >"$provenance"
+jq -cS '.reproducibility.controls += {archiveMetadataChecked:true,timestampOwnershipOrderChecked:true,filesystemMetadataChecked:true,networkPreparation:"verified-https-before-offline-stage",pacmanInstallDates:"normalized-to-source-epoch",fatTimestampResolutionSeconds:2,mkinitcpioOutput:"pinned-package-bytes",grubOutput:"offline-native-tool",filesystemOrder:"deterministic-guid-and-tooling",filesystemConstruction:"normalized-ext4-inodes-and-staged-fat",machineIdentity:"first-boot",secrets:"first-boot"}' "$provenance" >"$provenance.tmp"
+mv -- "$provenance.tmp" "$provenance"
 chmod 644 "$output"; chmod 644 "$provenance"
 echo "built $output ($image_sha256)"

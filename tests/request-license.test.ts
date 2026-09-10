@@ -30,9 +30,11 @@ describe('request license declaration', () => {
     expect(parseDeclaredLicense('proprietary')).toBe('proprietary');
     expect(parseDeclaredLicense('unknown')).toBe('unknown');
     expect(() => parseRequest(baseRequest)).toThrow();
+
     for (const value of ['', 'MIT XOR Apache-2.0', 'MIT OR', 'MIT; rm -rf /', 'MIT\nApache-2.0', 'x'.repeat(257)]) {
       expect(() => parseRequest({ ...baseRequest, declared_license: value })).toThrow();
     }
+
     expect(() => parseRequest({ ...baseRequest, description: '' })).toThrow();
     expect(() => parseRequest({ ...baseRequest, description: 'x'.repeat(501) })).toThrow();
     expect(parseRequest({ ...baseRequest, description: '  A\n package. ', declared_license: 'unknown' }).description).toBe('A package.');
@@ -40,6 +42,7 @@ describe('request license declaration', () => {
 
   test('persists declaration and audit detail while historical rows retain unknown', async () => {
     const db = new TestD1(schema);
+
     try {
       const requestId = await submitRequest(env(db), actor, { ...baseRequest, declared_license: 'proprietary' });
       expect(db.prepare('SELECT declared_license FROM requests WHERE id=?').bind(requestId).first<{ declared_license: string }>())

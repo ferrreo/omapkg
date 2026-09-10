@@ -15,6 +15,7 @@ const valid = {
 test('parses bounded native Arch package metadata and SONAME relations', () => {
   expect(parsePackageMetadata(valid)).toEqual(valid);
   const metadata = parsePackageMetadata(valid);
+
   if (!metadata) throw new Error('expected valid metadata');
   expect(parseArchRelation('lib:libOpenCL.so.1')).toEqual({ name: 'lib:libOpenCL.so.1', operator: null, version: null });
   expect(parseArchRelation('libOpenCL.so=1-64')).toEqual({ name: 'libOpenCL.so', operator: '=', version: '1-64' });

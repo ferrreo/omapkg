@@ -6,6 +6,7 @@
   import type { PageData } from './$types';
 
   export let data: PageData;
+
   $: view = data.view;
   $: user = data?.user || null;
   $: role = data?.role || 'public';

@@ -4,6 +4,7 @@ import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
   maintainer(event);
+
   return { images: await getBuildImages(environment(event)) };
 };
 

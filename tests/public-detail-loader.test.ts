@@ -30,6 +30,7 @@ const pageLoad = load as unknown as (event: Parameters<typeof load>[0]) => Promi
 
 test('public package detail keeps selected architecture and channel across evidence', async () => {
   const db = new TestD1(schema);
+
   try {
     db.prepare('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)').bind('request-1', 'demo', 'Requester text', 'https://example.com/demo.tar.gz', 'archive', 'desktop', 'built', 1, 1).run();
     db.prepare('INSERT INTO revisions(id,request_id,version,description,recipe,explanation,dependencies_json,license,upstream_commit) VALUES(?,?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?,?)').bind(

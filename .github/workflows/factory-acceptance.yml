@@ -1,0 +1,550 @@
+name: Factory native acceptance
+
+on:
+  push:
+    branches:
+      - fer/factory-native-acceptance
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: factory-native-acceptance-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  DOCKER_BUILDKIT: "0"
+  # This is a public, disposable registry image. It is used only as a local
+  # digest-addressable image store on the ephemeral runner.
+  FACTORY_REGISTRY_IMAGE: docker.io/library/registry@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
+  FACTORY_X86_BASE_IMAGE: docker.io/library/archlinux@sha256:694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34
+
+jobs:
+  native-x86:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      FACTORY_REGISTRY_HOST: localhost:5000
+    steps:
+      - name: Initialize evidence directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/factory-evidence-x86"
+          printf 'FACTORY_EVIDENCE=%s\n' "$RUNNER_TEMP/factory-evidence-x86" >> "$GITHUB_ENV"
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: worker/go.mod
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install renderer dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Start disposable local registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          case "$(docker info --format '{{.Architecture}}')" in amd64|x86_64) ;; *) exit 1 ;; esac
+          if docker info --format '{{json .SecurityOptions}}' | grep -qi rootless; then
+            echo 'rootful Docker daemon is required for factory image acceptance' >&2
+            exit 1
+          fi
+          docker pull "$FACTORY_REGISTRY_IMAGE"
+          docker rm --force factory-acceptance-registry >/dev/null 2>&1 || true
+          docker run --detach --name factory-acceptance-registry --network host "$FACTORY_REGISTRY_IMAGE"
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://localhost:5000/v2/ >/dev/null; then
+              break
+            fi
+            sleep 1
+            if [[ "$attempt" = 30 ]]; then
+              echo 'local registry did not become ready' >&2
+              exit 1
+            fi
+          done
+          mkdir -p "$FACTORY_EVIDENCE"
+
+      - name: Build digest-pinned x86 template images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$FACTORY_X86_BASE_IMAGE"
+          builder_tag="$FACTORY_REGISTRY_HOST/opr-template-matrix-x86:ci"
+          docker build --pull=false --file worker/Dockerfile.template-matrix --tag "$builder_tag" worker
+          docker push "$builder_tag" >/dev/null
+          builder_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$builder_tag")
+          [[ "$builder_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-matrix-x86@sha256:[0-9a-f]{64}$ ]]
+
+          runtime_tag="$FACTORY_REGISTRY_HOST/opr-template-runtime-x86:ci"
+          docker build --pull=false --file worker/Dockerfile.template-matrix-runtime --tag "$runtime_tag" worker
+          docker push "$runtime_tag" >/dev/null
+          runtime_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$runtime_tag")
+          [[ "$runtime_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-runtime-x86@sha256:[0-9a-f]{64}$ ]]
+
+          {
+            printf 'FACTORY_TEMPLATE_IMAGE=%s\n' "$builder_ref"
+            printf 'FACTORY_TEMPLATE_RUNTIME_IMAGE=%s\n' "$runtime_ref"
+          } >>"$GITHUB_ENV"
+          jq -cS -n \
+            --arg architecture x86_64 \
+            --arg builder "$builder_ref" \
+            --arg runtime "$runtime_ref" \
+            '{schemaVersion:1,kind:"factory-template-images",architecture:$architecture,builderImage:$builder,runtimeImage:$runtime}' \
+            >"$FACTORY_EVIDENCE/template-images.json"
+
+      - name: Run typed template A/B matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_EVIDENCE/template-matrix"
+          cd worker
+          OPR_REPO_ROOT="$GITHUB_WORKSPACE" \
+          OPR_WORKER_TEMPLATE_MATRIX_ARCH=x86_64 \
+          OPR_WORKER_TEMPLATE_MATRIX_IMAGE="$FACTORY_TEMPLATE_IMAGE" \
+          OPR_WORKER_TEMPLATE_MATRIX_RUNTIME_IMAGE="$FACTORY_TEMPLATE_RUNTIME_IMAGE" \
+          OPR_WORKER_TEMPLATE_MATRIX_RUNTIME=docker \
+          OPR_WORKER_TEMPLATE_MATRIX_EVIDENCE="$FACTORY_EVIDENCE/template-matrix" \
+            go test . -run '^(TestTemplateFamilyFixtureMatrixIsComplete|TestTemplateFamilyReproducibilityNativeOCI)$' -count=1 -v \
+            2>&1 | tee "$FACTORY_EVIDENCE/template-matrix.log"
+          if grep -Eq '^[[:space:]]*--- SKIP:' "$FACTORY_EVIDENCE/template-matrix.log"; then
+            echo 'template matrix reported an incomplete family' >&2
+            exit 1
+          fi
+
+      - name: Prepare digest-pinned image-build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_tools_base_context="$RUNNER_TEMP/image-tools-base-context"
+          mkdir -p "$image_tools_base_context"
+          cat >"$image_tools_base_context/Dockerfile" <<EOF
+          FROM $FACTORY_TEMPLATE_IMAGE
+          RUN pacman -Syu --noconfirm --needed buildah=1:1.45.0-1 e2fsprogs grub jq mtools \\
+              && pacman -Scc --noconfirm
+          EOF
+          image_tools_base_tag="$FACTORY_REGISTRY_HOST/opr-image-tools-base-x86:ci"
+          docker build --pull=false --file "$image_tools_base_context/Dockerfile" --tag "$image_tools_base_tag" "$image_tools_base_context"
+          docker push "$image_tools_base_tag" >/dev/null
+          image_tools_base_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image_tools_base_tag")
+          [[ "$image_tools_base_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-image-tools-base-x86@sha256:[0-9a-f]{64}$ ]]
+          tool_tag="$FACTORY_REGISTRY_HOST/opr-image-tools-x86:ci"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BASE_IMAGE="$image_tools_base_ref" \
+          SYSTEM_IMAGE_REPRO_BOOT_TOOL_TAG="$tool_tag" \
+          SYSTEM_IMAGE_REPRO_BOOT_TOOL_METADATA="$FACTORY_EVIDENCE/toolchain.json" \
+            system-images/reproducibility/prepare-tool-image.sh --push-local \
+            2>&1 | tee "$FACTORY_EVIDENCE/prepare-tool-image.log"
+          tool_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$tool_tag")
+          [[ "$tool_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-image-tools-x86@sha256:[0-9a-f]{64}$ ]]
+          docker run --rm --network none "$tool_ref" bash -lc 'command -v qemu-img && command -v sgdisk && command -v mkfs.fat'
+          printf 'FACTORY_IMAGE_TOOLCHAIN=%s\n' "$tool_ref" >>"$GITHUB_ENV"
+
+      - name: Fetch exact real image package inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/factory-real-packages"
+          mkdir -m 700 "$package_dir"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN" \
+            system-images/reproducibility/run.sh --fetch-real-packages "$package_dir" \
+            2>&1 | tee "$FACTORY_EVIDENCE/fetch-real-packages.log"
+          cp "$package_dir/manifest.json" "$FACTORY_EVIDENCE/real-package-manifest.json"
+          cp "$package_dir/packages.tsv" "$FACTORY_EVIDENCE/real-package-hashes.tsv"
+
+      - name: Run real OCI A/B image pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_EVIDENCE/oci"
+          docker run --rm --privileged --network none \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$FACTORY_EVIDENCE/oci:/work/oci:rw" \
+            -e OPR_IMAGE_REPRO_OUTER_NETWORK_NONE=1 \
+            "$FACTORY_IMAGE_TOOLCHAIN" bash -lc '
+              set -euo pipefail
+              test "$(uname -m)" = x86_64
+              buildah version
+              cd /repo
+              system-images/reproducibility/run.sh --oci --gap 5 --output /work/oci
+            ' 2>&1 | tee "$FACTORY_EVIDENCE/oci.log"
+
+      - name: Run real boot-filesystem A/B image pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/factory-real-packages"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN" \
+          SYSTEM_IMAGE_REPRO_REAL_PACKAGE_DIR="$package_dir" \
+            system-images/reproducibility/run.sh --filesystem-fixture --gap 5 \
+            --output "$FACTORY_EVIDENCE/filesystem" \
+            2>&1 | tee "$FACTORY_EVIDENCE/filesystem.log"
+
+      - name: Run native x86 system worker execution/sign/upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$FACTORY_EVIDENCE/filesystem/system-worker"
+          export SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker
+          export SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN"
+          export OPR_IMAGE_REPRO_SYSTEM_WORKER=1
+          export OPR_IMAGE_REPRO_REPO_ROOT="$GITHUB_WORKSPACE"
+          export OPR_IMAGE_REPRO_PROFILE="$fixture/profile.json"
+          export SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK="$fixture/candidate-lock.json"
+          export SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK_SIGNATURE="$fixture/candidate-lock.json.sig"
+          export SYSTEM_IMAGE_REPRO_NATIVE_PLAN="$fixture/native-plan.json"
+          export SYSTEM_IMAGE_REPRO_NATIVE_PLAN_SIGNATURE="$fixture/native-plan.json.sig"
+          export SYSTEM_IMAGE_REPRO_KEY="$fixture/release-key.asc"
+          export SYSTEM_IMAGE_REPRO_FINGERPRINT="$(cat "$fixture/fingerprint")"
+          export SYSTEM_IMAGE_REPRO_CONTEXT="$FACTORY_EVIDENCE/filesystem/system-context.tar"
+          (cd worker && go test . -run '^TestFactoryImageSystemNativeExecution$' -count=1 -timeout=45m -v) \
+            2>&1 | tee "$FACTORY_EVIDENCE/system-worker.log"
+          grep -Fq -- '--- PASS: TestFactoryImageSystemNativeExecution' "$FACTORY_EVIDENCE/system-worker.log"
+
+      - name: Stage logs, hashes, and acceptance evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_EVIDENCE"
+          upload="$RUNNER_TEMP/factory-upload-x86"
+          mkdir -p "$upload"
+          while IFS= read -r -d '' file; do
+            relative=${file#"$FACTORY_EVIDENCE"/}
+            destination="$upload/$relative"
+            mkdir -p "$(dirname "$destination")"
+            sudo cat -- "$file" >"$destination"
+          done < <(
+            sudo find "$FACTORY_EVIDENCE" -type f \
+              \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
+              -print0
+          )
+          (
+            find "$upload" -type f -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum
+          ) >"$upload/SHA256SUMS"
+
+      - name: Upload x86 acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: factory-acceptance-x86
+          path: ${{ runner.temp }}/factory-upload-x86
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Encrypt failed x86 fixture outputs
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipient='A1CF3B252919E8A5CA19BE38FF7FF604CBA73641'
+          archive_dir="$RUNNER_TEMP/factory-failure-x86"
+          mkdir -m 700 "$archive_dir"
+          gpg_home="$RUNNER_TEMP/factory-evidence-gnupg-x86"
+          mkdir -m 700 "$gpg_home"
+          GNUPGHOME="$gpg_home" gpg --batch --no-tty --import "$GITHUB_WORKSPACE/.github/factory-evidence-recipient.asc"
+          fingerprint=$(GNUPGHOME="$gpg_home" gpg --batch --no-tty --with-colons --list-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          [[ "$fingerprint" = "$recipient" ]]
+          tar_args=(--directory "$(dirname "$FACTORY_EVIDENCE")" "$(basename "$FACTORY_EVIDENCE")")
+          while IFS= read -r -d '' root; do
+            tar_args+=(--directory /tmp "$(basename "$root")")
+          done < <(find /tmp -maxdepth 1 -type d -name 'opr-reproducibility-*' -print0)
+          archive="$archive_dir/factory-failure-x86.tar.gz.gpg"
+          sudo tar --sparse --create --gzip --file - "${tar_args[@]}" \
+            | GNUPGHOME="$gpg_home" gpg --batch --no-tty --trust-model always --recipient "$recipient" --encrypt --output "$archive"
+          jq -cS -n --arg fingerprint "$recipient" --arg archive "$(basename "$archive")" --arg sha256 "$(sha256sum "$archive" | awk '{print $1}')" \
+            '{schemaVersion:1,kind:"factory-failure-evidence",recipientFingerprint:$fingerprint,archive:$archive,sha256:$sha256}' \
+            >"$archive_dir/manifest.json"
+
+      - name: Upload encrypted x86 fixture outputs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: factory-acceptance-x86-failure-encrypted
+          path: ${{ runner.temp }}/factory-failure-x86
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Remove disposable registry
+        if: ${{ always() }}
+        run: docker rm --force factory-acceptance-registry >/dev/null 2>&1 || true
+
+  native-arm:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      FACTORY_REGISTRY_HOST: localhost:5000
+    steps:
+      - name: Initialize evidence directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/factory-evidence-arm"
+          printf 'FACTORY_EVIDENCE=%s\n' "$RUNNER_TEMP/factory-evidence-arm" >> "$GITHUB_ENV"
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: worker/go.mod
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install renderer dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Start disposable local registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in aarch64|arm64) ;; *) exit 1 ;; esac
+          case "$(docker info --format '{{.Architecture}}')" in arm64|aarch64) ;; *) exit 1 ;; esac
+          if docker info --format '{{json .SecurityOptions}}' | grep -qi rootless; then
+            echo 'rootful Docker daemon is required for factory template acceptance' >&2
+            exit 1
+          fi
+          docker pull "$FACTORY_REGISTRY_IMAGE"
+          docker rm --force factory-acceptance-registry >/dev/null 2>&1 || true
+          docker run --detach --name factory-acceptance-registry --network host "$FACTORY_REGISTRY_IMAGE"
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://localhost:5000/v2/ >/dev/null; then
+              break
+            fi
+            sleep 1
+            if [[ "$attempt" = 30 ]]; then
+              echo 'local registry did not become ready' >&2
+              exit 1
+            fi
+          done
+          mkdir -p "$FACTORY_EVIDENCE"
+
+      - name: Build signature-verified ARM base image
+        shell: bash
+        env:
+          OPR_ARM_RUNTIME: docker
+          OPR_ARM_WORKDIR: ${{ runner.temp }}/factory-arm-base
+          OPR_ARM_IMAGE: localhost:5000/opr-arm-base:ci
+        run: |
+          set -euo pipefail
+          scripts/build-arm-image.sh 2>&1 | tee "$FACTORY_EVIDENCE/build-arm-base.log"
+          docker push "$OPR_ARM_IMAGE" >/dev/null
+          base_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$OPR_ARM_IMAGE")
+          [[ "$base_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-arm-base@sha256:[0-9a-f]{64}$ ]]
+          printf 'FACTORY_ARM_BASE_IMAGE=%s\n' "$base_ref" >>"$GITHUB_ENV"
+          jq -cS -n --arg architecture aarch64 --arg image "$base_ref" \
+            '{schemaVersion:1,kind:"factory-arm-base-image",architecture:$architecture,image:$image}' \
+            >"$FACTORY_EVIDENCE/arm-base-image.json"
+
+      - name: Build digest-pinned ARM template images
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed "s#^FROM .*#FROM $FACTORY_ARM_BASE_IMAGE#" \
+            worker/Dockerfile.template-matrix-aarch64 \
+            >"$RUNNER_TEMP/Dockerfile.template-matrix-aarch64"
+          builder_tag="$FACTORY_REGISTRY_HOST/opr-template-matrix-arm64:ci"
+          docker build --pull=false --file "$RUNNER_TEMP/Dockerfile.template-matrix-aarch64" --tag "$builder_tag" worker
+          docker push "$builder_tag" >/dev/null
+          builder_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$builder_tag")
+          [[ "$builder_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-matrix-arm64@sha256:[0-9a-f]{64}$ ]]
+
+          runtime_tag="$FACTORY_REGISTRY_HOST/opr-template-runtime-arm64:ci"
+          OPR_ARM_RUNTIME=docker \
+          OPR_ARM_TEMPLATE_BUILDER_IMAGE="$builder_ref" \
+          OPR_ARM_RUNTIME_ROOTFS_CONTEXT="$RUNNER_TEMP/factory-arm-base/context" \
+          OPR_ARM_TEMPLATE_RUNTIME_IMAGE="$runtime_tag" \
+            scripts/build-arm-template-runtime.sh 2>&1 | tee "$FACTORY_EVIDENCE/build-arm-template-runtime.log"
+          runtime_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$runtime_tag")
+          [[ "$runtime_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-template-runtime-arm64@sha256:[0-9a-f]{64}$ ]]
+
+          {
+            printf 'FACTORY_TEMPLATE_IMAGE=%s\n' "$builder_ref"
+            printf 'FACTORY_TEMPLATE_RUNTIME_IMAGE=%s\n' "$runtime_ref"
+          } >>"$GITHUB_ENV"
+          jq -cS -n \
+            --arg architecture aarch64 \
+            --arg builder "$builder_ref" \
+            --arg runtime "$runtime_ref" \
+            '{schemaVersion:1,kind:"factory-template-images",architecture:$architecture,builderImage:$builder,runtimeImage:$runtime}' \
+            >"$FACTORY_EVIDENCE/template-images.json"
+
+      - name: Run typed template A/B matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_EVIDENCE/template-matrix"
+          cd worker
+          OPR_REPO_ROOT="$GITHUB_WORKSPACE" \
+          OPR_WORKER_TEMPLATE_MATRIX_ARCH=aarch64 \
+          OPR_WORKER_TEMPLATE_MATRIX_IMAGE="$FACTORY_TEMPLATE_IMAGE" \
+          OPR_WORKER_TEMPLATE_MATRIX_RUNTIME_IMAGE="$FACTORY_TEMPLATE_RUNTIME_IMAGE" \
+          OPR_WORKER_TEMPLATE_MATRIX_RUNTIME=docker \
+          OPR_WORKER_TEMPLATE_MATRIX_EVIDENCE="$FACTORY_EVIDENCE/template-matrix" \
+            go test . -run '^(TestTemplateFamilyFixtureMatrixIsComplete|TestTemplateFamilyReproducibilityNativeOCI)$' -count=1 -v \
+            2>&1 | tee "$FACTORY_EVIDENCE/template-matrix.log"
+          if grep -Eq '^[[:space:]]*--- SKIP:' "$FACTORY_EVIDENCE/template-matrix.log"; then
+            echo 'template matrix reported an incomplete family' >&2
+            exit 1
+          fi
+
+      - name: Prepare digest-pinned ARM image-build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_tag="$FACTORY_REGISTRY_HOST/opr-image-tools-arm64:ci"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_ARCH=aarch64 \
+          SYSTEM_IMAGE_REPRO_BOOT_BASE_IMAGE="$FACTORY_ARM_BASE_IMAGE" \
+          SYSTEM_IMAGE_REPRO_BOOT_TOOL_TAG="$tool_tag" \
+          SYSTEM_IMAGE_REPRO_BOOT_TOOL_METADATA="$FACTORY_EVIDENCE/toolchain.json" \
+            system-images/reproducibility/prepare-tool-image.sh --push-local \
+            2>&1 | tee "$FACTORY_EVIDENCE/prepare-tool-image.log"
+          tool_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$tool_tag")
+          [[ "$tool_ref" =~ ^${FACTORY_REGISTRY_HOST}/opr-image-tools-arm64@sha256:[0-9a-f]{64}$ ]]
+          docker run --rm --network none "$tool_ref" bash -lc '
+            test "$(uname -m)" = aarch64
+            command -v buildah
+            command -v arch-chroot
+            command -v grub-install
+            command -v qemu-img
+            command -v sgdisk
+            command -v mkfs.fat
+          '
+          printf 'FACTORY_IMAGE_TOOLCHAIN_ARM=%s\n' "$tool_ref" >>"$GITHUB_ENV"
+
+      - name: Fetch exact real ARM image package inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/factory-real-packages-arm"
+          mkdir -m 700 "$package_dir"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN_ARM" \
+          SYSTEM_IMAGE_REPRO_ARCH_MIRROR=https://fl.us.mirror.archlinuxarm.org \
+            system-images/reproducibility/run.sh --fetch-real-packages "$package_dir" \
+            --profile system-images/profiles/aarch64-uefi.json \
+            2>&1 | tee "$FACTORY_EVIDENCE/fetch-real-packages.log"
+          cp "$package_dir/manifest.json" "$FACTORY_EVIDENCE/real-package-manifest.json"
+          cp "$package_dir/packages.tsv" "$FACTORY_EVIDENCE/real-package-hashes.tsv"
+          cp "$package_dir/closure.tsv" "$FACTORY_EVIDENCE/real-package-closure.tsv"
+
+      - name: Run real ARM boot-filesystem A/B image pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/factory-real-packages-arm"
+          SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker \
+          SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN_ARM" \
+          SYSTEM_IMAGE_REPRO_REAL_PACKAGE_DIR="$package_dir" \
+            system-images/reproducibility/run.sh --filesystem-fixture --gap 5 \
+            --profile system-images/profiles/aarch64-uefi.json \
+            --output "$FACTORY_EVIDENCE/filesystem" \
+            2>&1 | tee "$FACTORY_EVIDENCE/filesystem.log"
+
+      - name: Run native ARM system worker execution/sign/upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$FACTORY_EVIDENCE/filesystem/system-worker"
+          export SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker
+          export SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN_ARM"
+          export OPR_IMAGE_REPRO_SYSTEM_WORKER=1
+          export OPR_IMAGE_REPRO_REPO_ROOT="$GITHUB_WORKSPACE"
+          export OPR_IMAGE_REPRO_PROFILE="$fixture/profile.json"
+          export SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK="$fixture/candidate-lock.json"
+          export SYSTEM_IMAGE_REPRO_CANDIDATE_LOCK_SIGNATURE="$fixture/candidate-lock.json.sig"
+          export SYSTEM_IMAGE_REPRO_NATIVE_PLAN="$fixture/native-plan.json"
+          export SYSTEM_IMAGE_REPRO_NATIVE_PLAN_SIGNATURE="$fixture/native-plan.json.sig"
+          export SYSTEM_IMAGE_REPRO_KEY="$fixture/release-key.asc"
+          export SYSTEM_IMAGE_REPRO_FINGERPRINT="$(cat "$fixture/fingerprint")"
+          export SYSTEM_IMAGE_REPRO_CONTEXT="$FACTORY_EVIDENCE/filesystem/system-context.tar"
+          (cd worker && go test . -run '^TestFactoryImageSystemNativeExecution$' -count=1 -timeout=45m -v) \
+            2>&1 | tee "$FACTORY_EVIDENCE/system-worker.log"
+          grep -Fq -- '--- PASS: TestFactoryImageSystemNativeExecution' "$FACTORY_EVIDENCE/system-worker.log"
+
+      - name: Stage ARM logs, hashes, and acceptance evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_EVIDENCE"
+          upload="$RUNNER_TEMP/factory-upload-arm"
+          mkdir -p "$upload"
+          while IFS= read -r -d '' file; do
+            relative=${file#"$FACTORY_EVIDENCE"/}
+            destination="$upload/$relative"
+            mkdir -p "$(dirname "$destination")"
+            sudo cat -- "$file" >"$destination"
+          done < <(
+            sudo find "$FACTORY_EVIDENCE" -type f \
+              \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
+              -print0
+          )
+          (
+            find "$upload" -type f -print0 \
+              | sort -z \
+              | xargs -0 -r sha256sum
+          ) >"$upload/SHA256SUMS"
+
+      - name: Upload ARM acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: factory-acceptance-arm
+          path: ${{ runner.temp }}/factory-upload-arm
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Encrypt failed ARM fixture outputs
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipient='A1CF3B252919E8A5CA19BE38FF7FF604CBA73641'
+          archive_dir="$RUNNER_TEMP/factory-failure-arm"
+          mkdir -m 700 "$archive_dir"
+          gpg_home="$RUNNER_TEMP/factory-evidence-gnupg-arm"
+          mkdir -m 700 "$gpg_home"
+          GNUPGHOME="$gpg_home" gpg --batch --no-tty --import "$GITHUB_WORKSPACE/.github/factory-evidence-recipient.asc"
+          fingerprint=$(GNUPGHOME="$gpg_home" gpg --batch --no-tty --with-colons --list-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          [[ "$fingerprint" = "$recipient" ]]
+          tar_args=(--directory "$(dirname "$FACTORY_EVIDENCE")" "$(basename "$FACTORY_EVIDENCE")")
+          while IFS= read -r -d '' root; do
+            tar_args+=(--directory /tmp "$(basename "$root")")
+          done < <(find /tmp -maxdepth 1 -type d -name 'opr-reproducibility-*' -print0)
+          archive="$archive_dir/factory-failure-arm.tar.gz.gpg"
+          sudo tar --sparse --create --gzip --file - "${tar_args[@]}" \
+            | GNUPGHOME="$gpg_home" gpg --batch --no-tty --trust-model always --recipient "$recipient" --encrypt --output "$archive"
+          jq -cS -n --arg fingerprint "$recipient" --arg archive "$(basename "$archive")" --arg sha256 "$(sha256sum "$archive" | awk '{print $1}')" \
+            '{schemaVersion:1,kind:"factory-failure-evidence",recipientFingerprint:$fingerprint,archive:$archive,sha256:$sha256}' \
+            >"$archive_dir/manifest.json"
+
+      - name: Upload encrypted ARM fixture outputs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: factory-acceptance-arm-failure-encrypted
+          path: ${{ runner.temp }}/factory-failure-arm
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Remove disposable registry
+        if: ${{ always() }}
+        run: docker rm --force factory-acceptance-registry >/dev/null 2>&1 || true

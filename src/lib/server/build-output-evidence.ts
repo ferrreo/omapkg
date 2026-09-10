@@ -1,5 +1,5 @@
 import type { Worker } from '../model';
-import { assertOutputEvidence } from './output-evidence';
+import { assertOutputEvidence, requireReproducibilityContract } from './output-evidence';
 import { archRelationCovers } from './arch';
 import { storedOutputContract } from './build-outputs';
 import { parseDependencyPlan, dependencyPlansEqual } from './dependency-plan';
@@ -8,48 +8,83 @@ import { WorkerProtocolError, decodeBase64, parseRevisionForJob, sameJson, verif
   type ArtifactReference, type WorkerLease } from './worker-protocol';
 import { preservedBuildInputs } from '../preserved-recipe';
 
-export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public_key' | 'architecture'>, build: WorkerLease,
+export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public_key' | 'architecture' | 'capabilities_json'>, build: WorkerLease,
   artifacts: ArtifactReference[], provenance: string, signature: string, installedSize: number | undefined): Promise<void> {
   const contract = storedOutputContract(build);
+
   if (!contract || worker.architecture !== build.architecture) throw new WorkerProtocolError(409, 'Native output contract is required');
   let report;
+
   try { report = await assertOutputEvidence(JSON.parse(provenance), reviewedRuntimeExceptions(build.revision_sbom_json)); }
   catch (cause) { throw new WorkerProtocolError(409, cause instanceof Error ? cause.message : 'Invalid output evidence'); }
+
+  if (build.private_candidate === 1) {
+    try { await requireReproducibilityContract(report); }
+    catch (cause) { throw new WorkerProtocolError(409, cause instanceof Error ? cause.message : 'Single-build reproducibility contract is invalid'); }
+  }
+
   const { imageDigest } = workerImage(build);
   const revision = parseRevisionForJob(build);
   const preserved = preservedBuildInputs({ id: build.revision_id, sbom_json: build.revision_sbom_json, architectures_json: build.revision_architectures_json }, build.architecture);
+
   if (!sameJson(report.preservedRecipe ?? null, preserved) || !sameJson(build.preserved_inputs_json ? JSON.parse(build.preserved_inputs_json) : null, preserved)) {
     throw new WorkerProtocolError(409, 'Preserved source inputs differ from reviewed attempt');
   }
+
   if ((report.frozenInputs?.lock.sha256 ?? null) !== (build.input_lock_sha256 ?? null)) throw new WorkerProtocolError(409, 'Frozen input lock differs from lease');
+
   if (report.schemaVersion !== 2 || report.attempt !== build.attempt || !sameJson(report.outputContract, contract) || report.buildId !== build.id ||
       report.revisionId !== build.revision_id || report.workerId !== worker.id || report.recipeSha256 !== build.revision_recipe_sha256 ||
       report.architecture !== build.architecture || report.imageDigest !== imageDigest || report.network !== 'disabled' ||
       report.sourceDateEpoch !== build.revision_source_date_epoch || !sameJson(report.sources, revision.sources)) {
     throw new WorkerProtocolError(409, 'V2 provenance does not match leased inputs');
   }
+
+  if (build.private_candidate === 1 && (report.factoryRunId !== build.factory_run_id || report.factoryAttempt !== build.factory_attempt || report.factoryInputSha256 !== build.factory_input_sha256)) {
+    throw new WorkerProtocolError(409, 'Private factory provenance does not match its reserved run attempt.');
+  }
+
   const expectedPlan = build.dependency_plan_json ? parseDependencyPlan(JSON.parse(build.dependency_plan_json)) : null;
   const actualPlan = report.dependencyPlan ? parseDependencyPlan(report.dependencyPlan) : null;
+
   if ((build.dependency_plan_json && !expectedPlan) || (report.dependencyPlan && !actualPlan) || !dependencyPlansEqual(expectedPlan, actualPlan)) {
     throw new WorkerProtocolError(409, 'V2 dependency plan differs from lease');
   }
+
   if (!Array.isArray(report.outputs) || report.outputs.length !== contract.outputs.length || artifacts.length !== contract.outputs.length) {
     throw new WorkerProtocolError(409, 'Build output set is incomplete');
   }
+
+  if (report.reproducibility) {
+    const reproducibilityFiles = report.reproducibility.outputs.files;
+
+    if (reproducibilityFiles.length !== artifacts.length || reproducibilityFiles.some((output) => {
+      const artifact = artifacts.find((item) => item.filename === output.filename);
+
+      return !artifact || artifact.sha256 !== output.sha256 || artifact.size !== output.size;
+    })) throw new WorkerProtocolError(409, 'Reproducibility output identity does not match uploaded bytes');
+  }
+
   let total = 0;
   const relations: string[] = [];
+
   for (const output of report.outputs) {
     const artifact = artifacts.find((item) => item.filename === output.filename);
+
     if (output.pkgbase !== build.revision_name || !artifact || artifact.sha256 !== output.artifactSha256) {
       throw new WorkerProtocolError(409, 'Package output differs from reviewed identity or uploaded bytes');
     }
+
     total += output.packageMetadata.installedSize;
     relations.push(...output.packageMetadata.depends);
   }
+
   if (!Number.isSafeInteger(total) || total !== installedSize) throw new WorkerProtocolError(409, 'Output installed size does not match completion');
+
   if (revision.runtimeDependencies.some((reviewed) => !relations.some((native) => archRelationCovers(native, reviewed)))) {
     throw new WorkerProtocolError(409, 'Output metadata omits reviewed runtime dependencies');
   }
+
   if (!await verifyEd25519(decodeBase64(worker.public_key, 'worker public key'), new TextEncoder().encode(provenance), decodeBase64(signature, 'provenance signature'))) {
     throw new WorkerProtocolError(401, 'Invalid v2 provenance signature');
   }

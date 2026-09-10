@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { typedTemplateSchema } from './typed-templates';
 
 const vendorArtifactSchema = v.object({
     schemaVersion: v.literal(1),
@@ -45,7 +46,10 @@ export const factoryCandidateSchema = v.object({
   })),
   description: v.pipe(v.string(), v.minLength(1), v.maxLength(160)),
   recipeMode: v.picklist(['template', 'custom-shell']),
-  template: v.optional(v.strictObject({ id: v.picklist(['make-v1', 'go-v1']), binary: v.string(), target: v.optional(v.string()) })),
+  template: v.optional(v.union([
+    v.strictObject({ id: v.picklist(['make-v1', 'go-v1']), binary: v.string(), target: v.optional(v.string()) }),
+    typedTemplateSchema,
+  ])),
   runtimeExceptions: v.optional(v.pipe(v.array(v.strictObject({
     findingSha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)), reason: v.pipe(v.string(), v.minLength(1), v.maxLength(2000)),
   })), v.maxLength(16))),

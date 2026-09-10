@@ -1,3 +1,6 @@
+export { runFactoryRepairLoop } from '../../src/lib/server/factory-runs';
+export type { FactoryAttempt, FactoryRepairCandidate, FactoryRepairResult } from '../../src/lib/server/factory-runs';
+
 export const MAX_TRANSIENT_RECOVERIES = 2;
 
 export interface FactoryRecoveryStep {
@@ -28,7 +31,7 @@ export async function runFactoryWithRecovery<T>(input: {
     try {
       return await input.step.do(stepName, {
         retries: { limit: 2, delay: '1 minute', backoff: 'exponential' },
-        timeout: '30 minutes',
+        timeout: '3 hours',
       }, input.generate);
     } catch (cause) {
       lastError = cause;

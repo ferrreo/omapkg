@@ -40,7 +40,7 @@ export class WorkerProtocolError extends Error {
   }
 }
 
-export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'preserved-recipe-v1', 'helper-shell-analysis-v1', 'abi-inventory-v1'] as const;
+export const WORKER_CAPABILITIES = ['offline-oci', 'multipart-upload', 'registry-pull', 'runtime-analysis-v1', 'multi-output-v2', 'frozen-inputs-v1', 'recipe-inspection-v1', 'recipe-inspection-override-v1', 'preserved-recipe-v1', 'helper-shell-analysis-v1', 'abi-inventory-v1', 'single-build-reproducibility-v1', 'factory-image-v1'] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
 
@@ -105,6 +105,10 @@ export interface WorkerJob {
   dependencyPlan?: DependencyPlan;
   smokeCommands: string[];
   surface: 'binary' | 'recipe';
+  privateCandidate?: boolean;
+  factoryRunId?: string;
+  factoryAttempt?: number;
+  factoryInputSha256?: string;
 }
 
 export interface CompleteInput {
@@ -127,6 +131,10 @@ export interface ArtifactReference {
 }
 
 export interface WorkerLease extends Build {
+  factory_run_id?: string | null;
+  factory_attempt?: number | null;
+  factory_input_sha256?: string | null;
+  private_candidate?: number;
   output_contract_json?: string | null;
   revision_request_id: string;
   revision_name: string;
@@ -147,6 +155,7 @@ export interface WorkerLease extends Build {
   revision_source_date_epoch: number;
   revision_image_digest: string;
   revision_surface: 'binary' | 'recipe';
+  revision_preserved_origin_revision_id?: string | null;
 }
 
 export interface CandidateBuild extends WorkerLease {
@@ -163,13 +172,17 @@ export function leaseExpiryValue(timestamp: number): string {
 
 function selectedImage(revision: Pick<Revision, 'build_images_json' | 'image_digest'>, architecture: Architecture): { imageRef: string; imageDigest: string } {
   let imageRef: string;
+
   try {
     imageRef = revisionImage(revision, architecture);
   } catch {
     throw new WorkerProtocolError(500, 'Reviewed builder image is invalid');
   }
+
   const imageDigest = imageRef.match(/@(sha256:[0-9a-f]{64})$/)?.[1];
+
   if (!imageDigest || !imageDigestPattern.test(imageDigest)) throw new WorkerProtocolError(500, 'Reviewed builder image digest is invalid');
+
   return { imageRef, imageDigest };
 }
 
@@ -179,9 +192,12 @@ export function workerImage(build: Pick<WorkerLease, 'revision_build_images_json
 
 function storedCapabilities(value: string | null | undefined): WorkerCapability[] {
   if (!value) return [];
+
   try {
     const parsed: unknown = JSON.parse(value);
+
     if (!Array.isArray(parsed)) return [];
+
     return WORKER_CAPABILITIES.filter((capability) => parsed.includes(capability));
   } catch {
     return [];
@@ -196,6 +212,7 @@ export function workerMetadataChanged(worker: Worker, metadata: WorkerMetadata):
 export async function refreshWorkerMetadata(db: D1Database, worker: Worker, metadata: WorkerMetadata | null, timestamp: number): Promise<void> {
   if (!metadata) return;
   const changed = workerMetadataChanged(worker, metadata);
+
   try {
     await db.batch([
       db.prepare(`UPDATE workers SET last_seen_at=?,daemon_version=?,runtime=?,capabilities_json=?
@@ -222,6 +239,7 @@ export function requireString(value: unknown, field: string, maxLength: number):
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || hasControlCharacters(value)) {
     throw new WorkerProtocolError(400, `Invalid ${field}`);
   }
+
   return value;
 }
 
@@ -229,22 +247,31 @@ export function parseWorkerMetadata(value: unknown): WorkerMetadata | null {
   if (!isRecord(value)) throw new WorkerProtocolError(400, 'Invalid worker metadata');
   const fields = ['version', 'runtime', 'capabilities'] as const;
   const present = fields.filter((field) => Object.prototype.hasOwnProperty.call(value, field));
+
   if (!present.length) return null;
+
   if (present.length !== fields.length) throw new WorkerProtocolError(400, 'Worker metadata fields must be supplied together');
+
   if (typeof value.version !== 'string' || !workerVersionPattern.test(value.version)) {
     throw new WorkerProtocolError(400, 'Invalid worker version');
   }
+
   if (value.runtime !== 'podman' && value.runtime !== 'docker') throw new WorkerProtocolError(400, 'Invalid worker runtime');
+
   if (!Array.isArray(value.capabilities) || value.capabilities.length > WORKER_CAPABILITIES.length) {
     throw new WorkerProtocolError(400, 'Invalid worker capabilities');
   }
+
   const capabilities = value.capabilities.map((capability) => {
     if (typeof capability !== 'string' || !WORKER_CAPABILITIES.includes(capability as WorkerCapability)) {
       throw new WorkerProtocolError(400, 'Invalid worker capability');
     }
+
     return capability as WorkerCapability;
   });
+
   if (new Set(capabilities).size !== capabilities.length) throw new WorkerProtocolError(400, 'Duplicate worker capability');
+
   return {
     version: value.version,
     runtime: value.runtime,
@@ -256,11 +283,13 @@ export function requireText(value: unknown, field: string, maxLength: number): s
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || value.includes('\u0000')) {
     throw new WorkerProtocolError(400, `Invalid ${field}`);
   }
+
   return value;
 }
 
 export function requireArchitecture(value: unknown): Architecture {
   if (value !== 'x86_64' && value !== 'aarch64') throw new WorkerProtocolError(400, 'Invalid architecture');
+
   return value;
 }
 
@@ -272,8 +301,10 @@ export function decodeBase64(value: unknown, field: string): Uint8Array {
   if (typeof value !== 'string' || value.length === 0 || value.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
     throw new WorkerProtocolError(400, `Invalid ${field}`);
   }
+
   try {
     const decoded = atob(value);
+
     return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
   } catch {
     throw new WorkerProtocolError(400, `Invalid ${field}`);
@@ -282,13 +313,16 @@ export function decodeBase64(value: unknown, field: string): Uint8Array {
 
 export function encodeBase64(bytes: Uint8Array): string {
   let binary = '';
+
   for (const byte of bytes) binary += String.fromCharCode(byte);
+
   return btoa(binary);
 }
 
 export function randomHex(byteLength = 32): string {
   const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);
+
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -302,11 +336,13 @@ export function parseJsonBytes(bytes: Uint8Array): unknown {
 
 export function requireObject(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) throw new WorkerProtocolError(400, 'JSON body must be an object');
+
   return value;
 }
 
 export function requireExactKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
   const allowedSet = new Set(allowed);
+
   if (Object.keys(value).some((key) => !allowedSet.has(key))) throw new WorkerProtocolError(400, 'Unexpected request field');
 }
 
@@ -337,33 +373,43 @@ function parseJsonColumn(value: string, field: string): unknown {
 
 export function parseSources(value: string): Source[] {
   const parsed = parseJsonColumn(value, 'sources');
+
   if (!Array.isArray(parsed) || parsed.length === 0) throw new WorkerProtocolError(500, 'Reviewed sources are invalid');
+
   return parsed.map((source) => {
     if (!isRecord(source)) throw new WorkerProtocolError(500, 'Reviewed source is invalid');
     const name = requireString(source.name, 'source name', 256);
     const url = requireString(source.url, 'source URL', 2048);
+
     try {
       if (new URL(url).protocol !== 'https:') throw new Error('not https');
     } catch {
       throw new WorkerProtocolError(500, 'Reviewed source URL is not HTTPS');
     }
+
     const digest = source.sha256;
+
     if (typeof digest !== 'string' || !sha256Pattern.test(digest)) {
       throw new WorkerProtocolError(500, 'Reviewed source checksum is invalid');
     }
+
     return { name, url, sha256: digest };
   });
 }
 
 export function parseStringArray(value: string, field: string, maxItemLength: number): string[] {
   const parsed = parseJsonColumn(value, field);
+
   if (!Array.isArray(parsed)) throw new WorkerProtocolError(500, `Reviewed ${field} are invalid`);
+
   return parsed.map((item) => requireString(item, field.slice(0, -1), maxItemLength));
 }
 
 function parseArchitectures(value: string): Architecture[] {
   const parsed = parseJsonColumn(value, 'architectures');
+
   if (!Array.isArray(parsed) || parsed.length === 0) throw new WorkerProtocolError(500, 'Reviewed architectures are invalid');
+
   return parsed.map(requireArchitecture);
 }
 
@@ -378,12 +424,15 @@ export function parseRevisionForJob(revision: WorkerLease): {
   if (revision.revision_recipe.length === 0 || revision.revision_recipe.length > MAX_RECIPE_BYTES) {
     throw new WorkerProtocolError(500, 'Reviewed recipe is invalid');
   }
+
   if (!sha256Pattern.test(revision.revision_recipe_sha256)) throw new WorkerProtocolError(500, 'Reviewed recipe checksum is invalid');
-  const preserved = preservedRecipe({ id: revision.revision_id, sbom_json: revision.revision_sbom_json, architectures_json: revision.revision_architectures_json });
+  const preserved = preservedRecipe({ id: revision.revision_id, preserved_origin_revision_id: revision.revision_preserved_origin_revision_id ?? null, sbom_json: revision.revision_sbom_json, architectures_json: revision.revision_architectures_json });
   const target = preserved?.dependencies[revision.architecture];
+
   if (preserved && (!target || revision.revision_public_recipe || revision.revision_sources_json !== '[]')) throw new WorkerProtocolError(500, 'Invalid preserved recipe source scope');
   const runtimeDependencies = target?.runtime ?? parseStringArray(revision.revision_dependencies_json, 'dependencies', 256);
   const makeDependencies = target?.build ?? parseStringArray(revision.revision_make_dependencies_json ?? '[]', 'build dependencies', 256);
+
   return {
     sources: preserved ? [] : parseSources(revision.revision_sources_json),
     dependencies: [...new Set([...runtimeDependencies, ...makeDependencies])],
@@ -400,8 +449,10 @@ export async function verifyRecipeHash(recipe: string, expected: string): Promis
 
 export async function verifyEd25519(publicKeyBytes: Uint8Array, message: Uint8Array, signatureBytes: Uint8Array): Promise<boolean> {
   if (publicKeyBytes.byteLength !== 32 || signatureBytes.byteLength !== 64) return false;
+
   try {
     const key = await crypto.subtle.importKey('raw', publicKeyBytes as BufferSource, { name: 'Ed25519' }, false, ['verify']);
+
     return await crypto.subtle.verify({ name: 'Ed25519' }, key, signatureBytes as BufferSource, message as BufferSource);
   } catch {
     return false;
@@ -415,38 +466,48 @@ function signatureMessage(method: string, pathAndQuery: string, timestamp: strin
 /** Read a request body without allocating beyond its protocol limit. */
 export async function readBody(request: Request, limit: number): Promise<Uint8Array> {
   const contentLength = request.headers.get('content-length');
+
   if (contentLength !== null) {
     if (!/^\d+$/.test(contentLength) || Number(contentLength) > limit) throw new WorkerProtocolError(413, 'Request body too large');
   }
+
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+
   try {
     while (true) {
       const result = await reader.read();
+
       if (result.done) break;
       total += result.value.byteLength;
+
       if (total > limit) {
         await reader.cancel();
         throw new WorkerProtocolError(413, 'Request body too large');
       }
+
       chunks.push(result.value);
     }
   } finally {
     reader.releaseLock();
   }
+
   const body = new Uint8Array(total);
   let offset = 0;
+
   for (const chunk of chunks) {
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
+
   return body;
 }
 
 export function requireJsonContentType(request: Request): void {
   const contentType = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+
   if (contentType !== 'application/json') throw new WorkerProtocolError(415, 'Content-Type must be application/json');
 }
 
@@ -464,27 +525,36 @@ export async function authenticateWorker(
   const timestampHeader = request.headers.get('X-OPR-Timestamp');
   const nonce = request.headers.get('X-OPR-Nonce');
   const signatureHeader = request.headers.get('X-OPR-Signature');
+
   if (!workerId || !timestampHeader || !nonce || !signatureHeader || !/^\d+$/.test(timestampHeader) || !noncePattern.test(nonce)) {
     throw new WorkerProtocolError(401, 'Invalid worker authentication');
   }
+
   const timestamp = Number(timestampHeader);
+
   if (!Number.isSafeInteger(timestamp) || Math.abs(now() - timestamp) > CLOCK_SKEW_SECONDS) {
     throw new WorkerProtocolError(401, 'Invalid worker timestamp');
   }
+
   let worker: Worker | null;
+
   try {
     worker = await db.prepare('SELECT id, name, architecture, public_key, status, enrolled_at, last_seen_at, daemon_version, runtime, capabilities_json, accepting_jobs, paused_at, removed_at FROM workers WHERE id = ?')
       .bind(workerId).first<Worker>();
   } catch (cause) {
     return databaseFailure(cause);
   }
+
   if (!worker) throw new WorkerProtocolError(401, 'Invalid worker authentication');
+
   if (worker.status !== 'active') throw new WorkerProtocolError(403, 'Worker is revoked');
   const publicKey = decodeBase64(worker.public_key, 'worker public key');
   const signature = decodeBase64(signatureHeader, 'worker signature');
   const bodyHash = await sha256(body);
   const valid = await verifyEd25519(publicKey, signatureMessage(request.method, pathAndQuery, timestampHeader, nonce, bodyHash), signature);
+
   if (!valid) throw new WorkerProtocolError(401, 'Invalid worker signature');
+
   try {
     await db.batch([
       db.prepare('DELETE FROM worker_nonces WHERE created_at < ?').bind(now() - CLOCK_SKEW_SECONDS * 2),
@@ -492,8 +562,10 @@ export async function authenticateWorker(
     ]);
   } catch (cause) {
     if (isUniqueConstraint(cause)) throw new WorkerProtocolError(409, 'Worker request replayed');
+
     return databaseFailure(cause);
   }
+
   return { worker, timestamp, nonce };
 }
 
@@ -502,6 +574,8 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
     return await db.prepare(`
       SELECT b.id, b.revision_id, b.architecture, b.status, b.worker_id, b.lease_token, b.lease_expires_at,
         b.attempt, b.artifact_key, b.artifact_sha256, b.artifact_size, b.artifact_filename, b.installed_size, b.dependency_plan_json, b.output_contract_json, b.input_lock_sha256, b.preserved_inputs_json,
+        b.factory_run_id, b.factory_attempt, b.private_candidate,
+        (SELECT fa.input_sha256 FROM factory_run_attempts fa WHERE fa.run_id=b.factory_run_id AND fa.attempt=b.factory_attempt) AS factory_input_sha256,
         b.provenance, b.provenance_signature, b.smoke_passed, b.error, b.created_at, b.started_at, b.finished_at, b.dependency_blockers_json,
         q.name AS revision_name, r.request_id AS revision_request_id, r.version AS revision_version, r.recipe AS revision_recipe,
         r.recipe_sha256 AS revision_recipe_sha256, r.manifest_sha256 AS revision_manifest_sha256,
@@ -509,16 +583,18 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
         r.smoke_commands_json AS revision_smoke_commands_json, r.architectures_json AS revision_architectures_json,
         r.build_images_json AS revision_build_images_json, r.pkgrel AS revision_pkgrel, r.source_date_epoch AS revision_source_date_epoch,
         r.image_digest AS revision_image_digest,
-        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json
+        r.surface AS revision_surface, r.public_recipe AS revision_public_recipe, r.sbom_json AS revision_sbom_json, r.preserved_origin_revision_id AS revision_preserved_origin_revision_id
       FROM builds b JOIN revisions r ON r.id = b.revision_id JOIN requests q ON q.id = r.request_id
       WHERE b.id = ? AND b.worker_id = ?
-        AND (q.preserved_import_id IS NULL OR EXISTS(SELECT 1 FROM current_preserved_recipe_imports i WHERE i.id=q.preserved_import_id AND i.revision_id=r.id))
+        AND (q.preserved_import_id IS NULL OR EXISTS(SELECT 1 FROM current_preserved_recipe_imports i WHERE i.id=q.preserved_import_id AND (i.revision_id=r.id OR i.revision_id=r.preserved_origin_revision_id)))
         AND (b.input_lock_sha256 IS NULL OR EXISTS(SELECT 1 FROM current_input_locks l JOIN build_input_selections s ON s.lock_sha256=l.sha256
-          WHERE l.sha256=b.input_lock_sha256 AND s.recipe_revision_id=b.revision_id AND s.architecture=b.architecture
+          WHERE l.sha256=b.input_lock_sha256 AND (s.recipe_revision_id=b.revision_id OR s.recipe_revision_id=(SELECT source_revision_id FROM factory_revision_bindings WHERE revision_id=b.revision_id)) AND s.architecture=b.architecture
           AND s.cohort_id=l.cohort_id AND s.cohort_revision=l.cohort_revision))
         AND r.id = (SELECT latest.id FROM revisions latest WHERE latest.request_id = r.request_id ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)
-        AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'area' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
-        AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'security' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)`).bind(buildId, workerId).first<WorkerLease>();
+        AND (b.private_candidate=1 AND EXISTS (SELECT 1 FROM factory_runs fr JOIN factory_run_attempts fa ON fa.run_id=fr.id AND fa.attempt=fr.current_attempt
+          WHERE fr.id=b.factory_run_id AND fr.status='running' AND fr.current_attempt=b.factory_attempt AND fr.lease_expires_at>unixepoch() AND fa.status='running' AND fa.lease_expires_at>unixepoch() AND fa.candidate_revision_id=b.revision_id)
+          OR (b.private_candidate=0 AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'area' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)
+            AND EXISTS (SELECT 1 FROM approvals a WHERE a.revision_id = r.id AND a.kind = 'security' AND a.manifest_sha256 = r.manifest_sha256 AND a.revoked_at IS NULL)))`).bind(buildId, workerId).first<WorkerLease>();
   } catch (cause) {
     return databaseFailure(cause);
   }
@@ -526,10 +602,13 @@ export async function getBuildForWorker(db: D1Database, buildId: string, workerI
 
 export async function requireLease(db: D1Database, buildId: string, workerId: string, leaseToken: string): Promise<WorkerLease> {
   const build = await getBuildForWorker(db, buildId, workerId);
+
   if (!build || build.lease_token !== leaseToken) throw new WorkerProtocolError(409, 'Worker lease is fenced');
+
   if (build.status !== 'leased' || build.lease_expires_at === null || build.lease_expires_at <= now()) {
     throw new WorkerProtocolError(409, 'Worker lease is expired');
   }
+
   return build;
 }
 

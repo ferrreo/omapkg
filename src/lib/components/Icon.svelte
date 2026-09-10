@@ -34,7 +34,9 @@
   import type { IconName as IconNameType } from './Icon.svelte';
 
   export let name: IconNameType = 'activity';
+
   export let size = 16;
+
   export let strokeWidth = 1.7;
 
   const icons: Record<IconNameType, string[]> = {

@@ -5,9 +5,11 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
 
   type ImageRecord = PageData['images'][number];
+
   $: images = (Array.isArray(data?.images) ? data.images : []) as ImageRecord[];
   $: user = data?.user || null;
   $: isAdmin = data?.role === 'admin';

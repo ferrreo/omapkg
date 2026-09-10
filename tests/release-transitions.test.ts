@@ -8,6 +8,7 @@ import { TestD1 } from './d1';
 import { schema, MemoryR2, base64, env, insertBinaryRelease } from './release-fixtures';
 
 const reviewer = { id: 'github:1', role: 'maintainer' as const, areas: ['development'] };
+
 const signed = () => Response.json({ signature: { key: 'signatures/database.sig', sha256: 'a'.repeat(64) } });
 
 function serviceFixture() {
@@ -19,12 +20,14 @@ function serviceFixture() {
     CREATE TABLE release_rollbacks(release_id TEXT PRIMARY KEY,previous_release_id TEXT,manifest_key TEXT,created_at INTEGER);
     CREATE TABLE workers(id TEXT PRIMARY KEY,public_key TEXT,status TEXT);
     ALTER TABLE crash_reports ADD COLUMN confirmed_at INTEGER;`);
+
   const r2 = new MemoryR2();
   r2.objects.set('signatures/package.sig', new Uint8Array([1, 2, 3]));
   r2.objects.set('signatures/database.sig', new Uint8Array([4, 5, 6]));
   const service = env(db);
   service.ARTIFACTS = r2 as unknown as R2Bucket;
   service.SIGNER = { fetch: async () => signed() } as unknown as Fetcher;
+
   return { db, service, r2 };
 }
 
@@ -35,6 +38,7 @@ function channel(db: TestD1, releaseId: string): string | undefined {
 function repositoryText(db: TestD1, r2: MemoryR2, channel: string): string {
   const row = db.prepare('SELECT db_key FROM repository_snapshots WHERE channel=? AND active=1').bind(channel).first<{ db_key: string }>();
   expect(row).not.toBeNull();
+
   return new TextDecoder().decode(gunzipSync(r2.objects.get(row!.db_key)!));
 }
 
@@ -42,13 +46,16 @@ async function makeRecipe(db: TestD1, r2: MemoryR2, releaseId: string) {
   db.prepare("UPDATE releases SET surface='recipe',artifact_key=NULL,signature_key=NULL WHERE id=?").bind(releaseId).run();
   db.prepare("UPDATE revisions SET surface='recipe' WHERE id=?").bind(`revision-${releaseId}`).run();
   const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+
   const sources = JSON.parse(db.prepare('SELECT sources_json FROM revisions WHERE id=?')
     .bind(`revision-${releaseId}`).first<{ sources_json: string }>()!.sources_json);
+
   const provenance = JSON.stringify({
     buildId: `build-${releaseId}`, revisionId: `revision-${releaseId}`, workerId: releaseId,
     architecture: 'x86_64', recipeSha256: 'a'.repeat(64), imageDigest: 'sha256:' + 'd'.repeat(64),
     sourceDateEpoch: 1, network: 'disabled', ...runtimeEvidence('sha256:' + 'd'.repeat(64)), artifactSha256: null, sources,
   });
+
   db.prepare("INSERT INTO workers VALUES(?,?,'active')").bind(releaseId, base64(await crypto.subtle.exportKey('raw', keys.publicKey))).run();
   db.prepare(`UPDATE builds SET worker_id=?,provenance=?,provenance_signature=?,artifact_key=NULL,
     artifact_sha256=NULL,artifact_size=NULL,artifact_filename=NULL WHERE id=?`)
@@ -59,6 +66,7 @@ async function makeRecipe(db: TestD1, r2: MemoryR2, releaseId: string) {
 
 test('promotion retains dev history and indexes the remaining version', async () => {
   const { db, service, r2 } = serviceFixture();
+
   try {
     insertBinaryRelease(db, { id: 'old', name: 'foo', version: '1.0-1', dependencies: [], channel: 'dev' });
     insertBinaryRelease(db, { id: 'new', name: 'foo', version: '2.0-1', dependencies: [], channel: 'dev' });
@@ -72,6 +80,7 @@ test('promotion retains dev history and indexes the remaining version', async ()
 
 test('crash quarantine preserves newer dev history', async () => {
   const { db, service, r2 } = serviceFixture();
+
   try {
     insertBinaryRelease(db, { id: 'stable', name: 'foo', version: '1.0-1', dependencies: [], channel: 'stable' });
     insertBinaryRelease(db, { id: 'new-dev', name: 'foo', version: '2.0-1', dependencies: [], channel: 'dev' });
@@ -86,6 +95,7 @@ test('crash quarantine preserves newer dev history', async () => {
 
 test.each(['crash', 'approval'])('%s changing during signing blocks promotion atomically', async (change) => {
   const { db, service } = serviceFixture();
+
   try {
     insertBinaryRelease(db, { id: 'old', name: 'foo', version: '1.0-1', dependencies: [], channel: 'stable' });
     insertBinaryRelease(db, { id: 'new', name: 'foo', version: '2.0-1', dependencies: [], channel: 'dev' });
@@ -97,6 +107,7 @@ test.each(['crash', 'approval'])('%s changing during signing blocks promotion at
           else db.prepare("UPDATE approvals SET revoked_at=2 WHERE revision_id='revision-new' AND kind='security'").run();
           changed = true;
         }
+
         return signed();
       },
     } as unknown as Fetcher;
@@ -109,6 +120,7 @@ test.each(['crash', 'approval'])('%s changing during signing blocks promotion at
 
 test('Surface B rollback hashes the published recipe', async () => {
   const { db, service, r2 } = serviceFixture();
+
   try {
     insertBinaryRelease(db, { id: 'old', name: 'foo', version: '1.0-1', dependencies: [], channel: 'stable' });
     insertBinaryRelease(db, { id: 'new', name: 'foo', version: '2.0-1', dependencies: [], channel: 'stable' });
@@ -131,6 +143,7 @@ test.each(['signer', 'transaction'])('rollback retries after a transient %s fail
   const { db, service, r2 } = serviceFixture();
   const originalNow = Date.now;
   const originalBatch = db.batch.bind(db);
+
   try {
     insertBinaryRelease(db, { id: 'old', name: 'foo', version: '1.0-1', dependencies: [], channel: 'stable' });
     insertBinaryRelease(db, { id: 'new', name: 'foo', version: '2.0-1', dependencies: [], channel: 'stable' });
@@ -139,8 +152,10 @@ test.each(['signer', 'transaction'])('rollback retries after a transient %s fail
     r2.objects.set('packages/x86_64/foo-1.0-1-x86_64.pkg.tar.zst', bytes);
     db.prepare("UPDATE builds SET artifact_sha256=?,artifact_size=? WHERE id='build-old'").bind(await sha256(bytes), bytes.length).run();
     Date.now = () => 1800000000000;
+
     if (failure === 'signer') service.SIGNER = { fetch: async () => new Response('temporary outage', { status: 503 }) } as unknown as Fetcher;
     else db.batch = () => { throw new Error('injected commit failure'); };
+
     await expect(rollbackRelease(service, reviewer, 'new', 'restore prior package')).rejects.toThrow();
     expect(channel(db, 'new')).toBe('stable');
     Date.now = () => 1800000002000;
@@ -158,6 +173,7 @@ test.each(['signer', 'transaction'])('rollback retries after a transient %s fail
 
 test('recipe upgrade records its predecessor and can roll back', async () => {
   const { db, service, r2 } = serviceFixture();
+
   try {
     insertBinaryRelease(db, { id: 'old', name: 'foo', version: '1.0-1', dependencies: [], channel: 'stable' });
     insertBinaryRelease(db, { id: 'new', name: 'foo', version: '2.0-1', dependencies: [], channel: 'dev' });
@@ -174,6 +190,7 @@ test('recipe upgrade records its predecessor and can roll back', async () => {
 
 test.each(['old', 'new'])('promotion handles a recipe at the %s end of a surface change', async (recipeId) => {
   const { db, service, r2 } = serviceFixture();
+
   try {
     insertBinaryRelease(db, { id: 'old', name: 'foo', version: '1.0-1', dependencies: [], channel: 'stable' });
     insertBinaryRelease(db, { id: 'new', name: 'foo', version: '2.0-1', dependencies: [], channel: 'dev' });
@@ -194,19 +211,23 @@ test('external signer rejects nonlocal HTTP and redirects before publishing evid
   const requests: Request[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requests.push(input as Request);
+
     return new Response(null, { status: 302, headers: { Location: 'http://untrusted.example/sign' } });
   }) as typeof fetch;
+
   const input = {
     buildId: 'build-test', revisionId: 'revision-test', manifestSha256: 'a'.repeat(64),
     objectKey: 'packages/x86_64/foo.pkg.tar.zst', objectKind: 'package' as const,
     artifactSha256: 'b'.repeat(64), artifactSize: 3, artifactFilename: 'foo.pkg.tar.zst',
   };
+
   try {
     delete service.SIGNER;
     service.SIGNER_TOKEN = 'dummy-signing-token';
     service.SIGNER_URL = 'http://signer.example';
     await expect(signingRequest(service, input)).rejects.toThrow('must use HTTPS');
     expect(requests).toHaveLength(0);
+
     for (const origin of ['https://signer.example', 'http://127.0.0.1:8080']) {
       service.SIGNER_URL = origin;
       await expect(signingRequest(service, input)).rejects.toThrow('rejected request (302)');
@@ -215,6 +236,7 @@ test('external signer rejects nonlocal HTTP and redirects before publishing evid
       expect(request.redirect).toBe('manual');
       expect(request.headers.get('Authorization')).toBe('Bearer dummy-signing-token');
     }
+
     expect(requests).toHaveLength(2);
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });

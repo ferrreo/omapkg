@@ -2,8 +2,11 @@
   import Icon from './Icon.svelte';
 
   export let value = '';
+
   export let label = 'Copy';
+
   let copied = false;
+
   let timer: ReturnType<typeof setTimeout>;
 
   async function copy() {

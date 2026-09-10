@@ -29,21 +29,26 @@ class Multipart {
 
   async uploadPart(partNumber: number, value: Uint8Array): Promise<{ partNumber: number; etag: string }> {
     this.parts.set(partNumber, new Uint8Array(value));
+
     return { partNumber, etag: `etag-${partNumber}-${await sha256(value)}` };
   }
 
   async complete(parts: Array<{ partNumber: number; etag: string }>): Promise<unknown> {
     const chunks = parts.map((part) => this.parts.get(part.partNumber));
+
     if (chunks.some((chunk) => !chunk)) throw new Error('missing part');
     const size = chunks.reduce((total, chunk) => total + (chunk?.byteLength ?? 0), 0);
     const body = new Uint8Array(size);
     let offset = 0;
+
     for (const chunk of chunks) {
       body.set(chunk!, offset);
       offset += chunk!.byteLength;
     }
+
     this.bucket.objects.set(this.key, { body, metadata: this.metadata });
     this.completed = true;
+
     return {};
   }
 
@@ -60,18 +65,23 @@ class MultipartBucket {
   async createMultipartUpload(key: string, options?: { customMetadata?: Record<string, string> }): Promise<Multipart> {
     const upload = new Multipart(this, key, `r2-upload-${++this.sequence}`, options?.customMetadata ?? {});
     this.multipart.set(upload.uploadId, upload);
+
     return upload;
   }
 
   resumeMultipartUpload(key: string, uploadId: string): Multipart {
     const upload = this.multipart.get(uploadId);
+
     if (!upload || upload.key !== key) throw new Error('upload not found');
+
     return upload;
   }
 
   async get(key: string): Promise<unknown> {
     const object = this.objects.get(key);
+
     if (!object) return null;
+
     return {
       size: object.body.byteLength,
       customMetadata: object.metadata,
@@ -91,7 +101,9 @@ class MultipartBucket {
 
 function base64(bytes: ArrayBuffer): string {
   let binary = '';
+
   for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+
   return btoa(binary);
 }
 
@@ -100,14 +112,17 @@ async function workerFixture() {
   const db = asD1(holder);
   const keys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const token = await createEnrollmentToken(db, 'maintainer', 'x86_64', 300);
+
   const enrolled = await enrollWorker(db, {
     token: token.token,
     name: 'upload-worker',
     architecture: 'x86_64',
     publicKey: base64(await crypto.subtle.exportKey('raw', keys.publicKey)),
-    version: 'v0.1.0', runtime: 'podman', capabilities: ['offline-oci', 'multipart-upload']
+    version: 'v0.1.0', runtime: 'podman', capabilities: ['offline-oci', 'multipart-upload', 'single-build-reproducibility-v1']
   });
+
   const worker = await db.prepare('SELECT * FROM workers WHERE id=?').bind(enrolled.id).first<Worker>();
+
   return { holder, db, worker: worker!, privateKey: keys.privateKey };
 }
 
@@ -133,6 +148,7 @@ async function buildFixture(db: D1Database, expectedSize: number, expectedSha: s
     .bind(crypto.randomUUID(), revisionId, 'security', 'security', manifest, timestamp).run();
   await db.prepare('INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES(?,?,?,?,?)')
     .bind(buildId, revisionId, 'x86_64', 'queued', timestamp).run();
+
   return { buildId, expectedSize, expectedSha };
 }
 
@@ -148,21 +164,26 @@ async function expectProtocolError(action: Promise<unknown>, status: number): Pr
 
 function activeUpload(result: UploadStartResult) {
   if ('completed' in result) throw new Error('expected an active upload');
+
   return result;
 }
 
 test('multipart upload resumes parts, verifies whole-object digest, and records the build artifact', async () => {
   const { holder, db, worker } = await workerFixture();
   const bucket = new MultipartBucket();
+
   try {
     const body = new TextEncoder().encode('large package payload');
     const build = await buildFixture(db, body.byteLength, await sha256(body));
     const job = await claimJob(db, worker);
     expect(job?.id).toBe(build.buildId);
+
     if (!job) throw new Error('job was not claimed');
+
     const started = activeUpload(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, build.buildId, {
       leaseToken: job.leaseToken, filename: 'chunked-1.0-1-x86_64.pkg.tar.zst', size: body.byteLength, sha256: build.expectedSha
     }));
+
     expect(started.partSize).toBe(UPLOAD_PART_SIZE);
     expect(started.maxSize).toBe(MAX_UPLOAD_SIZE);
     const part = await uploadMultipartPart(db, bucket as unknown as R2Bucket, worker, build.buildId, started.uploadId, 1, job.leaseToken, body);
@@ -188,14 +209,18 @@ test('multipart upload resumes parts, verifies whole-object digest, and records 
 test('multipart upload rejects wrong part sizes and aborts incomplete uploads', async () => {
   const { holder, db, worker } = await workerFixture();
   const bucket = new MultipartBucket();
+
   try {
     const size = UPLOAD_PART_SIZE + 1;
     const build = await buildFixture(db, size, 'd'.repeat(64));
     const job = await claimJob(db, worker);
+
     if (!job) throw new Error('job was not claimed');
+
     const started = activeUpload(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, build.buildId, {
       leaseToken: job.leaseToken, filename: 'chunked-1.0-1-x86_64.pkg.tar.zst', size, sha256: build.expectedSha
     }));
+
     await expectProtocolError(uploadMultipartPart(db, bucket as unknown as R2Bucket, worker, build.buildId, started.uploadId, 1, job.leaseToken, new Uint8Array(1)), 400);
     await expectProtocolError(completeMultipartUpload(db, bucket as unknown as R2Bucket, worker, build.buildId, started.uploadId, { leaseToken: job.leaseToken }), 409);
     const row = await db.prepare('SELECT status FROM worker_uploads WHERE id=?').bind(started.uploadId).first<any>();
@@ -208,9 +233,11 @@ test('multipart upload rejects wrong part sizes and aborts incomplete uploads', 
 test('multipart upload enforces the four-gigabyte declared size ceiling', async () => {
   const { holder, db, worker } = await workerFixture();
   const bucket = new MultipartBucket();
+
   try {
     const build = await buildFixture(db, 1, 'e'.repeat(64));
     const job = await claimJob(db, worker);
+
     if (!job) throw new Error('job was not claimed');
     await expectProtocolError(startMultipartUpload(db, bucket as unknown as R2Bucket, worker, build.buildId, {
       leaseToken: job.leaseToken, filename: 'chunked-1.0-1-x86_64.pkg.tar.zst', size: MAX_UPLOAD_SIZE + 1, sha256: 'e'.repeat(64)
@@ -223,20 +250,27 @@ test('multipart upload enforces the four-gigabyte declared size ceiling', async 
 test('a reclaimed build can replace an upload from an expired worker lease', async () => {
   const { holder, db, worker } = await workerFixture();
   const bucket = new MultipartBucket();
+
   try {
     const body = new TextEncoder().encode('retry payload');
     const build = await buildFixture(db, body.byteLength, await sha256(body));
     const first = await claimJob(db, worker);
+
     if (!first) throw new Error('job was not claimed');
+
     const oldUpload = activeUpload(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, build.buildId, {
       leaseToken: first.leaseToken, filename: 'chunked-1.0-1-x86_64.pkg.tar.zst', size: body.byteLength, sha256: build.expectedSha
     }));
+
     await db.prepare("UPDATE builds SET lease_expires_at = strftime('%s','now') - 1 WHERE id=?").bind(build.buildId).run();
     const second = await claimJob(db, worker);
+
     if (!second) throw new Error('expired job was not reclaimed');
+
     const replacement = activeUpload(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, build.buildId, {
       leaseToken: second.leaseToken, filename: 'chunked-1.0-1-x86_64.pkg.tar.zst', size: body.byteLength, sha256: build.expectedSha
     }));
+
     expect(replacement.uploadId).not.toBe(oldUpload.uploadId);
     const statuses = await db.prepare('SELECT status FROM worker_uploads WHERE build_id=? ORDER BY created_at').bind(build.buildId).all<{ status: string }>();
     expect(statuses.results.map((row) => row.status)).toEqual(['failed', 'active']);
@@ -248,18 +282,22 @@ test('a reclaimed build can replace an upload from an expired worker lease', asy
 test('v2 multipart outputs remain distinct, immutable and fenced to their attempt', async () => {
   const { holder, db, worker } = await workerFixture();
   const bucket = new MultipartBucket();
+
   try {
     const body = new Uint8Array([1, 2, 3, 4]); const digest = await sha256(body);
-    const seeded = await buildFixture(db, body.length, digest);
+    await buildFixture(db, body.length, digest);
     const job = (await claimJob(db, worker))!;
+
     const contract = { schemaVersion: 2, cohort: { id: 'upload-cohort', revision: 1, manifestSha256: 'c'.repeat(64) }, outputs: [
       { name: 'chunked', fullVersion: '2:1.0-1', architecture: 'x86_64' }, { name: 'chunked-docs', fullVersion: '2:1.0-1', architecture: 'any' },
     ], runtimeGroups: [['chunked', 'chunked-docs']] };
+
     // Fixture supplies a new lease with the same storage contract used by claimJob.
     await db.prepare("UPDATE builds SET status='queued' WHERE id=?").bind(job.id).run();
     await db.prepare("UPDATE builds SET status='leased',output_contract_json=? WHERE id=?").bind(JSON.stringify(contract), job.id).run();
     const filenames = ['chunked-2:1.0-1-x86_64.pkg.tar.zst', 'chunked-docs-2:1.0-1-any.pkg.tar.zst'];
     let previousUpload = '';
+
     for (const filename of filenames) {
       const input = { leaseToken: job.leaseToken, filename, size: body.length, sha256: digest };
       const upload = activeUpload(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, job.id, input));
@@ -269,6 +307,7 @@ test('v2 multipart outputs remain distinct, immutable and fenced to their attemp
       expect(await startMultipartUpload(db, bucket as unknown as R2Bucket, worker, job.id, input)).toEqual({ completed: result });
       previousUpload = upload.uploadId;
     }
+
     expect((await db.prepare('SELECT COUNT(*) AS count FROM build_artifacts WHERE build_id=?').bind(job.id).first<{ count: number }>())?.count).toBe(2);
     expect((await db.prepare('SELECT artifact_key FROM builds WHERE id=?').bind(job.id).first<{ artifact_key: string | null }>())?.artifact_key).toBeNull();
     await db.prepare("UPDATE builds SET attempt=attempt+1 WHERE id=?").bind(job.id).run();

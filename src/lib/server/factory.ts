@@ -18,10 +18,11 @@ import {
 } from '@flue/runtime';
 import { cloudflareSandbox, getCloudflareContext } from '@flue/runtime/cloudflare';
 import * as v from 'valibot';
-import { audit, now } from './db';
+import { audit, sha256 } from './db';
+import { canonicalJson } from '../canonical-json';
 import type { Area, Architecture, BuildImageMap, PackageRequest } from '../model';
 import { getDefaultBuildImages } from './build-images';
-import type { FactoryEnv, FactoryRequest, SourceEvidence } from '../../../services/pipeline/types';
+import type { FactoryCandidate, FactoryEnv, FactoryRequest, SourceEvidence } from '../../../services/pipeline/types';
 import {
   factoryCandidateSchema,
   makeFactoryToolAudit,
@@ -44,10 +45,18 @@ import { factoryCatalogPath } from './catalog-recipe';
 import { nextPackageRelease } from '../../../services/pipeline/pkgrel';
 import { type SourceHostAuthorizer } from '../../../services/pipeline/source-fetch';
 import { normalizeRedirectSourceUrl, redactText, VENDOR_REGISTRY_HOSTS } from '../../../services/pipeline/security';
+import { createFactorySuccessorRun, FactoryPolicyStopError, latestFactoryRun, runFactoryRepairLoop, startFactoryRun, type FactoryRepairCandidate } from './factory-runs';
+import { renderFluePackagingGuidance } from '../../../services/pipeline/packaging-guidance';
+import { queuePrivateFactoryBuilds, waitForPrivateFactoryBuilds } from './factory-private-build';
 
 const generationIdPattern = /^[A-Za-z0-9_-]{8,128}$/;
+
+const automaticFactoryActor = 'system:upstream-check';
+
 const upstreamRefPattern = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+
 const architectures = ['x86_64', 'aarch64'] as const satisfies readonly Architecture[];
+
 const pinnedImagePattern = /^.+@sha256:[0-9a-f]{64}$/;
 
 const factoryRequestSchema = v.object({
@@ -86,29 +95,36 @@ export function PackageFactory({ id }: AgentProps) {
     compaction: { reserveTokens: 8_000, keepRecentTokens: 12_000 },
   });
   const env = cloudflareEnv();
+
   const trustedImageDigest = request.buildImages && Object.keys(request.buildImages).length
     ? request.buildImages
     : (env ? trustedBuilderImage(env) : undefined);
+
   let allowSourceHost: SourceHostAuthorizer | undefined;
+
   if (env?.Sandbox) {
     const remoteSandbox = getSandbox(
       env.Sandbox as DurableObjectNamespace<CloudflareSandbox>,
       `opr-src-${id.slice(-55).replace(/-+$/g, '')}`,
       { sleepAfter: '15m', labels: { requestId: request.id, phase: 'source-verification' } },
     );
+
     const adapter = cloudflareSandbox(remoteSandbox, { cwd: '/workspace' });
     const allowedHost = new URL(request.upstreamUrl).hostname;
     const allowedHosts = new Set([allowedHost, ...VENDOR_REGISTRY_HOSTS]);
     allowSourceHost = async (hostname) => {
       const normalized = normalizeRedirectSourceUrl(`https://${hostname}/`).hostname;
+
       if (normalized !== hostname.toLowerCase()) throw new Error('source redirect host is invalid');
       allowedHosts.add(normalized);
       await remoteSandbox.setAllowedHosts([...allowedHosts]);
     };
+
     useSandbox({
       createSandbox: async (options) => {
         try {
           await remoteSandbox.setAllowedHosts([...allowedHosts]);
+
           return await adapter.createSandbox(options);
         } catch (cause) {
           console.error('[factory:sandbox-init]', { requestId: request.id, error: factoryFailureMessage(cause) });
@@ -123,6 +139,7 @@ export function PackageFactory({ id }: AgentProps) {
   useTool(makeInspectSourceToolWithSink(request, setEvidence, env ? makeSourceMaterializer(env) : undefined, auditTool, allowSourceHost));
   useTool(makeReadSourceFilesTool(() => evidence, auditTool));
   useTool(makeSubmitCandidateTool(request, writeCandidate, () => evidence, trustedImageDigest, auditTool));
+
   if (env) useTool(makeReportMissingDependenciesTool(request, env.DB));
 
   return [
@@ -139,6 +156,7 @@ export function PackageFactory({ id }: AgentProps) {
     'If inspection reports a verified dependency vendor bundle, include its exact opr-vendor source entry and use the extracted vendor or node_modules tree with offline flags; never add a live registry or resolver command to the recipe.',
     'Surface policy: binary (Surface A) means omapkg may legally redistribute the built package; recipe (Surface B) is only for software whose binary redistribution is prohibited or unclear. Source format does not choose the surface: GPL, MIT, and Apache licensed source can be binary. For deb, rpm, AppImage, or self-extracting inputs, include the exact source and use the prepared vendor-root extraction tree without running an installer online.',
     'For a wrapped source archive, inspection provides a verified source root and the generated recipe enters it before build() and package(). Write buildCommands and packageCommands relative to that current source root; use relative paths for subdirectories and never reset with cd "$srcdir". Keep all $pkgdir or DESTDIR staging commands in packageCommands; buildCommands compile or prepare only and must not reference $pkgdir.',
+    renderFluePackagingGuidance(),
     'Smoke commands run after installation in a fresh unprivileged container under /bin/sh -ceu. Refer only to installed runtime paths, preferably absolute paths such as /usr/bin/program. Never reference PKGBUILD variables $pkgdir, $srcdir, $pkgname, $pkgver, $pkgrel, $CHOST, or $CARCH; those variables are unset during smoke.',
     'Arch makepkg may compress installed man and info pages, usually to .gz. Prefer smoke-testing executable behavior. If checking documentation, use the compressed path or an explicit fallback such as test -f /usr/share/man/man1/program.1.gz || test -f /usr/share/man/man1/program.1.',
     'Generate a complete PKGBUILD candidate plus source manifest, license evidence, surface, a plain one-sentence description of the software (<=160 characters, separate from the detailed explanation), dependencies, smoke commands, and SBOM facts. Keep description factual and human-readable; never paste audit reasoning into it. Use $pkgname and $pkgdir in packageCommands so paths follow the requested package name; never hardcode hello or another example name. The platform assigns pkgrel after verifying package name and upstream version; do not rely on a model-selected pkgrel. The trusted builder image is supplied by platform policy; never invent or change it.',
@@ -148,7 +166,9 @@ export function PackageFactory({ id }: AgentProps) {
 }
 
 PackageFactory.agentName = 'package-factory';
+
 PackageFactory.initialData = factoryRequestSchema;
+
 PackageFactory.durability = { maxAttempts: 5, timeoutMs: 1_800_000 };
 
 export interface FactoryRunResult {
@@ -159,6 +179,7 @@ export interface FactoryRunResult {
   pullRequestUrl: string;
   commitSha: string;
 }
+
 export type FactoryOutcome = FactoryRunResult | { requestId: string; status: 'blocked' };
 
 export type FactoryAgentDefinition = Parameters<typeof init>[0];
@@ -168,7 +189,9 @@ function candidateFromReply(reply: AgentReply | undefined): { candidate?: Factor
   const values = reply.data.factory_candidate;
   const value = values?.at(-1);
   const parsed = v.safeParse(factoryCandidateSchema, value);
+
   if (!parsed.success) return { reason: values?.length ? 'candidate data failed schema validation' : 'agent did not emit a candidate data part' };
+
   return { candidate: parsed.output, reason: 'candidate accepted' };
 }
 
@@ -180,58 +203,46 @@ interface FactorySubmissionResult {
 
 async function readFactorySubmission(agent: AgentInstanceHandle, receipt: DispatchReceipt): Promise<FactorySubmissionResult> {
   let toolError: string | undefined;
+
   try {
     const reply = await agent.read(receipt, {
       onEvent: (chunk) => {
         if (chunk.type === 'tool-output-error') toolError = redactText(chunk.errorText).slice(0, 800);
       },
     });
+
     return { reply, toolError };
   } catch (error) {
     return { error, toolError };
   }
 }
 
-async function recordFactoryRepair(
-  env: FactoryEnv,
-  requestId: string,
-  generationId: string,
-  attempt: number,
-  result: FactorySubmissionResult,
-  candidateReason: string,
-): Promise<void> {
-  const detail = {
-    generationId,
-    attempt,
-    reason: result.toolError ?? (result.error ? factoryFailureMessage(result.error) : candidateReason),
-  };
-  await env.DB.batch([
-    env.DB.prepare('INSERT INTO factory_events(request_id,stage,detail,created_at) VALUES(?,?,?,?)')
-      .bind(requestId, 'candidate.repair_requested', JSON.stringify(detail), now()),
-    audit(env.DB, 'factory', 'factory.candidate_repair_requested', requestId, detail),
-  ]);
-}
-
 function factoryFailureMessage(cause: unknown): string {
   const parts: string[] = [];
   const seen = new Set<unknown>();
   let current: unknown = cause;
+
   for (let depth = 0; depth < 4 && current && !seen.has(current); depth += 1) {
     seen.add(current);
+
     if (current instanceof Error) {
       if (current.message) parts.push(current.message);
       current = current.cause;
       continue;
     }
+
     if (typeof current === 'object') {
       const value = current as { message?: unknown; error?: unknown; cause?: unknown };
+
       if (typeof value.message === 'string' && value.message) parts.push(value.message);
       current = value.error ?? value.cause;
       continue;
     }
+
     if (typeof current === 'string' && current) parts.push(current);
     break;
   }
+
   return redactText([...new Set(parts)].join(': ') || 'factory failed').slice(0, 2_000);
 }
 
@@ -249,6 +260,7 @@ observe((event) => {
       error: factoryFailureMessage(event.response.error),
     });
   }
+
   if (event.type === 'tool' && event.agentName === 'PackageFactory') {
     console.error('[factory:flue-tool]', {
       instanceId: event.instanceId,
@@ -259,6 +271,7 @@ observe((event) => {
       ...(event.isError ? { error: factoryFailureMessage(event.errorInfo ?? event.result) } : {}),
     });
   }
+
   if (event.type === 'submission_recovery') {
     console.error('[factory:flue-recovery]', {
       instanceId: event.instanceId,
@@ -274,33 +287,44 @@ observe((event) => {
 function trustedBuilderImage(env: FactoryEnv): string | undefined {
   const image = env.FACTORY_BUILDER_IMAGE?.trim();
   const digest = env.FACTORY_BUILDER_IMAGE_DIGEST?.trim();
+
   if (!image || !digest || !/^sha256:[0-9a-f]{64}$/.test(digest) || !/^\S+$/.test(image) || !image.endsWith(`@${digest}`)) return undefined;
+
   return image;
 }
 
 async function configuredBuilderImages(env: FactoryEnv): Promise<BuildImageMap> {
   let configured: BuildImageMap = {};
+
   try {
     configured = await getDefaultBuildImages(env);
   } catch (cause) {
     const nested = cause instanceof Error && cause.cause instanceof Error ? cause.cause.message : '';
     const message = `${cause instanceof Error ? cause.message : ''} ${nested}`;
+
     if (!/no such table|no such column|does not exist/i.test(message)) throw cause;
   }
+
   const fallback = trustedBuilderImage(env);
   const result: BuildImageMap = {};
+
   for (const architecture of architectures) {
     const image = configured[architecture]?.trim() || fallback;
+
     if (image && !pinnedImagePattern.test(image)) throw new Error(`configured builder image is not pinned for ${architecture}`);
+
     if (image) result[architecture] = image;
   }
+
   return result;
 }
 
 function selectBuilderImages(images: BuildImageMap, requested: readonly Architecture[]): { architectures: Architecture[]; buildImages: BuildImageMap } {
   const selected = [...new Set(requested)];
   const missing = selected.filter((architecture) => !images[architecture]);
+
   if (!selected.length || missing.length) throw new Error(`No builder image is configured for requested architectures: ${missing.join(', ') || 'none'}.`);
+
   return {
     architectures: selected,
     buildImages: Object.fromEntries(selected.map((architecture) => [architecture, images[architecture]])) as BuildImageMap,
@@ -321,12 +345,18 @@ async function requestForFactory(env: FactoryEnv, requestId: string, generationI
     factory_run_id: string | null;
     preserved_import_id?: string | null;
   }>();
+
   if (!row) throw new Error('package request not found');
+
   if (row.preserved_import_id) throw new Error('Original recipe imports cannot enter factory generation');
+
   if (row.factory_run_id !== generationId) throw new Error('factory run is no longer current');
+
   const regenerationEvents = await env.DB.prepare(`SELECT detail FROM audit_events
     WHERE action='factory.regenerated' AND target=? ORDER BY id DESC LIMIT 20`).bind(requestId).all<{ detail: string | null }>();
+
   const maintainerFeedback = maintainerFeedbackForGeneration(regenerationEvents.results, generationId);
+
   return parseFactoryRequest({ ...row, maintainerFeedback });
 }
 
@@ -339,12 +369,17 @@ export async function runFactory(
   if (!generationIdPattern.test(generationId)) throw new Error('factory generation identity is required');
   const baseRequest = await requestForFactory(env, requestId, generationId);
   const status = await env.DB.prepare('SELECT status,factory_run_id FROM requests WHERE id=?').bind(requestId).first<{ status: string; factory_run_id: string | null }>();
+
   if (!status || status.factory_run_id !== generationId) throw new Error('factory run is no longer current');
+
   if (status.status === 'blocked') return { requestId, status: 'blocked' };
+
   if (status.status === 'review') {
     const existing = await env.DB.prepare('SELECT id,recipe_sha256,manifest_sha256,pr_url,commit_sha FROM revisions WHERE id=?')
       .bind(generationId).first<{ id: string; recipe_sha256: string; manifest_sha256: string; pr_url: string | null; commit_sha: string | null }>();
-    if (existing?.pr_url && existing.commit_sha) {
+    const reviewRun = await latestFactoryRun(env.DB, 'generated', requestId, 'request');
+
+    if (existing?.pr_url && existing.commit_sha && (!reviewRun || reviewRun.id !== generationId || reviewRun.status === 'succeeded')) {
       return {
         requestId,
         revisionId: existing.id,
@@ -355,93 +390,175 @@ export async function runFactory(
       };
     }
   }
+
   if (status.status !== 'generating') throw new Error('request is not in generating state');
 
   const availableImages = await configuredBuilderImages(env);
+
+  const runPolicy = {
+    sourceKind: baseRequest.sourceKind,
+    upstreamUrl: baseRequest.upstreamUrl,
+    upstreamRef: baseRequest.upstreamRef ?? null,
+    area: baseRequest.area,
+    buildImages: availableImages,
+    executionScope: 'private',
+  };
+
+  const previousRun = await latestFactoryRun(env.DB, 'generated', requestId, 'request');
+  const requestOwner = await env.DB.prepare('SELECT requested_by FROM requests WHERE id=?').bind(requestId).first<{ requested_by: string }>();
+
+  const humanRegeneration = await env.DB.prepare(`SELECT 1 FROM audit_events
+    WHERE target=? AND action='factory.regenerated' AND json_extract(detail,'$.generationId')=? LIMIT 1`)
+    .bind(requestId, generationId).first<{ 1: number }>();
+
+  if (previousRun?.status === 'needs-human-intervention' && requestOwner?.requested_by === automaticFactoryActor && !humanRegeneration) {
+    throw new Error('factory retry budget is exhausted; human intervention is required');
+  }
+
+  const regenerationActor = humanRegeneration?.['1'] ? (await env.DB.prepare(`SELECT actor FROM audit_events
+    WHERE target=? AND action='factory.regenerated' AND json_extract(detail,'$.generationId')=? ORDER BY id DESC LIMIT 1`)
+    .bind(requestId, generationId).first<{ actor: string }>())?.actor : null;
+  const factoryRun = previousRun && previousRun.id !== generationId
+    ? previousRun.status === 'needs-human-intervention' && regenerationActor
+      ? await createFactorySuccessorRun(env.DB, previousRun.id, { id: generationId, targetKind: 'generated', targetId: requestId, unitKey: 'request', policy: runPolicy, createdBy: regenerationActor })
+      : (() => { throw new Error('factory successor requires an audited human regeneration'); })()
+    : await startFactoryRun(env.DB, { id: generationId, targetKind: 'generated', targetId: requestId, unitKey: 'request', policy: runPolicy, createdBy: 'factory' });
+
+  if (factoryRun.status === 'succeeded') {
+    const artifact = factoryRun.artifact && typeof factoryRun.artifact === 'object' ? factoryRun.artifact as { revisionId?: unknown } : {};
+    const existing = typeof artifact.revisionId === 'string'
+      ? await env.DB.prepare('SELECT id,recipe_sha256,manifest_sha256,pr_url,commit_sha FROM revisions WHERE id=? AND request_id=?')
+        .bind(artifact.revisionId, requestId).first<{ id: string; recipe_sha256: string; manifest_sha256: string; pr_url: string | null; commit_sha: string | null }>()
+      : null;
+
+    if (existing?.pr_url && existing.commit_sha) return { requestId, revisionId: existing.id, recipeSha256: existing.recipe_sha256, manifestSha256: existing.manifest_sha256, pullRequestUrl: existing.pr_url, commitSha: existing.commit_sha };
+    throw new Error('factory run already has a successful private artifact; human review must reuse it');
+  }
+
   const request: FactoryRequest = { ...baseRequest, generationId, buildImages: availableImages };
 
   const agent = init(agentDefinition, { id: `factory-${requestId}-${generationId}` });
-  const receipt = await agent.dispatch({
-    initialData: request,
-    idempotencyKey: `factory:${generationId}`,
-    message: {
-      kind: 'signal',
-      type: 'factory.start',
-      body: 'Inspect the upstream source and produce a reviewable package revision.',
-      attributes: { requestId, generationId },
+  const blocked = async () => Boolean(await env.DB.prepare("SELECT 1 FROM requests WHERE id=? AND factory_run_id=? AND status='blocked'").bind(requestId, generationId).first());
+  let initialReceipt: DispatchReceipt | null = null;
+  const prepared = new Map<number, { candidate: FactoryCandidateInput; normalized: FactoryCandidate; revisionId: string }>();
+  let candidatePolicy: { surface: FactoryCandidate['surface']; license: string; sources: string[]; dependencies: string[] } | null = null;
+  const result = await runFactoryRepairLoop<FactoryRunResult>({
+    db: env.DB,
+    runId: generationId,
+    policy: runPolicy,
+    prepare: async (attempt, previousFailure): Promise<FactoryRepairCandidate> => {
+      if (await blocked()) throw new Error('factory request was blocked');
+      let submission: FactorySubmissionResult;
+      if (attempt === 1 && !initialReceipt) {
+        initialReceipt = await agent.dispatch({
+          initialData: request,
+          idempotencyKey: `factory:${generationId}`,
+          message: { kind: 'signal', type: 'factory.start', body: 'Inspect the upstream source and produce a reviewable package revision.', attributes: { requestId, generationId } },
+        });
+        submission = await readFactorySubmission(agent, initialReceipt);
+      } else {
+        const feedback = previousFailure instanceof Error ? previousFailure.message : JSON.stringify(previousFailure ?? 'candidate failed');
+        const repairReceipt = await agent.dispatch({
+          idempotencyKey: `factory:${generationId}:repair:${attempt - 1}`,
+          message: { kind: 'user', body: `The previous private candidate build failed. Continue this same conversation with verified inspection state. Repair the smallest justified issue from these bounded findings: ${redactText(feedback).slice(0, 1_200)}. Call submit_factory_candidate exactly once. Do not review, merge, sign or publish.` },
+        });
+        submission = await readFactorySubmission(agent, repairReceipt);
+      }
+      const parsed = candidateFromReply(submission.reply);
+      if (!parsed.candidate) throw new Error(submission.toolError ?? (submission.error ? factoryFailureMessage(submission.error) : parsed.reason));
+      const emitted = parsed.candidate;
+      const allowedHosts = new Set([new URL(request.upstreamUrl).hostname.toLowerCase(), ...VENDOR_REGISTRY_HOSTS]);
+      const sourceIdentities = emitted.sources.map((source) => {
+        let url: URL;
+        try { url = new URL(source.url); } catch { throw new FactoryPolicyStopError('Factory candidate introduced an invalid source URL.'); }
+        if (!allowedHosts.has(url.hostname.toLowerCase())) throw new FactoryPolicyStopError('Factory candidate introduced an unadmitted source origin.');
+        return `${source.name}\u0000${url.toString()}\u0000${source.sha256}`;
+      }).sort();
+      const dependencies = [...new Set(emitted.dependencies)].sort();
+      if (candidatePolicy && (candidatePolicy.surface !== emitted.surface || candidatePolicy.license !== emitted.license ||
+          candidatePolicy.sources.some((source) => !sourceIdentities.includes(source)) || dependencies.some((dependency) => !candidatePolicy!.dependencies.includes(dependency)))) {
+        throw new FactoryPolicyStopError('Factory repair expanded source, license, surface or dependency policy.');
+      }
+      candidatePolicy ??= { surface: emitted.surface, license: emitted.license, sources: sourceIdentities, dependencies };
+      const selected = selectBuilderImages(availableImages, emitted.architectures);
+      const pkgrel = await nextPackageRelease(env, request.name, emitted.version);
+      const normalized = {
+        ...emitted,
+        catalogPath: await factoryCatalogPath(env.DB, requestId),
+        request: { ...request, buildImages: selected.buildImages },
+        architectures: selected.architectures,
+        buildImages: selected.buildImages,
+        pkgrel,
+        imageDigest: selected.buildImages[selected.architectures[0]] as string,
+      };
+      const revisionId = crypto.randomUUID();
+      const candidateSha256 = await sha256(canonicalJson(normalized));
+      const inputSha256 = await sha256(canonicalJson({ policy: runPolicy, sources: normalized.sources, buildImages: normalized.buildImages, sourceDateEpoch: normalized.sourceDateEpoch }));
+      prepared.set(attempt, { candidate: emitted, normalized, revisionId });
+      return { candidateSha256, inputSha256, candidate: normalized, candidateRevisionId: revisionId };
+    },
+    execute: async (attempt) => {
+      const current = prepared.get(attempt.attempt);
+      if (!current) throw new Error('Factory candidate state was lost before execution.');
+      let draft;
+      try {
+        draft = await createFactoryRevision(current.normalized, attempt.attempt - 1, current.revisionId);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : 'Factory recipe validation failed.';
+        if (/recipe failed lint|invalid (?:shell|smoke|source|package|build|dependency)/i.test(message)) return { status: 'failed' as const, failureKind: 'validation' as const, failure: { message } };
+        throw cause;
+      }
+      const pullRequest = await createFactoryPullRequest(env, draft);
+      draft.revision.pr_url = pullRequest.url;
+      draft.revision.commit_sha = pullRequest.commitSha;
+      const persisted = await persistFactoryRevision(env, draft, 'factory', generationId, { privateCandidate: true });
+      const builds = await queuePrivateFactoryBuilds(env, generationId, attempt, persisted.revision);
+      const attached = await waitForPrivateFactoryBuilds(env, generationId, { ...attempt, buildIds: builds.map((build) => build.id) }, { timeoutMs: 150 * 60_000, pollMs: 30_000 });
+      if (attached.status === 'ambiguous') throw new Error(attached.failure?.message ?? 'Private build execution is ambiguous; human intervention is required.');
+      if (attached.status === 'failed') return { status: 'failed' as const, failureKind: 'build' as const, failure: attached.failure ?? { message: 'Private build failed.' } };
+      return {
+        status: 'succeeded' as const,
+        artifact: { revisionId: persisted.revision.id, buildIds: builds.map((build) => build.id), outputs: attached.artifacts, inputLocks: attached.inputLocks, dependencyPlans: attached.dependencyPlans },
+        value: { requestId, revisionId: persisted.revision.id, recipeSha256: persisted.revision.recipe_sha256, manifestSha256: persisted.revision.manifest_sha256, pullRequestUrl: persisted.revision.pr_url ?? pullRequest.url, commitSha: persisted.revision.commit_sha ?? pullRequest.commitSha },
+      };
+    },
+    onRepair: async (attempt, failure) => {
+      await audit(env.DB, 'factory', 'candidate.repair_requested', requestId, { generationId, attempt, reason: redactText(JSON.stringify(failure)).slice(0, 1_500) }).run();
     },
   });
-  let result = await readFactorySubmission(agent, receipt);
-  const blocked = async () => Boolean(await env.DB.prepare("SELECT 1 FROM requests WHERE id=? AND factory_run_id=? AND status='blocked'").bind(requestId, generationId).first());
-  if (await blocked()) return { requestId, status: 'blocked' };
-  let candidateResult = candidateFromReply(result.reply);
-  for (let attempt = 1; !candidateResult.candidate && attempt <= 2; attempt += 1) {
-    await recordFactoryRepair(env, requestId, generationId, attempt, result, candidateResult.reason);
-    const repairReceipt = await agent.dispatch({
-      idempotencyKey: `factory:${generationId}:repair:${attempt}`,
-      message: {
-        kind: 'user',
-        body: `The previous factory turn did not produce an accepted candidate. Continue in this same conversation and preserve verified inspection state. Correct this bounded tool result: ${redactText(result.toolError ?? (result.error ? factoryFailureMessage(result.error) : candidateResult.reason)).slice(0, 800)}. If lint rejected package staging, move every DESTDIR or $pkgdir install from buildCommands into packageCommands; buildCommands must compile or prepare only. If the archive has a verified root, omit cd "$srcdir" and write commands relative to that root. Call submit_factory_candidate exactly once after correction. Do not perform review, build, merge, signing, or publication actions.`,
-      },
-    });
-    result = await readFactorySubmission(agent, repairReceipt);
-    if (await blocked()) return { requestId, status: 'blocked' };
-    candidateResult = candidateFromReply(result.reply);
-  }
-  if (!candidateResult.candidate) {
-    const reason = result.toolError ?? (result.error ? factoryFailureMessage(result.error) : candidateResult.reason);
-    throw new Error(`factory did not emit a valid candidate: ${reason}`);
-  }
-  const emitted = candidateResult.candidate;
-  const selected = selectBuilderImages(availableImages, emitted.architectures);
-  const pkgrel = await nextPackageRelease(env, request.name, emitted.version);
-  const normalizedCandidate = {
-    ...emitted,
-    catalogPath: await factoryCatalogPath(env.DB, requestId),
-    request: { ...request, buildImages: selected.buildImages },
-    architectures: selected.architectures,
-    buildImages: selected.buildImages,
-    pkgrel,
-    imageDigest: selected.buildImages[selected.architectures[0]] as string,
-  };
-  const draft = await createFactoryRevision(normalizedCandidate, 0, generationId);
-  const pullRequest = await createFactoryPullRequest(env, draft);
-  draft.revision.pr_url = pullRequest.url;
-  draft.revision.commit_sha = pullRequest.commitSha;
-  const persisted = await persistFactoryRevision(env, draft, 'factory', generationId);
-  return {
-    requestId,
-    revisionId: persisted.revision.id,
-    recipeSha256: persisted.revision.recipe_sha256,
-    manifestSha256: persisted.revision.manifest_sha256,
-    pullRequestUrl: persisted.revision.pr_url ?? pullRequest.url,
-    commitSha: persisted.revision.commit_sha ?? pullRequest.commitSha,
-  };
+  if (typeof result === 'object' && result && 'requestId' in result) return result as FactoryRunResult;
+  throw new Error('Factory repair loop completed without a result.');
 }
 
 export async function factoryEndpoint(request: Request, env: FactoryEnv, agentDefinition?: FactoryAgentDefinition): Promise<Response> {
   if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
   let payload: { requestId?: unknown; generationId?: unknown };
+
   try {
     payload = await request.json() as { requestId?: unknown; generationId?: unknown };
   } catch {
     return Response.json({ error: 'invalid JSON' }, { status: 400 });
   }
+
   if (typeof payload.requestId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(payload.requestId) ||
       typeof payload.generationId !== 'string' || !generationIdPattern.test(payload.generationId)) {
     return Response.json({ error: 'requestId and generationId are required' }, { status: 400 });
   }
+
   try {
     const result = await runFactory(env, payload.requestId, payload.generationId, agentDefinition);
+
     return Response.json(result, { status: 202 });
   } catch (cause) {
     const message = factoryFailureMessage(cause);
     await env.DB.batch([
       audit(env.DB, 'factory', 'factory.attempt_failed', payload.requestId, { generationId: payload.generationId, message: message.slice(0, 1_000) }),
     ]);
+
     return Response.json({ error: message }, { status: 500 });
   }
 }
 
 export { assertReviewedRevision, createFactoryRevision, persistFactoryRevision };
+
 export type { FactoryCandidateInput, FactoryEnv, FactoryRequest, PackageRequest };

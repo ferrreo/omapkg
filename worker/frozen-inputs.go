@@ -171,7 +171,7 @@ func (c *Client) fetchPrivateInput(ctx context.Context, scope string, job Job, r
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil || n != ref.Size {
 		_ = os.Remove(destination)
-		return errors.New("frozen input download is incomplete or oversized")
+		return fmt.Errorf("frozen input download is incomplete or oversized (%s expected=%d got=%d contentLength=%d err=%v)", ref.SHA256, ref.Size, n, resp.ContentLength, copyErr)
 	}
 	digest, _, err := hashFile(destination)
 	if err != nil || digest != ref.SHA256 {
@@ -562,7 +562,7 @@ func (r *Runner) prepareFrozenEnvironment(ctx context.Context, name string, inpu
 
 const frozenPreparationScript = `set -eu
 test ! -e /frozen-root
-mkdir -p /frozen-root/var/lib/pacman /frozen-root/var/cache/pacman/pkg /tmp/empty-hooks
+mkdir -p /frozen-root/etc /frozen-root/var/lib/pacman /frozen-root/var/cache/pacman/pkg /tmp/empty-hooks
 printf '[options]\nArchitecture = %s\nSigLevel = Never\n' "$OPR_ARCH" > /tmp/frozen-pacman.conf
 # Each archive is verified against its own retained, fingerprint-pinned key.
 # No shared keyring can allow another package's key to satisfy this signature.

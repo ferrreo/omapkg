@@ -95,6 +95,14 @@ worker identity, and the reviewed plan digest all match. Reproduction reports
 compare two distinct retained native attempts with the same recipe, selected
 input lock, architecture, signed outputs, and signed native statements.
 
+Current binary-build workers also advertise `single-build-reproducibility-v1`.
+Those workers emit a signed `reproducibility-contract-verified` record for
+each normal build after checking retained input identities, fixed execution
+controls, archive paths and metadata, complete output names/sizes/digests, and
+runtime results. This is one build per target. A separate qualification plan
+may later record `independently-reproduced` evidence from two actual builds;
+that test does not become a second normal build requirement.
+
 When using the installed systemd unit, enroll as its service account and pass
 `--state-dir /var/lib/opr-worker` so config lands beside the unit's configured
 state path.

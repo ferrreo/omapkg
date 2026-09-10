@@ -63,6 +63,7 @@ function trimLines(value: string, limit = 200): string[] {
 
 async function toolFailureDetail(cause: unknown): Promise<Record<string, unknown>> {
   const message = redactText(cause instanceof Error ? cause.message : 'factory tool failed').slice(0, 800);
+
   return { resultDigest: await sha256(message), error: message };
 }
 
@@ -73,17 +74,22 @@ function sourceIdentity(source: { name: string; url: string; sha256: string }): 
 function assertCandidateSources(data: FactoryCandidateInput, evidence: SourceEvidence): void {
   const expected = [{ name: evidence.sourceName, url: evidence.normalizedUrl, sha256: evidence.sourceSha256 }];
   const primary = data.sources.find((source) => sourceIdentity(source) === sourceIdentity(expected[0]));
+
   if (!primary || primary.name !== evidence.sourceName || primary.sha256 !== evidence.sourceSha256) {
     throw new Error('candidate source does not match the isolated source inspection hash');
   }
+
   if (evidence.vendor) {
     const vendor = { name: evidence.vendor.sourceName, url: evidence.vendor.sourceUrl, sha256: evidence.vendor.sourceSha256 };
     const declared = data.sources.find((source) => sourceIdentity(source) === sourceIdentity(vendor));
+
     if (!declared) throw new Error('candidate must include the verified dependency vendor bundle and checksum');
     expected.push(vendor);
   }
+
   const actual = data.sources.map(sourceIdentity);
   const expectedSet = new Set(expected.map(sourceIdentity));
+
   if (actual.length !== expectedSet.size || new Set(actual).size !== actual.length || actual.some((source) => !expectedSet.has(source))) {
     throw new Error('candidate contains an unverified source');
   }
@@ -91,6 +97,7 @@ function assertCandidateSources(data: FactoryCandidateInput, evidence: SourceEvi
 
 function assertVendorStagingCommands(format: VendorArtifactManifest['format'], commands: readonly string[]): void {
   if (format !== 'run') return;
+
   if (commands.some((command) => /(?:^|[\s"'=])--extract-only(?:[\s"';&|]|$)/.test(command))) {
     throw new Error('vendor .run input is already extracted into $srcdir/vendor-root; remove --extract-only from buildCommands and packageCommands');
   }
@@ -103,9 +110,12 @@ async function readBoundedSandboxFile(sandbox: Sandbox, path: string): Promise<U
     `size=$(stat -c '%s' ${shellQuote(path)})`,
     `test "$size" -ge 0 -a "$size" -le ${MAX_SOURCE_ARCHIVE_MANIFEST_BYTES}`,
   ].join('\n'), { timeoutMs: 60_000 });
+
   if (guard.exitCode !== 0) throw new Error('source manifest exceeds the bounded read limit');
   const bytes = await sandbox.readFileBuffer(path);
+
   if (bytes.byteLength > MAX_SOURCE_ARCHIVE_MANIFEST_BYTES) throw new Error('source manifest exceeds the bounded read limit');
+
   return bytes;
 }
 
@@ -114,6 +124,7 @@ async function readArchiveManifest(sandbox: Sandbox) {
     readBoundedSandboxFile(sandbox, '/workspace/source-archive.meta'),
     readBoundedSandboxFile(sandbox, '/workspace/source-archive.entries'),
   ]);
+
   return parseSourceArchiveManifest(new TextDecoder().decode(metadata), new TextDecoder().decode(entries));
 }
 
@@ -122,12 +133,15 @@ async function readGitEntries(sandbox: Sandbox) {
     readBoundedSandboxFile(sandbox, '/workspace/git-source.meta'),
     readBoundedSandboxFile(sandbox, '/workspace/git-source.entries'),
   ]);
+
   const metadataText = new TextDecoder().decode(metadata);
   const commit = metadataText.split('\n').find((line) => line.startsWith('commit='))?.slice('commit='.length).trim();
   const expandedSize = Number(metadataText.split('\n').find((line) => line.startsWith('expandedSize='))?.slice('expandedSize='.length).trim());
   const parsed = parseGitSourceEntries(new TextDecoder().decode(entries));
   const calculatedSize = parsed.reduce((total, entry) => total + entry.size, 0);
+
   if (!Number.isSafeInteger(expandedSize) || expandedSize !== calculatedSize) throw new Error('Git source manifest size does not match metadata');
+
   return { commit, entries: parsed };
 }
 
@@ -135,6 +149,7 @@ function archiveSourceRoot(paths: readonly string[]): string | undefined {
   if (!paths.length || paths.some((path) => !path.includes('/'))) return undefined;
   const roots = paths.map((path) => path.slice(0, path.indexOf('/')));
   const root = roots[0];
+
   return root && roots.every((value) => value === root) && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(root) ? root : undefined;
 }
 
@@ -146,35 +161,45 @@ function parseGitEvidence(stdout: string, url: string, sourceName: string): Sour
   const lines = redactText(stdout).split('\n');
   const commit = lines.find((line) => line.startsWith('commit='))?.slice('commit='.length).trim() ?? '';
   const sourceSha256 = lines.find((line) => line.startsWith('sha256='))?.slice('sha256='.length).trim() ?? '';
+
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(commit)) throw new Error('git source did not resolve to a commit');
+
   if (!/^[0-9a-f]{64}$/.test(sourceSha256)) throw new Error('git source archive hash was not produced');
+
   return { sourceKind: 'git', upstreamUrl: url, normalizedUrl: url, finalUrl: sanitizeSourceUrl(url), redirectChain: [], sourceName, sourceSha256, upstreamCommit: commit.toLowerCase(), files: [], licenseFiles: [] };
 }
 
 function parseArchiveEvidence(stdout: string, url: string, sourceName: string, finalUrl = sanitizeSourceUrl(url), redirectChain: string[] = [sanitizeSourceUrl(url)]): SourceEvidence {
   const lines = trimLines(stdout);
   const sourceSha256 = lines.find((line) => /^[0-9a-f]{64}\s/.test(line))?.split(/\s+/, 1)[0] ?? '';
+
   if (!/^[0-9a-f]{64}$/.test(sourceSha256)) throw new Error('archive hash was not produced');
   const filesStart = lines.findIndex((line) => line === 'files=');
   const files = (filesStart === -1 ? [] : lines.slice(filesStart + 1)).slice(0, 200);
   const licenseFiles = files.filter((file) => /(?:^|\/)(?:license|copying|notice)(?:\.|$)/i.test(file));
+
   const roots = files
     .map((file) => file.split('/')[0])
     .filter((root) => root && root !== '.' && root !== '..');
+
   const sourceRoot = roots.length === files.length && new Set(roots).size === 1 && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(roots[0])
     ? roots[0]
     : undefined;
+
   return { sourceKind: 'archive', upstreamUrl: url, normalizedUrl: url, finalUrl, redirectChain, sourceName, sourceSha256, upstreamCommit: null, sourceRoot, files, licenseFiles };
 }
 
 function archiveSourceName(request: FactoryRequest): string {
   let name = 'source.tar';
+
   try {
     const candidate = decodeURIComponent(new URL(request.upstreamUrl).pathname.split('/').at(-1) ?? '');
+
     if (/^[A-Za-z0-9][A-Za-z0-9._+-]{0,150}$/.test(candidate) && candidate !== '.' && candidate !== '..') name = candidate;
   } catch {
     // Request URL was validated before reaching this helper.
   }
+
   return name;
 }
 
@@ -185,21 +210,27 @@ type SourceMaterializer = (request: FactoryRequest, evidence: SourceEvidence, sa
 export function makeSourceMaterializer(env: Pick<FactoryEnv, 'DB' | 'ARTIFACTS' | 'PUBLIC_ORIGIN'>): SourceMaterializer {
   return async (request, evidence, sandbox) => {
     const origin = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN) : null;
+
     if (!origin || origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash) {
       throw new Error('public source origin is not configured');
     }
+
     let verified = evidence;
     let sourcePaths: readonly string[] | undefined;
+
     if (evidence.sourceKind === 'archive' && !evidence.vendorArtifact) {
       sourcePaths = sourceArchiveReadablePaths(await readArchiveManifest(sandbox));
     } else if (evidence.sourceKind === 'git') {
       sourcePaths = sourceArchiveReadablePaths(await readArchiveManifest(sandbox));
     }
+
     if (evidence.sourceKind === 'git') {
       const bundle = await streamSealedSandboxFile(sandbox, '/workspace/source.tar', MAX_MATERIALIZED_GIT_SOURCE_BYTES);
+
       try {
         if (bundle.sha256 !== evidence.sourceSha256) throw new Error('sandbox source archive hash changed before storage');
         const key = `sources/${bundle.sha256}.tar`;
+
         if (!await env.ARTIFACTS.head(key)) {
           bundle.start();
           await env.ARTIFACTS.put(key, bundle.body, {
@@ -209,6 +240,7 @@ export function makeSourceMaterializer(env: Pick<FactoryEnv, 'DB' | 'ARTIFACTS' 
           });
           await bundle.wait();
         }
+
         await env.DB.batch([
           audit(env.DB, 'factory', 'source.materialized', request.id, {
             sourceKey: key,
@@ -225,7 +257,9 @@ export function makeSourceMaterializer(env: Pick<FactoryEnv, 'DB' | 'ARTIFACTS' 
         await sandbox.exec('rm -f /workspace/.opr-vendor-part-*', { timeoutMs: 30_000 });
       }
     }
+
     const vendor = await vendorEvidence(request, verified, sandbox, origin, env, sourcePaths);
+
     return vendor ? { ...verified, vendor } : verified;
   };
 }
@@ -240,32 +274,44 @@ async function inspectSandbox(
   const url = normalizeSourceUrl(request.upstreamUrl).toString();
   const sourceKind = request.sourceKind;
   log('Inspecting upstream source in isolated sandbox.', { requestId: request.id, sourceKind });
+
   const resolution = sourceKind === 'archive'
     ? await fetchSourceWithRedirects(sandbox, url, { allowHost, signal })
     : undefined;
+
   const result = resolution?.result ?? await sandbox.exec(gitInspectCommand(url, '/workspace/checkout', request.upstreamRef ?? undefined), { timeoutMs: 180_000, signal });
+
   if (result.exitCode !== 0) {
     throw new Error(`source inspection failed: ${redactText(result.stderr).slice(0, 1_000)}`);
   }
+
   if (sourceKind === 'git') {
     const commitEvidence = parseGitEvidence(result.stdout, url, `${request.name}-${(redactText(result.stdout).split('\n').find((line) => line.startsWith('commit='))?.slice('commit='.length).trim() ?? '').slice(0, 12)}.tar`);
+
     if (request.upstreamRef && commitEvidence.upstreamCommit !== request.upstreamRef.toLowerCase()) throw new Error('pinned upstream ref did not resolve to the requested commit');
     const git = await readGitEntries(sandbox);
+
     if (git.commit && git.commit.toLowerCase() !== commitEvidence.upstreamCommit) throw new Error('Git source policy commit does not match checkout');
     const archive = await readArchiveManifest(sandbox);
+
     if (archive.sourceSha256 !== commitEvidence.sourceSha256) throw new Error('sealed Git archive hash does not match inspection');
     const files = sourceArchiveInventory(archive);
+
     return { ...commitEvidence, files, licenseFiles: licensePaths(files) };
   }
 
   const evidence = parseArchiveEvidence(result.stdout, url, archiveSourceName(request), resolution?.finalUrl ?? url, resolution?.redirectChain ?? [url]);
+
   if (trimLines(result.stdout).includes('artifact_candidate=1')) {
     try {
       const artifact = await inspectVendorArtifact(sandbox, { maxBytes: 2 * 1024 * 1024 * 1024 });
+
       if (artifact.sourceSha256 !== evidence.sourceSha256) throw new Error('vendor artifact hash does not match source inspection');
+
       const controlEntries = artifact.controlEntriesPath
         ? parseVendorArtifactManifestEntries(new TextDecoder().decode(await readBoundedSandboxFile(sandbox, artifact.controlEntriesPath)))
         : [];
+
       return {
         ...evidence,
         vendorArtifact: {
@@ -281,10 +327,12 @@ async function inspectSandbox(
   }
 
   const materialized = await sandbox.exec(materializeSourceArchiveCommand(), { timeoutMs: 180_000, signal });
+
   if (materialized.exitCode !== 0) throw new Error(`source archive validation failed: ${redactText(materialized.stderr).slice(0, 1_000)}`);
   const manifest = await readArchiveManifest(sandbox);
   const paths = sourceArchiveReadablePaths(manifest);
   const inventory = sourceArchiveInventory(manifest);
+
   return {
     ...evidence,
     sourceSha256: manifest.sourceSha256,
@@ -310,65 +358,87 @@ export function makeReadSourceFilesTool(
     harness: true,
     async run({ data, harness, signal }) {
       await auditTool?.('read_upstream_files', 'started', { resultDigest: null });
+
       try {
         const evidence = getEvidence();
+
         if (!evidence) throw new Error('inspect_upstream_source must succeed before reading files');
         const paths = [...new Set(data.paths)];
+
         if (paths.some((path) => path.length > 256 || /[\u0000\r\n]/.test(path) || path.includes('..') || path.startsWith('/'))) {
           throw new Error('source file path is unsafe');
         }
+
         let resolvedPaths: string[];
         let readCommand: string;
+
         if (evidence.sourceKind === 'archive' && evidence.vendorArtifact) {
           const artifact = evidence.vendorArtifact;
+
           const payloadEntries = artifact.entriesPath
             ? parseVendorArtifactManifestEntries(new TextDecoder().decode(await readBoundedSandboxFile(harness.sandbox, artifact.entriesPath)))
             : [];
+
           const controlEntries = artifact.controlEntriesPath
             ? parseVendorArtifactManifestEntries(new TextDecoder().decode(await readBoundedSandboxFile(harness.sandbox, artifact.controlEntriesPath)))
             : [];
+
           const payloadSet = new Set(payloadEntries.map((entry) => entry.path));
           const controlSet = new Set(controlEntries.map((entry) => entry.path));
           const payloadPaths = paths.filter((path) => payloadSet.has(path));
           const controlPaths = paths.filter((path) => controlSet.has(path));
+
           if (payloadPaths.length + controlPaths.length !== paths.length) throw new Error('vendor file is not an approved text inspection path');
           const commands: string[] = [];
+
           if (payloadPaths.length) commands.push(vendorArtifactReadCommand(payloadEntries, payloadPaths, { rootPath: '/workspace/vendor-artifact/payload-root' }));
+
           if (controlPaths.length) commands.push(vendorArtifactReadCommand(controlEntries, controlPaths, { rootPath: '/workspace/vendor-artifact/control' }));
+
           if (!commands.length) throw new Error('vendor file is not an approved text inspection path');
           resolvedPaths = paths;
           readCommand = commands.join('\n');
         } else if (evidence.sourceKind === 'archive' && !evidence.vendorArtifact) {
           const manifest = await readArchiveManifest(harness.sandbox);
           const allowed = new Set(sourceArchiveReadablePaths(manifest));
+
           const candidates = paths.map((path) => {
             if (allowed.has(path) || !evidence.sourceRoot) return path;
             const rooted = `${evidence.sourceRoot}/${path}`;
+
             return allowed.has(rooted) ? rooted : path;
           });
+
           resolvedPaths = assertSourceArchiveReadPaths(manifest, candidates);
           readCommand = sourceReadCommand(evidence.sourceKind, resolvedPaths);
         } else if (evidence.sourceKind === 'git') {
           const manifest = await readArchiveManifest(harness.sandbox);
           const allowed = new Set(sourceArchiveReadablePaths(manifest));
+
           if (paths.some((path) => !allowed.has(path))) throw new Error('source file was not listed by inspection');
           resolvedPaths = paths;
           readCommand = sourceReadCommand(evidence.sourceKind, resolvedPaths);
         } else {
           const allowed = new Set(evidence.files);
+
           const candidates = paths.map((path) => {
             if (allowed.has(path) || !evidence.sourceRoot) return path;
             const rooted = `${evidence.sourceRoot}/${path}`;
+
             return allowed.has(rooted) ? rooted : path;
           });
+
           if (candidates.some((path) => !allowed.has(path))) throw new Error('source file was not listed by inspection');
           resolvedPaths = candidates;
           readCommand = sourceReadCommand(evidence.sourceKind, resolvedPaths);
         }
+
         const result = await harness.sandbox.exec(readCommand, { timeoutMs: 60_000, signal });
+
         if (result.exitCode !== 0) throw new Error(`source file read failed: ${redactText(result.stderr).slice(0, 1_000)}`);
         const text = redactText(result.stdout).slice(0, 200_000);
         await auditTool?.('read_upstream_files', 'completed', { resultDigest: await sha256(text), fileCount: resolvedPaths.length });
+
         return { output: { text } };
       } catch (cause) {
         await auditTool?.('read_upstream_files', 'failed', await toolFailureDetail(cause));
@@ -393,6 +463,7 @@ export function makeInspectSourceToolWithSink(
     harness: true,
     async run({ harness, log, signal }) {
       await auditTool?.('inspect_upstream_source', 'started', { resultDigest: null });
+
       try {
         const evidence = await inspectSandbox(request, harness.sandbox, log.info.bind(log), signal, allowHost);
         const verified = materialize ? await materialize(request, evidence, harness.sandbox) : evidence;
@@ -405,6 +476,7 @@ export function makeInspectSourceToolWithSink(
           redirectCount: verified.redirectChain?.length ? verified.redirectChain.length - 1 : 0,
           vendor: Boolean(verified.vendor || verified.vendorArtifact),
         });
+
         return { output: verified };
       } catch (cause) {
         await auditTool?.('inspect_upstream_source', 'failed', await toolFailureDetail(cause));
@@ -435,18 +507,24 @@ export function makeSubmitCandidateTool(
     harness: true,
     async run({ data, harness, signal }) {
       await auditTool?.('submit_factory_candidate', 'started', { resultDigest: null });
+
       try {
         const { vendorArtifact: _ignoredVendorArtifact, publicRecipeOptions: _ignoredPublicOptions, ...modelData } = data as FactoryCandidateInput;
         void _ignoredVendorArtifact;
         void _ignoredPublicOptions;
         const evidence = getEvidence?.();
+
         if (!evidence) throw new Error('inspect_upstream_source must succeed before submitting a candidate');
+
         if (!trustedImageDigest) throw new Error('trusted factory builder image is not configured');
         assertCandidateSources(data, evidence);
+
         if (request.sourceKind === 'git' && data.upstreamCommit !== evidence.upstreamCommit) {
           throw new Error('candidate commit does not match the isolated source inspection');
         }
+
         let sources = data.sources;
+
         let sbom: Record<string, unknown> = {
           ...(data.sbom && typeof data.sbom === 'object' ? data.sbom : {}),
           sourceResolution: {
@@ -455,13 +533,16 @@ export function makeSubmitCandidateTool(
             redirectChain: evidence.redirectChain ?? [],
           },
         };
+
         if (evidence.vendor) {
         const vendor = evidence.vendor;
         const vendorSource = { name: vendor.sourceName, url: vendor.sourceUrl, sha256: vendor.sourceSha256 };
         const declared = data.sources.find((source) => source.name === vendor.sourceName);
+
         if (!declared || declared.url !== vendor.sourceUrl || declared.sha256 !== vendor.sourceSha256) {
           throw new Error('candidate must include the verified dependency vendor bundle and checksum');
         }
+
         const supplied = data.sbom && typeof data.sbom === 'object' ? data.sbom : {};
         const packages = Array.isArray(supplied.packages) ? supplied.packages : [];
         sbom = {
@@ -481,11 +562,15 @@ export function makeSubmitCandidateTool(
         };
         sources = [...data.sources];
         }
+
         let vendorArtifact: VendorArtifactManifest | undefined;
+
         if (evidence.vendorArtifact) {
         vendorArtifact = evidence.vendorArtifact;
+
         const declared = data.sources.find((source) => source.name === evidence.sourceName &&
           source.url === evidence.normalizedUrl && source.sha256 === vendorArtifact?.sourceSha256);
+
         if (!declared) throw new Error('candidate must include the inspected vendor artifact source and checksum');
         const supplied = sbom && typeof sbom === 'object' ? sbom : {};
         const packages = Array.isArray(supplied.packages) ? supplied.packages : [];
@@ -501,19 +586,27 @@ export function makeSubmitCandidateTool(
           packages,
         };
         }
+
         if (vendorArtifact) assertVendorStagingCommands(vendorArtifact.format, [...data.buildCommands, ...data.packageCommands]);
         const availableArchitectures = [...new Set(data.architectures)];
         const missing = availableArchitectures.filter((architecture) => typeof trustedImageDigest !== 'string' && !trustedImageDigest?.[architecture]);
+
         if (missing.length) throw new Error(`No builder image is configured for requested architectures: ${missing.join(', ')}.`);
+
         const buildImages: BuildImageMap = Object.fromEntries(availableArchitectures.map((architecture) => [
         architecture,
         typeof trustedImageDigest === 'string' ? trustedImageDigest : trustedImageDigest?.[architecture],
         ])) as BuildImageMap;
+
         const imageDigest = buildImages[availableArchitectures[0]] ?? data.imageDigest;
+
         if (!imageDigest) throw new Error('trusted factory builder image is not configured');
+
         const redistributionEvidence = sbom && typeof sbom.redistributionEvidence === 'string' &&
         sbom.redistributionEvidence.trim().length <= 2_048 ? sbom.redistributionEvidence : undefined;
+
         const surface = vendorArtifact ? vendorSurface(redistributionEvidence) : data.surface;
+
         const candidate: FactoryCandidate = {
         ...modelData,
         sourceRoot: evidence.sourceRoot,
@@ -528,6 +621,7 @@ export function makeSubmitCandidateTool(
         imageDigest,
         request: { ...request, buildImages },
         };
+
         if (surface === 'recipe' && (request.sourceKind === 'git' || evidence.vendor)) {
           candidate.publicRecipeOptions = {
             sourceKind: request.sourceKind,
@@ -541,8 +635,10 @@ export function makeSubmitCandidateTool(
           };
           candidate.publicRecipe = renderPublicRecipe(candidate, candidate.publicRecipeOptions);
         }
+
         let draft = await createFactoryRevision(candidate);
         const checked = await harness.sandbox.exec(shellCheckCommand(draft.revision.recipe, draft.manifest.smokeCommands, candidate.publicRecipe), { timeoutMs: 60_000, signal });
+
         if (checked.exitCode !== 0) throw new Error(`Shell analysis failed: ${(checked.stdout + checked.stderr).slice(0, 4_096)}`);
         sbom = { ...sbom, shellAnalysis: { passed: true, tool: checked.stdout.trim().slice(0, 512), scope: ['recipe', 'smoke', ...(candidate.publicRecipe ? ['public-recipe'] : [])] } };
         draft = await createFactoryRevision({ ...candidate, sbom }, 0, draft.revision.id);
@@ -553,6 +649,7 @@ export function makeSubmitCandidateTool(
           manifestSha256: draft.revision.manifest_sha256,
           lintPassed: draft.lint.passed,
         });
+
         return {
           output: {
             revisionId: draft.revision.id,
@@ -576,15 +673,19 @@ export function maintainerFeedbackForGeneration(
 ): string | undefined {
   for (const event of events) {
     if (typeof event.detail !== 'string') continue;
+
     try {
       const detail = JSON.parse(event.detail) as { generationId?: unknown; reason?: unknown };
+
       if (detail.generationId !== generationId || typeof detail.reason !== 'string') continue;
       const reason = detail.reason.trim();
+
       if (reason) return reason.slice(0, 2_000);
     } catch {
       // Ignore malformed historical audit detail.
     }
   }
+
   return undefined;
 }
 
@@ -600,9 +701,12 @@ export function parseFactoryRequest(row: {
   maintainerFeedback?: string;
 }): FactoryRequest {
   const upstreamRef = row.upstream_ref ?? null;
+
   if (upstreamRef !== null && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(upstreamRef)) throw new Error('upstream ref must be a commit SHA');
   const upstreamUrl = normalizeSourceUrl(row.upstream_url).toString();
+
   if (externalPackageSource(upstreamUrl)) throw new Error('Factory needs an authoritative upstream source; AUR/ALARM packaging requires a human-admitted OPR replacement.');
+
   return {
     id: row.id,
     name: row.name,
@@ -626,6 +730,7 @@ export {
 export { vendorKindForEvidence } from './factory-vendor';
 
 export type { FlueHarness };
+
 export function makeReportMissingDependenciesTool(request: FactoryRequest, db: D1Database) {
   return defineTool({
     name: 'report_missing_dependencies',
@@ -641,7 +746,9 @@ export function makeReportMissingDependenciesTool(request: FactoryRequest, db: D
       await db.batch(await blockerStatements(db, { requestId: request.id, scopeId: request.generationId, revisionId: null,
         architecture: data.architecture, timestamp: now() }, blockers, 'factory'));
       const current = await db.prepare('SELECT status,factory_run_id FROM requests WHERE id=?').bind(request.id).first<{ status: string; factory_run_id: string }>();
+
       if (current?.status !== 'blocked' || current.factory_run_id !== request.generationId) throw new Error('Factory generation is no longer current');
+
       return { output: { blocked: true } };
     },
   });

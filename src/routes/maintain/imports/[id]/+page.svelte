@@ -8,12 +8,21 @@
   import { importDispositionLabels } from '$lib/imports';
   import { startVisibleRefresh } from '$lib/visible-refresh';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
+
   let busy = false;
-  const pending = () => { busy = true; return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
+  const pending = () => { busy = true;
+
+ return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
   const href = (values: Record<string, string>) => `?${new URLSearchParams(values)}`;
+
   $: sourceGaps = data.manifest.sources.filter((source) => source.status !== 'captured');
+
   onMount(() => startVisibleRefresh(() => data.record.status === 'capturing', () => { void invalidateAll(); }));
 </script>
 <svelte:head><title>{data.manifest.kind} {data.manifest.channel} · import reconciliation · omapkg</title></svelte:head>

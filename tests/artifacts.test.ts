@@ -31,7 +31,10 @@ import {
 } from '../services/pipeline/artifacts';
 
 function run(command: string, path?: string): void {
-  execFileSync('bash', ['-c', command], { env: { ...process.env, ...(path ? { PATH: path } : {}) }, stdio: 'pipe' });
+  const env = { ...process.env };
+
+  if (path) env.PATH = path;
+  execFileSync('bash', ['-c', command], { env, stdio: 'pipe' });
 }
 
 function align4(value: Buffer): Buffer {
@@ -41,15 +44,18 @@ function align4(value: Buffer): Buffer {
 function cpio(entries: Array<{ path: string; mode: number; body: Buffer }>): Buffer {
   const output: Buffer[] = [];
   let inode = 1;
+
   for (const entry of entries) {
     const name = Buffer.from(`${entry.path}\0`);
     const fields = [inode++, entry.mode, 0, 0, 1, 0, entry.body.length, 0, 0, 0, 0, name.length, 0];
     const header = Buffer.from(`070701${fields.map((field) => field.toString(16).padStart(8, '0')).join('')}`);
     output.push(align4(Buffer.concat([header, name])), align4(entry.body));
   }
+
   const trailer = Buffer.from('TRAILER!!!\0');
   const fields = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, trailer.length, 0];
   output.push(align4(Buffer.concat([Buffer.from(`070701${fields.map((field) => field.toString(16).padStart(8, '0')).join('')}`), trailer])));
+
   return Buffer.concat(output);
 }
 
@@ -68,6 +74,7 @@ function rpmHeader(fields: Array<{ tag: number; value: string }>): Buffer {
   intro.set([0x8e, 0xad, 0xe8, 0x01], 0);
   intro.writeUInt32BE(fields.length, 8);
   intro.writeUInt32BE(store.length, 12);
+
   return Buffer.concat([intro, indexes, store]);
 }
 
@@ -79,17 +86,20 @@ function rpmFixture(): Buffer {
   lead.writeUInt16BE(1, 76);
   lead.writeUInt16BE(5, 78);
   const signature = Buffer.from([0x8e, 0xad, 0xe8, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
   const header = rpmHeader([
     { tag: 1000, value: 'vendor-demo' },
     { tag: 1001, value: '1.0' },
     { tag: 1002, value: '1' },
     { tag: 1022, value: 'x86_64' },
   ]);
+
   const payload = gzipSync(cpio([
     { path: 'usr', mode: 0o040755, body: Buffer.alloc(0) },
     { path: 'usr/share', mode: 0o040755, body: Buffer.alloc(0) },
     { path: 'usr/share/vendor-demo.txt', mode: 0o100644, body: Buffer.from('rpm payload\n') },
   ]));
+
   return Buffer.concat([lead, signature, header, payload]);
 }
 
@@ -100,6 +110,7 @@ function appImageFixture(root: string, type: 1 | 2, escape = false): string {
   writeFileSync(join(app, 'usr', 'bin', 'vendor-demo'), '#!/bin/sh\nprintf app\n');
   chmodSync(join(app, 'usr', 'bin', 'vendor-demo'), 0o755);
   symlinkSync('usr/bin/vendor-demo', join(app, 'AppRun'));
+
   if (escape) symlinkSync('../../outside', join(app, 'escape'));
   writeFileSync(join(app, 'vendor-demo.desktop'), '[Desktop Entry]\nName=Vendor Demo\nType=Application\nExec=AppRun\n');
   writeFileSync(join(app, 'usr', 'share', 'vendor-demo', 'payload.txt'), 'appimage payload\n');
@@ -107,6 +118,7 @@ function appImageFixture(root: string, type: 1 | 2, escape = false): string {
   execFileSync('mksquashfs', [app, squashfs, '-noappend', '-no-progress', '-all-root'], { stdio: 'pipe' });
   const runtime = join(root, `runtime-${type}`);
   execFileSync('gcc', ['-x', 'c', '-O2', '-o', runtime, '-'], { input: 'int main(void) { return 0; }', stdio: 'pipe' });
+
   if (type === 2) {
     const bytes = Buffer.concat([readFileSync(runtime), readFileSync(squashfs)]);
     bytes[8] = 0x41;
@@ -114,8 +126,10 @@ function appImageFixture(root: string, type: 1 | 2, escape = false): string {
     bytes[10] = 0x02;
     const output = join(root, 'vendor-demo.AppImage');
     writeFileSync(output, bytes);
+
     return output;
   }
+
   const iso = join(root, 'vendor-demo.iso');
   execFileSync('xorriso', ['-as', 'mkisofs', '-R', '-J', '-o', iso, app], { stdio: 'pipe' });
   const bytes = readFileSync(iso);
@@ -127,6 +141,7 @@ function appImageFixture(root: string, type: 1 | 2, escape = false): string {
   output[10] = 0x01;
   const result = join(root, 'vendor-demo-type1.AppImage');
   writeFileSync(result, output);
+
   return result;
 }
 
@@ -138,6 +153,7 @@ function inspect(source: string, root: string, extraPath?: string) {
   const raw = readFileSync(manifestPath, 'utf8');
   const parsed = JSON.parse(raw) as { entriesPath?: string | null };
   const entries = parsed.entriesPath ? readFileSync(parsed.entriesPath, 'utf8') : undefined;
+
   return parseVendorArtifactManifest(raw, entries, root);
 }
 
@@ -176,6 +192,7 @@ describe('vendor binary artifact boundary', () => {
 
   test('does not infer self-extracting installer architecture from filename alone', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-run-unknown-'));
+
     try {
       writeFileSync(join(root, 'source.bundle'), '#!/bin/sh\n# Makeself self-extracting archive\n');
       expect(() => run(vendorArtifactCommand({ workspaceRoot: root, sourceName: 'NVIDIA-Linux-x86_64.run' }))).toThrow(/unknown or ambiguous/);
@@ -188,6 +205,7 @@ describe('vendor binary artifact boundary', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-deb-'));
     const packageRoot = join(root, 'package');
     const marker = join(root, 'installed-marker');
+
     try {
       mkdirSync(join(packageRoot, 'DEBIAN'), { recursive: true });
       mkdirSync(join(packageRoot, 'usr', 'bin'), { recursive: true });
@@ -228,6 +246,7 @@ describe('vendor binary artifact boundary', () => {
         'usr/share/doc/vendor-demo/LICENSE',
       ])).toHaveLength(2);
       expect(() => assertVendorArtifactReadPaths(payloadEntries, ['usr/bin/vendor-demo'])).toThrow();
+
       const readOutput = execFileSync('bash', ['-c', vendorArtifactReadCommand(payloadEntries, [
         'usr/share/applications/vendor-demo.desktop',
         'usr/share/doc/vendor-demo/LICENSE',
@@ -235,13 +254,16 @@ describe('vendor binary artifact boundary', () => {
         workspaceRoot: join(root, 'workspace'),
         rootPath: join(root, 'workspace', 'vendor-artifact', 'payload-root'),
       })], { encoding: 'utf8' });
+
       expect(readOutput).toContain('Name=Vendor Demo');
       expect(readOutput).toContain('MIT');
       const controlEntries = parseVendorArtifactManifestEntries(readFileSync(join(root, 'workspace', 'vendor-artifact', 'control.entries'), 'utf8'));
+
       const controlOutput = execFileSync('bash', ['-c', vendorArtifactReadCommand(controlEntries, ['control', 'postinst'], {
         workspaceRoot: join(root, 'workspace'),
         rootPath: join(root, 'workspace', 'vendor-artifact', 'control'),
       })], { encoding: 'utf8' });
+
       expect(controlOutput).toContain('Package: vendor-demo');
       expect(controlOutput).toContain('touch');
       expect(existsSync(marker)).toBe(false);
@@ -256,6 +278,7 @@ describe('vendor binary artifact boundary', () => {
 
   test('detects and inspects a real RPM payload through cpio without scriptlets', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-rpm-'));
+
     try {
       const source = join(root, 'vendor-demo.rpm');
       writeFileSync(source, rpmFixture());
@@ -276,6 +299,7 @@ describe('vendor binary artifact boundary', () => {
   test('rejects a Debian payload symlink that escapes the extraction root', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-deb-escape-'));
     const packageRoot = join(root, 'package');
+
     try {
       mkdirSync(join(packageRoot, 'DEBIAN'), { recursive: true });
       mkdirSync(join(packageRoot, 'usr', 'bin'), { recursive: true });
@@ -301,11 +325,13 @@ describe('vendor binary artifact boundary', () => {
 
   test('detects both AppImage types from ELF and validated filesystem magic', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-appimage-'));
+
     try {
       for (const type of [1, 2] as const) {
         const source = appImageFixture(root, type);
         const bytes = readFileSync(source);
         expect(detectVendorBinaryFormat(bytes)).toBe(type === 1 ? 'appimage1' : 'appimage2');
+
         if (type === 2) expect(appImageSquashfsOffset(bytes)).toBeGreaterThan(0);
         const manifest = inspect(source, join(root, `workspace-${type}`));
         expect(manifest.format).toBe(type === 1 ? 'appimage1' : 'appimage2');
@@ -313,6 +339,7 @@ describe('vendor binary artifact boundary', () => {
         expect(manifest.metadata.architecture).toBe('x86_64');
         expect(manifest.entries?.some((entry) => entry.path === 'AppRun' && entry.kind === 'symlink')).toBe(true);
       }
+
       for (const type of [1, 2] as const) {
         const source = appImageFixture(join(root, 'escape'), type, true);
         expect(() => inspect(source, join(root, `escape-workspace-${type}`))).toThrow();
@@ -325,6 +352,7 @@ describe('vendor binary artifact boundary', () => {
   test('inspects a self-extracting NVIDIA-style run file without executing it online', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-run-'));
     const marker = join(root, 'installed-marker');
+
     try {
       const source = join(root, 'NVIDIA-Linux-x86_64.run');
       writeFileSync(source, `#!/bin/sh\n# NVIDIA-Linux-x86_64 Makeself self-extracting archive\nif [ "$1" = --extract-only ]; then test "$2" = --target; test ! -e "$3"; mkdir -p "$3"; printf extracted > "$3/payload.txt"; exit 0; fi\ntouch ${marker}\n`);
@@ -354,21 +382,25 @@ describe('vendor binary artifact boundary', () => {
 
   test('reads a logical absolute package link through its verified target without using host paths', () => {
     const root = mkdtempSync(join(tmpdir(), 'omarpkg-vendor-read-'));
+
     try {
       const payloadRoot = join(root, 'payload-root');
       mkdirSync(join(payloadRoot, 'opt', 'vendor'), { recursive: true });
       writeFileSync(join(payloadRoot, 'opt', 'vendor', 'app'), 'logical package target\n');
       symlinkSync('/opt/vendor/app', join(payloadRoot, 'AppRun'));
+
       const entries = [
         { path: 'opt', kind: 'directory' as const, size: 0, target: null },
         { path: 'opt/vendor', kind: 'directory' as const, size: 0, target: null },
         { path: 'opt/vendor/app', kind: 'file' as const, size: 22, target: null },
         { path: 'AppRun', kind: 'symlink' as const, size: 0, target: '/opt/vendor/app' },
       ];
+
       const output = execFileSync('bash', ['-c', vendorArtifactReadCommand(entries, ['AppRun'], {
         workspaceRoot: root,
         rootPath: payloadRoot,
       })], { encoding: 'utf8' });
+
       expect(output).toContain('logical package target');
     } finally {
       rmSync(root, { recursive: true, force: true });

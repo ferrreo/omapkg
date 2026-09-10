@@ -2,18 +2,31 @@ import { gitSourcePolicyCommand } from './git-source';
 import { materializeSourceArchiveCommand } from './source-archive';
 
 const SHA256 = /^[0-9a-f]{64}$/;
+
 const ARCH_PACKAGE_NAME = /^[a-z0-9][a-z0-9@._+:-]{0,63}$/;
+
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9@._+%]{0,127}$/;
+
 const IMAGE_DIGEST = /^.+@sha256:[0-9a-f]{64}$/;
+
 const MAX_URL_LENGTH = 2_048;
+
 const MAX_DIRECT_SOURCE_BYTES = 2_147_483_648;
+
 const MAX_RECIPE_LENGTH = 128 * 1024;
+
 const MAX_COMMAND_LENGTH = 4_096;
+
 const PACKAGING_VARIABLE = /\$(?:\{(?:pkgdir|srcdir|pkgname|pkgver|pkgrel|CHOST|CARCH)(?![A-Za-z0-9_])|(?:pkgdir|srcdir|pkgname|pkgver|pkgrel|CHOST|CARCH)(?![A-Za-z0-9_]))/;
+
 const INSTALLED_PATH = /\/usr\/share\/(?:man|info)\/[^\s"'`;&|)\]]+/gi;
+
 const MAN_PAGE_PATH = /\/usr\/share\/man\/(?:[^/]+\/)+[^/]+\.[0-9][A-Za-z]*$/i;
+
 const INFO_PAGE_PATH = /\/usr\/share\/info\/[^/]+\.info(?:-[0-9]+)?$/i;
+
 const COMPRESSED_DOC_PATH = /\.(?:gz|bz2|xz|zst|lz4|lz|Z)$/i;
+
 const PRIVATE_HOSTS = new Set([
   'localhost',
   'localhost.localdomain',
@@ -23,7 +36,9 @@ const PRIVATE_HOSTS = new Set([
 ]);
 
 export const MAX_REPAIR_ATTEMPTS = 2;
+
 export const MAX_SOURCE_REDIRECTS = 3;
+
 export const VENDOR_REGISTRY_HOSTS = [
   'proxy.golang.org', 'sum.golang.org', 'storage.googleapis.com',
   'crates.io', 'index.crates.io', 'static.crates.io',
@@ -38,50 +53,62 @@ const SENSITIVE_QUERY_PARTS = new Set([
 function sensitiveQueryParameter(name: string): boolean {
   const parts = name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const compact = parts.join('');
+
   return parts.some((part) => SENSITIVE_QUERY_PARTS.has(part)) ||
     /(?:accesskey|accesskeyid|apikey|authorization|credential|password|secret|signature|token)$/.test(compact);
 }
 
 export function assertPackageName(value: string): string {
   if (!ARCH_PACKAGE_NAME.test(value)) throw new Error('invalid Arch package name');
+
   return value;
 }
 
 export function assertVersion(value: string): string {
   if (!VERSION.test(value)) throw new Error('invalid Arch pkgver; use letters, digits, @, ., _, +, % only; keep pkgrel separate');
+
   return value;
 }
 
 export function assertSha256(value: string, field = 'sha256'): string {
   if (!SHA256.test(value)) throw new Error(`invalid ${field}`);
+
   return value;
 }
 
 export function assertImageDigest(value: string): string {
   if (!IMAGE_DIGEST.test(value)) throw new Error('imageDigest must be a sha256 digest');
+
   return value;
 }
 
 export function assertCommand(value: string, field = 'command'): string {
-  if (!value || value.length > MAX_COMMAND_LENGTH || /[\u0000\r]/.test(value)) {
+  if (!value || value.length > MAX_COMMAND_LENGTH || value.includes('\u0000') || value.includes('\r')) {
     throw new Error(`invalid ${field}`);
   }
+
   return value;
 }
 
 export function assertSmokeCommand(value: string): string {
   assertCommand(value, 'smoke command');
+
   if (PACKAGING_VARIABLE.test(value)) {
     throw new Error('smoke command must use installed paths and cannot reference PKGBUILD variables');
   }
+
   const branches = value.split(/\|\|/).map((branch) => {
     let hasUncompressed = false;
     let hasCompressed = false;
+
     for (const segment of branch.split(/&&|[;|\n]/)) {
       const command = segment.trim().replace(/^(?:(?:if|then|else|elif|while|until|do)\s+|!\s+)+/, '');
+
       if (!/^(?:test|\[\[?)(?:\s|$)/.test(command)) continue;
+
       for (const match of command.matchAll(INSTALLED_PATH)) {
         const path = match[0];
+
         if (COMPRESSED_DOC_PATH.test(path)) {
           hasCompressed = true;
         } else if (MAN_PAGE_PATH.test(path) || INFO_PAGE_PATH.test(path)) {
@@ -89,27 +116,33 @@ export function assertSmokeCommand(value: string): string {
         }
       }
     }
+
     return { hasUncompressed, hasCompressed };
   });
+
   for (let index = 0; index < branches.length; index += 1) {
     if (branches[index].hasUncompressed && !branches.some((branch, other) => other !== index && branch.hasCompressed)) {
       throw new Error('smoke command must prefer executable behavior or check compressed man/info paths');
     }
   }
+
   return value;
 }
 
 export function assertRecipeLength(value: string): string {
-  if (!value || value.length > MAX_RECIPE_LENGTH || /\u0000/.test(value)) {
+  if (!value || value.length > MAX_RECIPE_LENGTH || value.includes('\u0000')) {
     throw new Error('invalid recipe size');
   }
+
   return value;
 }
 
 function isPrivateIpv4(host: string): boolean {
   const parts = host.split('.').map(Number);
+
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
   const [a, b] = parts;
+
   return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) || a >= 224;
@@ -117,54 +150,72 @@ function isPrivateIpv4(host: string): boolean {
 
 function isPrivateHost(host: string): boolean {
   const lower = host.toLowerCase().replace(/\.$/, '');
+
   if (PRIVATE_HOSTS.has(lower) || lower.endsWith('.localhost') || lower.endsWith('.internal')) return true;
+
   if (isPrivateIpv4(lower)) return true;
+
   if (lower.includes(':')) return true; // Reject IPv6 literals, including loopback/link-local forms.
+
   return false;
 }
 
 export function normalizeSourceUrl(raw: string): URL {
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_URL_LENGTH) {
+  if (raw.length === 0 || raw.length > MAX_URL_LENGTH) {
     throw new Error('source URL is required and must be <= 2048 bytes');
   }
+
   let url: URL;
+
   try {
     url = new URL(raw);
   } catch {
     throw new Error('source URL is invalid');
   }
+
   if (url.protocol !== 'https:') throw new Error('source URL must use HTTPS');
+
   if (url.username || url.password || url.port || !url.hostname.includes('.') || url.hostname.endsWith('.') || [...url.searchParams.keys()].some(sensitiveQueryParameter)) {
     throw new Error('source URL must be a permanent HTTPS URL without credentials or signed query parameters');
   }
+
   if (isPrivateHost(url.hostname)) throw new Error('source URL host is not public');
   url.hash = '';
+
   return url;
 }
 
 export function normalizeRedirectSourceUrl(raw: string): URL {
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_URL_LENGTH) {
+  if (raw.length === 0 || raw.length > MAX_URL_LENGTH) {
     throw new Error('source redirect URL is invalid');
   }
+
   let url: URL;
+
   try {
     url = new URL(raw);
   } catch {
     throw new Error('source redirect URL is invalid');
   }
+
   if (url.protocol !== 'https:' || url.username || url.password || url.port || !url.hostname.includes('.') || url.hostname.endsWith('.')) {
     throw new Error('source redirect must use a public HTTPS URL');
   }
+
   if (isPrivateHost(url.hostname)) throw new Error('source redirect host is not public');
   url.hash = '';
+
   return url;
 }
 
 export function classifySourceUrl(raw: string): 'git' | 'archive' {
   const url = normalizeSourceUrl(raw);
   const path = url.pathname.toLowerCase();
+
   if (/\.(?:git|git\/?)$/.test(path)) return 'git';
+
   if (/\.(?:zip|tar|tgz|tar\.gz|tar\.zst|tar\.xz|tar\.bz2|tar\.lz4|deb|rpm|appimage|run)(?:\/)?$/.test(path)) return 'archive';
+
   return 'git';
 }
 
@@ -176,6 +227,7 @@ export function sourceFetchCommand(raw: string, destination = '/workspace/source
   const url = options.allowRedirectQuery ? normalizeRedirectSourceUrl(raw) : normalizeSourceUrl(raw);
   const headerPath = '/workspace/source.headers';
   const statusPath = '/workspace/source.status';
+
   return [
     'set -eu',
     `umask 077; rm -f ${shellQuote(destination)} ${shellQuote(headerPath)} ${shellQuote(statusPath)}; curl --silent --show-error --max-redirs 0 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 180 --max-filesize ${MAX_DIRECT_SOURCE_BYTES} --dump-header ${shellQuote(headerPath)} --write-out '%{http_code}' ${shellQuote(url.toString())} --output ${shellQuote(destination)} > ${shellQuote(statusPath)}`,
@@ -199,6 +251,7 @@ export function sourceMetadataCommand(raw: string, options: { allowRedirectQuery
   const headerPipe = '/workspace/upstream.metadata.headers.pipe';
   const bodyPipe = '/workspace/upstream.metadata.body.pipe';
   const transfer = options.method === 'range' ? '--range 0-0 --max-filesize 1' : '--head';
+
   const script = [
     'set +e',
     `umask 077; rm -f ${shellQuote(headerPath)} ${shellQuote(headerPipe)} ${shellQuote(bodyPipe)}; mkfifo ${shellQuote(headerPipe)} ${shellQuote(bodyPipe)}`,
@@ -214,13 +267,16 @@ export function sourceMetadataCommand(raw: string, options: { allowRedirectQuery
     `rm -f ${shellQuote(headerPath)} ${shellQuote(headerPipe)} ${shellQuote(bodyPipe)}`,
     'exit 0',
   ].join('\n');
+
   return `bash -ceu ${shellQuote(script)}`;
 }
 
 export function gitInspectCommand(raw: string, destination = '/workspace/source', commit?: string): string {
   const url = normalizeSourceUrl(raw);
+
   if (commit !== undefined && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(commit)) throw new Error('upstream ref must be a commit SHA');
   const bashScript = (script: string): string => `bash -ceu ${shellQuote(script)}`;
+
   const checkout = commit
     ? [
       `git init ${shellQuote(destination)}`,
@@ -229,6 +285,7 @@ export function gitInspectCommand(raw: string, destination = '/workspace/source'
       `git -c core.hooksPath=/dev/null -c protocol.file.allow=never -c submodule.recurse=false -C ${shellQuote(destination)} checkout --detach FETCH_HEAD`,
     ]
     : [`git -c core.hooksPath=/dev/null -c protocol.file.allow=never -c submodule.recurse=false clone --depth 1 --no-tags --no-recurse-submodules ${shellQuote(url.toString())} ${shellQuote(destination)}`];
+
   const script = [
     'set -eu',
     'export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null',
@@ -242,16 +299,19 @@ export function gitInspectCommand(raw: string, destination = '/workspace/source'
     bashScript(materializeSourceArchiveCommand({ sourcePath: '/workspace/source.tar', destination: '/workspace/source' })),
     `printf '\\nfiles=\\n'; cut -f 2 ${shellQuote('/workspace/source-archive.entries')} | head -200`,
   ].join('\n');
+
   return `bash -ceu ${shellQuote(script)}`;
 }
 
 export function gitTagsCommand(raw: string): string {
   const url = normalizeSourceUrl(raw);
+
   return `set -eu; git ls-remote --tags --sort=-v:refname ${shellQuote(url.toString())} | head -200`;
 }
 
 export function materializeSourceTreeCommand(sourceKind: 'git' | 'archive'): string {
   if (sourceKind === 'git') return 'set -eu; test -d /workspace/source';
+
   return materializeSourceArchiveCommand();
 }
 
@@ -265,6 +325,7 @@ export function sourceReadCommand(_sourceKind: 'git' | 'archive', paths: string[
 export function vendorCommand(kind: 'go' | 'rust' | 'npm', _sourceKind: 'git' | 'archive', sourceRoot?: string): string {
   if (sourceRoot && !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(sourceRoot)) throw new Error('source archive root is unsafe');
   const sourcePath = sourceRoot ? `/workspace/source/${sourceRoot}` : '/workspace/source';
+
   const common = [
     'set -eu',
     'rm -rf /workspace/vendor.tar /workspace/vendor-components.json /workspace/vendor-component-sha256.tsv /workspace/vendor-config.txt /workspace/vendor-empty /workspace/vendor-work /workspace/cargo-home /workspace/go-home /workspace/go-mod-cache /workspace/npm-cache',
@@ -272,6 +333,7 @@ export function vendorCommand(kind: 'go' | 'rust' | 'npm', _sourceKind: 'git' | 
     'mkdir -p /workspace/vendor-work',
     `cd ${shellQuote(sourcePath)}`,
   ];
+
   if (kind === 'go') {
     common.push(
       'test -f go.mod',
@@ -295,7 +357,7 @@ export function vendorCommand(kind: 'go' | 'rust' | 'npm', _sourceKind: 'git' | 
     common.push(
       'test -f Cargo.toml',
       'test -f Cargo.lock',
-      `awk -F'"' '/^[[:space:]]*source[[:space:]]*=[[:space:]]*"/ { if ($2 != "registry+https:\/\/github.com\/rust-lang\/crates.io-index" && $2 != "sparse+https:\/\/index.crates.io\/") exit 65 }' Cargo.lock`,
+      `awk -F'"' '/^[[:space:]]*source[[:space:]]*=[[:space:]]*"/ { if ($2 != "registry+https://github.com/rust-lang/crates.io-index" && $2 != "sparse+https://index.crates.io/") exit 65 }' Cargo.lock`,
       'command -v cargo >/dev/null 2>&1',
       'command -v rustc >/dev/null 2>&1',
       'rm -rf /workspace/vendor-work/vendor',
@@ -303,10 +365,10 @@ export function vendorCommand(kind: 'go' | 'rust' | 'npm', _sourceKind: 'git' | 
       'rustc_path="$(command -v rustc)"',
       'export CARGO_HOME=/workspace/cargo-home CARGO_NET_OFFLINE=false CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse RUSTC="$rustc_path" RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=',
       'unset CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS CARGO_REGISTRIES_CRATES_IO_CREDENTIAL_PROVIDER',
-      `cd /workspace/vendor-work && cargo --config 'build.rustc-wrapper=\"\"' --config 'build.rustc-workspace-wrapper=\"\"' --config 'registry.global-credential-providers=[]' --config 'registries.crates-io.credential-provider=[]' --config 'net.offline=false' --config 'http.proxy=\"\"' vendor --manifest-path ${shellQuote(`${sourcePath}/Cargo.toml`)} --locked --versioned-dirs /workspace/vendor-work/vendor > /workspace/vendor-config.txt`,
+      `cd /workspace/vendor-work && cargo --config 'build.rustc-wrapper=""' --config 'build.rustc-workspace-wrapper=""' --config 'registry.global-credential-providers=[]' --config 'registries.crates-io.credential-provider=[]' --config 'net.offline=false' --config 'http.proxy=""' vendor --manifest-path ${shellQuote(`${sourcePath}/Cargo.toml`)} --locked --versioned-dirs /workspace/vendor-work/vendor > /workspace/vendor-config.txt`,
       'if ! test -d /workspace/vendor-work/vendor; then printf \'vendor_empty=1\\n\' > /workspace/vendor-empty; exit 0; fi',
       'find /workspace/vendor-work/vendor -type l -print -quit | grep -q . && exit 65 || true',
-      `cargo --config 'build.rustc-wrapper=\"\"' --config 'build.rustc-workspace-wrapper=\"\"' --config 'registry.global-credential-providers=[]' --config 'registries.crates-io.credential-provider=[]' --config 'net.offline=false' --config 'http.proxy=\"\"' metadata --manifest-path ${shellQuote(`${sourcePath}/Cargo.toml`)} --locked --format-version 1 > /workspace/vendor-components.json`,
+      `cargo --config 'build.rustc-wrapper=""' --config 'build.rustc-workspace-wrapper=""' --config 'registry.global-credential-providers=[]' --config 'registries.crates-io.credential-provider=[]' --config 'net.offline=false' --config 'http.proxy=""' metadata --manifest-path ${shellQuote(`${sourcePath}/Cargo.toml`)} --locked --format-version 1 > /workspace/vendor-components.json`,
       "find /workspace/vendor-work/vendor -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' | sort | while IFS= read -r name; do tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --format=gnu -cf - \"/workspace/vendor-work/vendor/$name\" | sha256sum | cut -d ' ' -f 1 | awk -v n=\"$name\" '{ print n \"\\t\" $1 }'; done > /workspace/vendor-component-sha256.tsv",
       "tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --format=gnu -cf /workspace/vendor.tar -C /workspace/vendor-work vendor",
       "tar -tf /workspace/vendor.tar | awk 'BEGIN { bad=0 } { if ($0 ~ /^\\// || $0 ~ /(^|\\/)\\.\\.(\\/|$)/) bad=1 } END { exit bad }'",
@@ -329,6 +391,7 @@ export function vendorCommand(kind: 'go' | 'rust' | 'npm', _sourceKind: 'git' | 
       "tar -tf /workspace/vendor.tar | awk 'BEGIN { bad=0 } { if ($0 ~ /^\\// || $0 ~ /(^|\\/)\\.\\.(\\/|$)/) bad=1 } END { exit bad }'",
     );
   }
+
   return common.join('\n');
 }
 

@@ -4,7 +4,9 @@
   import CatalogPolicyForm from '$lib/components/CatalogPolicyForm.svelte';
   import { collections } from '$lib/distribution';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
 </script>
 <svelte:head><title>Catalog ownership · omapkg</title></svelte:head>

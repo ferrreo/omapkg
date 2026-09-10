@@ -14,44 +14,60 @@ interface ScopeUpload {
 async function scopeUpload(db: D1Database, actor: Actor | null, uploadId: string): Promise<ScopeUpload> {
   const reviewer = humanMaintainer(actor);
   const row = await db.prepare('SELECT * FROM cohort_scope_uploads WHERE id=?').bind(uploadId).first<ScopeUpload>();
+
   if (!row) throw new PolicyError(404, 'Cohort scope upload not found.');
+
   if (row.created_by !== reviewer.id) throw new PolicyError(403, 'Resume a scope upload created by your own account.');
+
   return row;
 }
 
 export async function beginCohortScope(db: D1Database, actor: Actor | null, cohortId: string, expectedRevision: number | null, input: unknown, expectedCount: number, proposalId: string) {
   const reviewer = humanMaintainer(actor); const metadata = parseCohortMetadata(input);
+
   if (typeof proposalId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(proposalId) || !/^[A-Za-z0-9_-]{1,128}$/.test(cohortId) || (expectedRevision !== null && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) ||
       !Number.isSafeInteger(expectedCount) || expectedCount < 1 || expectedCount > 100000) throw new PolicyError(400, 'Choose a cohort, expected revision and complete member count (1–100,000).');
+
   const prior = expectedRevision === null ? null : await db.prepare('SELECT manifest_sha256 FROM cohort_revisions WHERE cohort_id=? AND revision=?')
     .bind(cohortId, expectedRevision).first<{ manifest_sha256: string }>();
+
   if (expectedRevision !== null && !prior) throw new PolicyError(409, 'Expected cohort revision does not exist.');
   const metadataJson = canonicalJson(metadata); const base = prior?.manifest_sha256 ?? null;
   const uploadId = await sha256(canonicalJson({ cohortId, expectedRevision, base, metadata, expectedCount, proposalId, actor: reviewer.id }));
+
   if (await db.prepare('SELECT 1 FROM cohort_scope_uploads WHERE id=?').bind(uploadId).first()) return scopeUpload(db, actor, uploadId);
   const exists = await db.prepare('SELECT id FROM cohorts WHERE id=?').bind(cohortId).first();
   const current = exists ? await getCohort(db, cohortId) : null;
+
   if ((current?.current_revision ?? null) !== expectedRevision || current && ['publish', 'observe'].includes(current.phase)) throw new PolicyError(409, 'Select the current unpublished cohort revision.');
+
   if (current) scopeAuthority(actor, JSON.parse(current.manifest_json));
   await db.prepare(`INSERT INTO cohort_scope_uploads(id,cohort_id,expected_revision,base_sha256,metadata_json,expected_count,created_by,created_at)
     VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(uploadId, cohortId, expectedRevision, base, metadataJson, expectedCount, reviewer.id, now()).run();
+
   return scopeUpload(db, actor, uploadId);
 }
 
 export async function appendCohortScope(db: D1Database, actor: Actor | null, uploadId: string, index: number, input: unknown) {
   const upload = await scopeUpload(db, actor, uploadId);
+
   if (!Number.isSafeInteger(index) || index < 0 || index >= 4096 || !Array.isArray(input) || !input.length || input.length > 100) throw new PolicyError(400, 'Upload 1–100 members in each numbered scope chunk.');
   const manifest = await cohortManifest(db, actor, { ...JSON.parse(upload.metadata_json), members: input });
   const members = manifest.members; const json = canonicalJson(members); const hash = await sha256(json);
+
   if (new TextEncoder().encode(json).byteLength > 1024 * 1024) throw new PolicyError(413, 'Scope chunk exceeds one MiB. Reduce its member count.');
   const previous = await db.prepare('SELECT sha256 FROM cohort_scope_chunks WHERE upload_id=? AND chunk_index=?').bind(uploadId, index).first<{ sha256: string }>();
+
   if (previous) {
     if (previous.sha256 !== hash) throw new PolicyError(409, 'An uploaded scope chunk cannot change. Start a new scope proposal.');
+
     return upload;
   }
+
   if (upload.sealed_revision !== null || index !== upload.next_chunk || members[0].pkgbase <= upload.last_pkgbase || upload.member_count + members.length > upload.expected_count) {
     throw new PolicyError(409, 'Append the next chunk in package-name order without exceeding the complete member count.');
   }
+
   try { await db.batch([
     db.prepare(`UPDATE cohort_scope_uploads SET next_chunk=next_chunk+1,member_count=member_count+?,last_pkgbase=?
       WHERE id=? AND next_chunk=? AND member_count=? AND sealed_revision IS NULL`)
@@ -63,42 +79,58 @@ export async function appendCohortScope(db: D1Database, actor: Actor | null, upl
       SELECT ?,?,?+CAST(key AS INTEGER),json_extract(value,'$.pkgbase'),json_extract(value,'$.catalogRevision'),json_extract(value,'$.recipe.id'),value FROM json_each(?)`)
       .bind(uploadId, index, upload.member_count, json),
   ]); } catch (cause) { cohortConflict(cause); }
+
   return scopeUpload(db, actor, uploadId);
 }
 
 export async function sealCohortScope(db: D1Database, actor: Actor | null, uploadId: string, reason: string) {
   const upload = await scopeUpload(db, actor, uploadId); const clean = reviewReason(reason);
+
   if (upload.sealed_revision !== null) {
     const selected = await db.prepare('SELECT cohort_id,revision,manifest_sha256 FROM cohort_revisions WHERE cohort_id=? AND revision=?')
       .bind(upload.cohort_id, upload.sealed_revision).first<{ cohort_id: string; revision: number; manifest_sha256: string }>();
+
     return { ...selected!, unchanged: upload.sealed_revision === upload.expected_revision };
   }
+
   if (upload.member_count !== upload.expected_count) throw new PolicyError(409, 'Upload every declared cohort member before sealing scope.');
   const exists = await db.prepare('SELECT id FROM cohorts WHERE id=?').bind(upload.cohort_id).first();
   const current = exists ? await getCohort(db, upload.cohort_id) : null;
+
   if ((current?.current_revision ?? null) !== upload.expected_revision || (current?.manifest_sha256 ?? null) !== upload.base_sha256 ||
       current && ['publish', 'observe'].includes(current.phase)) throw new PolicyError(409, 'Cohort scope changed. Start from the current unpublished revision.');
+
   const chunks = await query<CohortMemberChunk>(db, `SELECT chunk_index AS 'index',start,member_count AS count,first_pkgbase AS first,last_pkgbase AS last,sha256
     FROM cohort_scope_chunks WHERE upload_id=? ORDER BY chunk_index`, uploadId);
+
   const areas = await query<{ area: string }>(db, "SELECT DISTINCT json_extract(member_json,'$.policy.ownerArea') AS area FROM cohort_scope_entries WHERE upload_id=? ORDER BY area", uploadId);
   const targets = await query<{ architecture: Architecture }>(db, "SELECT DISTINCT target.value AS architecture FROM cohort_scope_entries entry,json_each(entry.member_json,'$.policy.architectures') target WHERE upload_id=? ORDER BY architecture", uploadId);
   let count = 0; let last = '';
+
   for (const [index, chunk] of chunks.entries()) {
     if (chunk.index !== index || chunk.start !== count || chunk.first <= last) throw new PolicyError(409, 'Cohort chunk index is incomplete or unordered.');
     count += chunk.count; last = chunk.last;
   }
+
   if (count !== upload.expected_count || chunks.length !== upload.next_chunk || !areas.length || !targets.length) throw new PolicyError(409, 'Cohort chunk coverage is incomplete.');
   const metadata: CohortMetadata = JSON.parse(upload.metadata_json);
+
   const manifest: CohortChunkedManifest = { ...metadata, schemaVersion: 2, memberCount: count, memberChunks: chunks,
     ownerAreas: areas.map((item) => item.area), architectures: targets.map((item) => item.architecture) };
+
   const reviewer = scopeAuthority(actor, manifest);
   const allAreas = new Set(manifest.ownerAreas);
+
   if (current) {
     const prior = JSON.parse(current.manifest_json); scopeAuthority(actor, prior);
+
     for (const area of cohortOwnerAreas(prior)) allAreas.add(area);
   }
+
   const json = canonicalJson(manifest); const hash = await sha256(json); const revision = (upload.expected_revision ?? 0) + 1; const timestamp = now();
+
   if (new TextEncoder().encode(json).byteLength > 1024 * 1024) throw new PolicyError(413, 'Scope index exceeds one MiB. Use larger member chunks.');
+
   if (current?.manifest_sha256 === hash) {
     try { await db.batch([
       scopeAuthorityFence(db, reviewer, [...allAreas]),
@@ -108,12 +140,16 @@ export async function sealCohortScope(db: D1Database, actor: Actor | null, uploa
         .bind(current.current_revision, uploadId, chunks.length),
       db.prepare('INSERT INTO distribution_assertions(expected,actual) VALUES(1,changes())'),
     ]); } catch (cause) { cohortConflict(cause); }
+
     return { cohort_id: current.id, revision: current.current_revision, manifest_sha256: hash, unchanged: true };
   }
+
   const base: CohortRow = current ?? { id: upload.cohort_id, current_revision: 1, event_sequence: 0, event_sha256: null, phase: 'plan', condition: 'ready',
     updated_at: timestamp, manifest_json: json, manifest_sha256: hash, title: manifest.title, lane: manifest.lane };
+
   const event = await cohortEventStatements(db, base, reviewer.id, await sha256(canonicalJson({ kind: 'scope', revision, hash })),
     { kind: 'scope', phase: 'plan', condition: 'ready', cause: clean, evidence: { scopeUploadSha256: uploadId } }, { revision, manifestSha256: hash });
+
   try { await db.batch([
     scopeAuthorityFence(db, reviewer, [...allAreas]),
     db.prepare(`UPDATE cohort_scope_uploads SET sealed_revision=? WHERE id=? AND sealed_revision IS NULL AND member_count=expected_count AND next_chunk=?`)
@@ -142,5 +178,6 @@ export async function sealCohortScope(db: D1Database, actor: Actor | null, uploa
       WHERE e.upload_id=? AND e.recipe_revision_id IS NOT NULL AND requests.id=json_extract(e.member_json,'$.recipe.requestId')`).bind(uploadId),
     ...event.statements,
   ]); } catch (cause) { cohortConflict(cause); }
+
   return { cohort_id: upload.cohort_id, revision, manifest_sha256: hash, unchanged: false };
 }

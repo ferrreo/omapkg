@@ -2,11 +2,18 @@
   import { enhance } from '$app/forms';
   import MaintainerShell from '$lib/components/MaintainerShell.svelte';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
+
   let busy = false;
+
   $: canDecide = data.actor.role !== 'maintainer' || data.parents.every((parent) => data.actor.areas.includes(parent.area));
-  const pending = () => { busy = true; return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
+
+  const pending = () => { busy = true;
+
+ return async ({ update }: { update: () => Promise<void> }) => { await update(); busy = false; }; };
 </script>
 <svelte:head><title>{data.manifest.name} · dependency proposal · omapkg</title></svelte:head>
 <MaintainerShell active="dependencies" user={data.user}>

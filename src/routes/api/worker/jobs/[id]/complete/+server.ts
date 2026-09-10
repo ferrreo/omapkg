@@ -15,14 +15,17 @@ import {
 export const POST: RequestHandler = async (event) => {
   try {
     const env = event.platform?.env;
+
     if (!env) throw new WorkerProtocolError(500, 'Worker protocol unavailable');
     requireJsonContentType(event.request);
     const body = await readBody(event.request, MAX_JSON_BODY_BYTES);
     const input = parseJsonRequest(body);
     const auth = await authenticateWorker(env.DB, event.request, event.url.pathname + event.url.search, body);
+
     if (!event.params.id) throw new WorkerProtocolError(400, 'Invalid job id');
     const completion = await completeJob(env.DB, env.ARTIFACTS, auth.worker, event.params.id, input);
-    if (completion.status === 'succeeded') {
+
+    if (completion.status === 'succeeded' && !completion.privateCandidate) {
       try {
         await enqueuePublication(env, event.params.id);
       } catch {
@@ -30,6 +33,7 @@ export const POST: RequestHandler = async (event) => {
         throw new WorkerProtocolError(503, 'Publication dispatch unavailable');
       }
     }
+
     return json(completion);
   } catch (cause) {
     return workerRouteFailure(cause);

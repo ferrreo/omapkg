@@ -11,6 +11,7 @@ CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT,action
 `;
 
 const origin = 'https://omapkg.example';
+
 const protocolMeta = { _meta: {
   'io.modelcontextprotocol/protocolVersion': '2026-07-28',
   'io.modelcontextprotocol/clientInfo': { name: 'mcp-test', version: '1.0.0' },
@@ -19,8 +20,10 @@ const protocolMeta = { _meta: {
 
 function event(db: TestD1, body: unknown, method: string, actor: unknown = null, name?: string, requestInit: RequestInit = {}) {
   const headers = new Headers({ 'content-type': 'application/json', 'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': method });
+
   if (name) headers.set('Mcp-Name', name);
   const request = new Request(`${origin}/api/mcp`, { ...requestInit, method: 'POST', headers, body: JSON.stringify(body) });
+
   return {
     request, url: new URL(request.url), locals: { actor },
     platform: { env: { DB: asD1(db), ARTIFACTS: { get: async () => null } } },
@@ -35,9 +38,11 @@ function seed(db: TestD1): void {
   db.prepare('INSERT INTO requests VALUES(?,?,?)').bind('q1', 'alpha', 'https://example.test/alpha.tar.gz').run();
   db.prepare('INSERT INTO requests VALUES(?,?,?)').bind('q2', 'beta', 'https://example.test/beta.tar.gz').run();
   db.prepare('INSERT INTO requests VALUES(?,?,?)').bind('q3', 'gamma', 'https://example.test/gamma.tar.gz').run();
+
   for (const [id, requestId, name] of [['v1', 'q1', 'alpha'], ['v2', 'q2', 'beta'], ['v3', 'q3', 'gamma']] as const) {
     db.prepare('INSERT INTO revisions(id,request_id,sources_json,license,dependencies_json,explanation,description,recipe) VALUES(?,?,?,?,?,?,?,?)').bind(id, requestId, JSON.stringify([{ name: `${name}.tar.gz`, url: `https://example.test/${name}.tar.gz`, sha256: 'a'.repeat(64) }]), 'MIT', '[]', `${name} package`, `${name} package`, `pkgdesc='${name} package'`).run();
   }
+
   for (const [id, revisionId, name, version, status] of [['b1', 'v1', 'alpha', '1.0.0', 'succeeded'], ['b2', 'v2', 'beta', '1.0.0', 'succeeded'], ['b3', 'v3', 'gamma', '1.0.0', 'queued']] as const) {
     db.prepare('INSERT INTO builds VALUES(?,?,?,?,?,?)').bind(id, revisionId, status, `${name}-1.0.0-x86_64.pkg.tar.zst`, 'b'.repeat(64), 10).run();
     db.prepare(`INSERT INTO releases(id,build_id,name,version,architecture,surface,channel,artifact_key,signature_key,recipe_key,sbom_key,provenance_key,published_at,stable_at)
@@ -52,6 +57,7 @@ async function responseJSON(response: Response): Promise<any> {
 describe('read-only MCP endpoint', () => {
   test('advertises a valid stateless discover and tools/list envelope', async () => {
     const db = new TestD1(schema);
+
     try {
       const discovered = await responseJSON(await POST(event(db, { jsonrpc: '2.0', id: 1, method: 'server/discover', params: protocolMeta }, 'server/discover')));
       expect(discovered.result).toMatchObject({ resultType: 'complete', supportedVersions: ['2026-07-28'], capabilities: { tools: { listChanged: false } }, ttlMs: 300_000, cacheScope: 'public' });
@@ -69,6 +75,7 @@ describe('read-only MCP endpoint', () => {
     const db = new TestD1(schema);
     seed(db);
     const maintainer = { id: 'github:1', role: 'maintainer' as const, areas: ['development'] };
+
     try {
       const metrics = await POST(event(db, call('metrics.get'), 'tools/call', maintainer, 'metrics.get'));
       expect(metrics.headers.get('cache-control')).toBe('no-store');
@@ -88,6 +95,7 @@ describe('read-only MCP endpoint', () => {
 
   test('returns invalid params for malformed filters and never echoes header data', async () => {
     const db = new TestD1(schema);
+
     try {
       const invalidResponse = await POST(event(db, call('packages.search', { architecture: 'mips' }), 'tools/call', null, 'packages.search'));
       expect(invalidResponse.headers.get('cache-control')).toBe('no-store');
@@ -100,6 +108,7 @@ describe('read-only MCP endpoint', () => {
 
   test('bounds streamed bodies without trusting Content-Length', async () => {
     const db = new TestD1(schema);
+
     try {
       const oversized = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -107,6 +116,7 @@ describe('read-only MCP endpoint', () => {
           controller.close();
         },
       });
+
       const request = new Request(`${origin}/api/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', 'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': 'tools/list' }, body: oversized, duplex: 'half' } as RequestInit & { duplex: 'half' });
       const result = await POST({ request, url: new URL(request.url), locals: { actor: null }, platform: { env: { DB: asD1(db), ARTIFACTS: {} } } } as unknown as Parameters<typeof POST>[0]);
       expect(result.status).toBe(413);

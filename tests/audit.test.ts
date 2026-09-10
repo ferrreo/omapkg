@@ -45,13 +45,16 @@ describe('audit query and export boundary', () => {
       INSERT INTO signing_intents VALUES('intent-1','build-1'),('intent-other','build-other');
       INSERT INTO promotion_batches VALUES('batch-1','["release-1","release-other"]'),('batch-other','["release-other"]');
     `);
+
     try {
       for (const target of ['request-1', 'revision-old', 'revision-new', 'build-1', 'intent-1', 'release-1', 'batch-1']) {
         insert(db, 'system', 'pipeline.event', target, '{}', 1_000);
       }
+
       for (const target of ['request-2', 'build-other', 'intent-other', 'batch-other']) {
         insert(db, 'system', 'pipeline.event', target, '{"requestId":"request-1"}', 1_000);
       }
+
       const scope = parseAuditQuery(new URLSearchParams({ request: 'request-1', limit: '2' }));
       const first = await listAuditEvents(asD1(db), scope);
       expect(first.events.map((item) => item.target)).toEqual(['batch-1', 'release-1']);
@@ -73,6 +76,7 @@ describe('audit query and export boundary', () => {
 
   test('search is applied server-side and cursor pagination covers a complete scope', async () => {
     const db = new TestD1(schema);
+
     try {
       insert(db, 'github:1', 'build.completed', 'request-1', '{"package":"hello"}', 1_000);
       insert(db, 'github:2', 'release.published', 'release-1', '{"package":"world"}', 2_000);
@@ -91,12 +95,15 @@ describe('audit query and export boundary', () => {
       const ids: number[] = [];
       let before = page.before;
       let nextBefore: number | null = before;
+
       while (nextBefore !== null) {
         const current = await listAuditEvents(asD1(db), { ...page, before });
         ids.push(...current.events.map((item) => item.id));
         nextBefore = current.nextBefore;
+
         if (nextBefore !== null) before = nextBefore;
       }
+
       expect(ids).toEqual([4, 3, 2, 1]);
     } finally {
       db.close();
@@ -109,6 +116,7 @@ describe('audit query and export boundary', () => {
     expect(parsed.range).toBe('30d');
     expect(parsed.from).toBeGreaterThanOrEqual(current - 100);
     expect(parsed.to).toBe(current);
+
     for (const url of [
       'https://omapkg.example/maintain/audit?range=forever',
       'https://omapkg.example/maintain/audit?range=toString',
@@ -122,6 +130,7 @@ describe('audit query and export boundary', () => {
 
   test('export is authenticated, bounded, paginated, and records its own audit event', async () => {
     const db = new TestD1(schema);
+
     try {
       insert(db, 'github:1', 'build.completed', 'request-1', '{"package":"hello"}', 1_000);
       insert(db, 'github:2', 'release.published', 'release-1', '{"package":"world"}', 2_000);
@@ -146,6 +155,7 @@ describe('audit query and export boundary', () => {
 
   test('default export streams every event from a fixed snapshot and audits completion', async () => {
     const db = new TestD1(schema);
+
     try {
       insert(db, 'github:1', 'build.completed', 'request-1', '{"package":"hello"}', 1_000);
       insert(db, 'github:2', 'release.published', 'release-1', '{"package":"world"}', 2_000);
@@ -158,10 +168,12 @@ describe('audit query and export boundary', () => {
       const chunks: string[] = [];
       let result = await reader.read();
       insert(db, 'github:3', 'late.event', 'request-3', '{"package":"late"}', 3_000);
+
       while (!result.done) {
         chunks.push(decoder.decode(result.value, { stream: true }));
         result = await reader.read();
       }
+
       chunks.push(decoder.decode());
       const body = chunks.join('');
       expect(body).toContain('build.completed');
@@ -176,6 +188,7 @@ describe('audit query and export boundary', () => {
 
   test('cancelled export records failure before cancellation resolves', async () => {
     const db = new TestD1(schema);
+
     try {
       insert(db, 'github:1', 'build.completed', 'request-1', '{}', 1_000);
       insert(db, 'github:2', 'release.published', 'release-1', '{}', 2_000);

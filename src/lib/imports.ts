@@ -14,6 +14,7 @@ export interface ImportSource {
   error: string | null;
   format?: 'pacman-db' | 'recipe-catalog';
 }
+
 export interface ImportManifest {
   schemaVersion: 1;
   kind: 'arch' | 'omarchy' | 'opr';
@@ -21,6 +22,7 @@ export interface ImportManifest {
   sources: ImportSource[];
   entriesSha256: string;
 }
+
 export interface ImportEntry {
   sourceId: string;
   name: string;
@@ -46,8 +48,10 @@ export interface ImportEntry {
   surface?: 'binary' | 'recipe';
   recipeUrl?: string;
 }
+
 export const importDispositionLabels = {
   unreviewed: 'Needs ownership review', linked: 'Linked to owned policy', replacement: 'OPR replacement needed',
   blocked: 'Blocked', excluded: 'Explicit exclusion',
 } as const;
+
 export type ImportDisposition = keyof typeof importDispositionLabels;

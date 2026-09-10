@@ -8,7 +8,9 @@ declare global {
       actor: Actor | null;
       authReady: boolean;
     }
+
     interface Platform { env: Env; context: ExecutionContext; caches: CacheStorage }
   }
 }
+
 export {};

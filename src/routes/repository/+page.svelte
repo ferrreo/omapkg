@@ -1,7 +1,9 @@
 <script lang="ts">
   import PublicNav from '$lib/components/PublicNav.svelte';
   import type { PageData } from './$types';
+
   export let data: PageData;
+
   const date = (timestamp: number) => new Date(timestamp * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
 </script>
 <svelte:head><title>Repository status · omapkg</title><meta name="description" content="Published package repository availability for x86_64 and ARM." /></svelte:head>

@@ -6,6 +6,7 @@ import { distributionReleaseWorkbench } from './release-workbench';
 
 async function publishedDistributionProjection(env: Env) {
   const table = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='distribution_release_candidates'").first<{ name: string }>();
+
   return table ? distributionReleaseWorkbench(env, null, null) : null;
 }
 
@@ -23,15 +24,18 @@ export async function repositoryStatus(env: Env) {
        WHERE channel IN ('stable','dev') ORDER BY published_at DESC,id DESC LIMIT 200`),
     publishedDistributionProjection(env),
   ]);
+
   const repositories = await Promise.all((['stable', 'dev'] as const).flatMap((channel) => requiredArchitectures.map(async (architecture) => {
     const snapshot = snapshots.find((row) => row.architecture === architecture && row.channel === channel);
     let available = false;
+
     if (snapshot) {
       try {
         const [database, signature] = await Promise.all([env.ARTIFACTS.head(snapshot.db_key), env.ARTIFACTS.head(snapshot.db_signature_key)]);
         available = Boolean(database?.size && signature?.size);
       } catch { /* Public status exposes availability, not private storage diagnostics. */ }
     }
+
     return { channel, architecture, state: snapshot ? available ? 'available' as const : 'unavailable' as const : 'not-published' as const,
       publishedAt: snapshot?.created_at ?? null, snapshotId: snapshot?.id ?? null,
       binaryPackages: counts.find((row) => row.architecture === architecture && row.channel === channel && row.surface === 'binary')?.packages ?? 0,
@@ -40,6 +44,7 @@ export async function repositoryStatus(env: Env) {
       signatureUrl: snapshot ? `/repo/${channel === 'dev' ? 'dev/' : ''}${architecture}/opr.db.sig` : null,
     };
   })));
+
   return {
     checkedAt: now(), repositories,
     systemRelease: distribution?.systemReleases[0] ? {

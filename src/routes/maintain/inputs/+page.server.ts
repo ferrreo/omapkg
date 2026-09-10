@@ -4,10 +4,14 @@ import { query } from '$lib/server/db';
 import type { InputLockRow } from '$lib/server/input-locks';
 import { revokeNativeInput } from '$lib/server/input-owned';
 import type { Actions, PageServerLoad } from './$types';
+
 export const load: PageServerLoad = async (event) => {
   const env = environment(event); const actor = maintainer(event);
   const search = (event.url.searchParams.get('search') ?? '').slice(0, 128);
-  let canManage = false; try { await inputAuthority(env.DB, actor); canManage = true; } catch { /* Maintainers can read retained inputs. */ }
+  let canManage = false;
+
+ try { await inputAuthority(env.DB, actor); canManage = true; } catch { /* Maintainers can read retained inputs. */ }
+
   return { canManage, search,
     locks: await query<InputLockRow & { pkgbase: string; title: string; review_count: number; selected: number }>(env.DB, `SELECT l.*,m.pkgbase,c.title,
       (SELECT COUNT(*) FROM input_lock_reviews review WHERE review.lock_sha256=l.sha256 AND review.revoked_at IS NULL) AS review_count,
@@ -25,6 +29,7 @@ export const load: PageServerLoad = async (event) => {
        WHERE json_extract(p.package_json,'$.name') LIKE ? ORDER BY p.created_at DESC,p.package_sha256 LIMIT 100`, `%${search}%`),
   };
 };
+
 export const actions: Actions = {
   revoke: (event) => formAction(event, (form) => revokeNativeInput(environment(event), event.locals.actor, field(form, 'digest'), field(form, 'origin'), field(form, 'reason'))),
 };

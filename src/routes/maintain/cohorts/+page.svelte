@@ -5,13 +5,20 @@
   import { cohortPhaseLabels } from '$lib/distribution';
   import { cohortCauses } from '$lib/cohorts';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
+
   let selection = '';
+
   let lane = 'system';
+
   let busy = false;
+
   $: if (!selection && data.packages[0]) selection = data.packages[0].pkgbase;
   $: selected = data.packages.find((item) => item.pkgbase === selection) ?? data.packages[0];
+
   $: if (selected) lane = selected.lane;
 </script>
 <svelte:head><title>Build cohorts · omapkg</title></svelte:head>

@@ -8,10 +8,13 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
 
   type FleetWorker = Worker & { active_leases?: number | null };
+
   type WorkerState = 'active' | 'draining' | 'paused' | 'revoked' | 'archived';
+
   $: workers = (Array.isArray(data?.workers) ? data.workers : []) as FleetWorker[];
   $: user = data?.user || null;
   $: canManage = Boolean(data?.canManage);
@@ -26,13 +29,16 @@
 
   function activeLeases(worker: FleetWorker) {
     const value = Number(worker.active_leases ?? 0);
+
     return Number.isSafeInteger(value) && value > 0 ? value : 0;
   }
 
   function capabilities(value: string | null | undefined) {
     if (!value) return [];
+
     try {
       const parsed = JSON.parse(value);
+
       return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
     } catch {
       return [];
@@ -41,8 +47,11 @@
 
   function workerState(worker: FleetWorker): WorkerState {
     if (worker.removed_at) return 'archived';
+
     if (worker.status === 'revoked') return 'revoked';
+
     if (worker.paused_at || worker.accepting_jobs === 0) return activeLeases(worker) > 0 ? 'draining' : 'paused';
+
     return 'active';
   }
 

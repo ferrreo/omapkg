@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import {
   getBuildImages,
   getDefaultBuildImages,
+  registerFactoryBuildImage,
   registerBuildImage,
   setBuildImageEnabled,
   setDefaultBuildImage,
@@ -11,6 +12,7 @@ import type { Env } from '../src/lib/server/env';
 import { asD1, TestD1 } from './d1';
 
 const migration = readFileSync(new URL('../migrations/0011_build_images.sql', import.meta.url), 'utf8');
+
 const schema = `
 CREATE TABLE revisions(id TEXT PRIMARY KEY);
 CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);
@@ -22,14 +24,29 @@ function env(db: TestD1): Pick<Env, 'DB'> {
 }
 
 const admin = { id: 'github:test-admin', role: 'admin' as const, areas: [] };
+
 const maintainer = { id: 'github:7', role: 'maintainer' as const, areas: ['development'] };
+
 const x86Ref = `docker.io/library/archlinux:base-devel@sha256:${'a'.repeat(64)}`;
+
 const x86RcRef = `ghcr.io/omacom/arch-builder:rc@sha256:${'b'.repeat(64)}`;
+
 const armRef = `registry.example.org/omarchy/arch-builder:edge@sha256:${'c'.repeat(64)}`;
+
+const factorySchema = `
+CREATE TABLE revisions(id TEXT PRIMARY KEY);
+CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE builds(id TEXT PRIMARY KEY,revision_id TEXT,architecture TEXT,status TEXT,created_at INTEGER,UNIQUE(revision_id,architecture));
+CREATE TABLE workers(id TEXT PRIMARY KEY,status TEXT,accepting_jobs INTEGER,removed_at INTEGER);
+${migration}
+${readFileSync(new URL('../migrations/0052_factory_runs.sql', import.meta.url), 'utf8')}
+${readFileSync(new URL('../migrations/0058_factory_image_activation.sql', import.meta.url), 'utf8')}
+`;
 
 describe('build image registry', () => {
   test('requires admin registration and stores digest-pinned records disabled', async () => {
     const db = new TestD1(schema);
+
     try {
       await expect(registerBuildImage(env(db), maintainer, {
         label: 'Denied', image_ref: x86Ref, architecture: 'x86_64', mirror: 'stable',
@@ -43,6 +60,7 @@ describe('build image registry', () => {
       const result = await registerBuildImage(env(db), admin, {
         label: 'Arch base-devel stable', image_ref: x86Ref, architecture: 'x86_64', mirror: 'stable',
       });
+
       const row = db.prepare('SELECT * FROM build_images WHERE id=?').bind(result.id).first<Record<string, unknown>>();
       expect(row).toMatchObject({
         id: result.id, label: 'Arch base-devel stable', image_ref: x86Ref, architecture: 'x86_64',
@@ -66,6 +84,7 @@ describe('build image registry', () => {
 
   test('enables images and keeps one enabled default per architecture', async () => {
     const db = new TestD1(schema);
+
     try {
       const first = await registerBuildImage(env(db), admin, { label: 'Stable', image_ref: x86Ref, architecture: 'x86_64', mirror: 'stable' });
       const second = await registerBuildImage(env(db), admin, { label: 'Release candidate', image_ref: x86RcRef, architecture: 'x86_64', mirror: 'rc' });
@@ -98,6 +117,7 @@ describe('build image registry', () => {
 
   test('protects registered identity while allowing availability changes', async () => {
     const db = new TestD1(schema);
+
     try {
       const result = await registerBuildImage(env(db), admin, { label: 'Stable', image_ref: x86Ref, architecture: 'x86_64', mirror: 'stable' });
       expect(() => db.prepare('UPDATE build_images SET label=? WHERE id=?').bind('Changed', result.id).run()).toThrow('immutable');
@@ -113,11 +133,32 @@ describe('build image registry', () => {
 
   test('adds an empty image map to new revisions', () => {
     const db = new TestD1(schema);
+
     try {
       db.prepare('INSERT INTO revisions(id) VALUES(?)').bind('revision-1').run();
       expect(db.prepare('SELECT build_images_json FROM revisions WHERE id=?').bind('revision-1').first<{ build_images_json: string }>()?.build_images_json).toBe('{}');
     } finally {
       db.close();
     }
+  });
+
+  test('factory OCI registration requires exact successful signed run evidence before activation', async () => {
+    const db = new TestD1(factorySchema);
+
+    try {
+      const runId = 'factory-oci-run'; const inputSha = '1'.repeat(64); const outputSha = '2'.repeat(64); const evidenceSha = '3'.repeat(64);
+      const evidence = { schemaVersion: 1, kind: 'factory-image-result', jobId: 'factory-image-job', runId, attempt: 1, candidateId: 'oci-candidate', architecture: 'x86_64', imageKind: 'oci', inputSha256: inputSha, profileSha256: '4'.repeat(64), nativePlanSha256: '5'.repeat(64), builderSha256: '6'.repeat(64), imageRef: x86Ref, artifact: { key: 'private/factory/image.oci', sha256: outputSha, size: 12, filename: 'image.oci' }, observed: { status: 'built' } };
+      const artifact = { artifact: evidence.artifact, evidence, evidenceSha256: evidenceSha };
+      db.prepare(`INSERT INTO factory_runs(id,target_kind,target_id,unit_key,execution_scope,status,max_attempts,attempt_count,current_attempt,successful_attempt,policy_json,artifact_json,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(runId, 'system-image', 'profile', 'x86_64', 'private', 'succeeded', 3, 1, 1, 1, '{}', JSON.stringify(artifact), 'factory', 1, 2).run();
+      db.prepare(`INSERT INTO factory_run_attempts(id,run_id,attempt,reservation_key,status,candidate_sha256,input_sha256,architecture,candidate_json,failure_json,artifact_json,lease_token,lease_expires_at,started_at,finished_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind('factory-attempt', runId, 1, 'attempt:1', 'succeeded', '7'.repeat(64), inputSha, 'x86_64', '{}', null, JSON.stringify(artifact), 'lease', 1, 1, 2, 1, 2).run();
+      const result = await registerFactoryBuildImage({ DB: asD1(db) }, admin, { runId, label: 'Factory OCI', mirror: 'custom' });
+      expect(db.prepare('SELECT origin,enabled,is_default,factory_run_id,factory_output_sha256 FROM build_images WHERE id=?').bind(result.id).first()).toMatchObject({ origin: 'factory', enabled: 0, is_default: 0, factory_run_id: runId, factory_output_sha256: outputSha });
+      await setBuildImageEnabled(env(db), admin, result.id, true);
+      await setDefaultBuildImage(env(db), admin, result.id);
+      db.prepare('UPDATE build_images SET factory_output_sha256=? WHERE id=?').bind('8'.repeat(64), result.id).run();
+      await expect(setBuildImageEnabled(env(db), admin, result.id, false)).rejects.toMatchObject({ status: 409 });
+    } finally { db.close(); }
   });
 });

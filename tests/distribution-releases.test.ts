@@ -17,10 +17,12 @@ function fixture() {
   const db = new TestD1(schema);
   const artifacts = new MemoryR2();
   const env = { DB: asD1(db), ARTIFACTS: artifacts as unknown as R2Bucket, PUBLIC_ORIGIN: 'https://repo.example', QUARANTINE_HOURS: '48' } as Env;
+
   return { db, artifacts, env };
 }
 
 const actor = { id: 'github:42', role: 'maintainer' as const, areas: ['system'] as const };
+
 const releaseActor = { id: 'github:7', role: 'maintainer' as const, areas: ['system'] as const };
 
 function manifest(releaseId = 'opr-20260910-1'): ReleaseManifest {
@@ -51,6 +53,7 @@ async function insertCandidate(db: TestD1, artifacts: MemoryR2, value: ReleaseMa
     id, value.kind, value.lane, value.channel, value.releaseId, value.sequence, value.parent.digest, value.parent.sequence,
     releaseManifestBytes(value), digest, key, bytes.byteLength, 'changelog.json', value.changelog.sha256, status, 'github:42', value.createdAt,
   ).run();
+
   return { digest, bytes, key };
 }
 
@@ -61,10 +64,12 @@ async function missingGateInput(artifacts: MemoryR2): Promise<DistributionCandid
     artifactSignatureUrl: 'https://repo.example/packages/missing-package.pkg.tar.zst.sig', artifactSignatureSha256: 'b'.repeat(64),
     cohortId: 'missing-cohort', evidence: [],
   }] };
+
   const chunkBytes = new TextEncoder().encode(canonicalJson(chunk));
   const changelogBytes = new TextEncoder().encode('{}');
   artifacts.objects.set('missing/chunk.json', chunkBytes);
   artifacts.objects.set('missing/changelog.json', changelogBytes);
+
   return {
     kind: 'opr', channel: 'quarantine', releaseId: 'opr-20260910-1', architectures: ['x86_64', 'aarch64'], packageCount: 1,
     compatibility: { systemManifestDigest: 'e'.repeat(64), systemSnapshotDigests: [], oprManifestDigest: null }, repositories: [],
@@ -82,6 +87,7 @@ test('release manifests bind exact canonical bytes', async () => {
 
 test('authenticated candidate lookup uses candidate ID before signing', async () => {
   const { db, artifacts, env } = fixture();
+
   try {
     await insertCandidate(db, artifacts, manifest(), 'draft-candidate-id');
     const url = new URL('https://repo.example/api/maintain/distribution-releases?candidateId=draft-candidate-id');
@@ -94,6 +100,7 @@ test('authenticated candidate lookup uses candidate ID before signing', async ()
 
 test('release preparation fails closed when cohort qualification is missing', async () => {
   const { db, artifacts, env } = fixture();
+
   try {
     await expect(prepareDistributionRelease(env, actor, await missingGateInput(artifacts))).rejects.toThrow('not qualified for release activation');
   } finally { db.close(); }
@@ -101,6 +108,7 @@ test('release preparation fails closed when cohort qualification is missing', as
 
 test('release approval requires current release-team membership and remains digest-bound', async () => {
   const { db, artifacts, env } = fixture();
+
   try {
     const candidate = await insertCandidate(db, artifacts, manifest(), 'candidate-approval');
     await expect(approveDistributionRelease(env.DB, releaseActor, { candidateId: 'candidate-approval', kind: 'release', reason: 'Ship exact candidate.' })).rejects.toThrow('Explicit release team membership');
@@ -113,6 +121,7 @@ test('release approval requires current release-team membership and remains dige
 
 test('manifest signing control claims exact candidate bytes without mutating immutable inputs', async () => {
   const { db, artifacts, env } = fixture();
+
   try {
     const candidate = await insertCandidate(db, artifacts, manifest(), 'candidate-signing');
     const intentId = 'manifest-intent-1';
@@ -131,6 +140,7 @@ test('manifest signing control claims exact candidate bytes without mutating imm
 
 test.each(['held candidate', 'revoked approver'])('manifest claim rechecks %s state', async (caseName) => {
   const { db, artifacts, env } = fixture();
+
   try {
     const candidateId = `candidate-${caseName.replaceAll(' ', '-')}`;
     const candidate = await insertCandidate(db, artifacts, manifest(), candidateId);
@@ -141,6 +151,7 @@ test.each(['held candidate', 'revoked approver'])('manifest claim rechecks %s st
     db.prepare(`INSERT INTO distribution_manifest_signing_intents
       (id,candidate_id,object_key,artifact_sha256,artifact_filename,manifest_sha256,status,created_at,expires_at,key_fingerprint)
       VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(intentId, candidateId, candidate.key, candidate.digest, 'manifest.json', candidate.digest, 'pending', Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000) + 3_600, 'a'.repeat(40)).run();
+
     if (caseName === 'held candidate') db.prepare("UPDATE distribution_release_candidates SET status='held' WHERE id=?").bind(candidateId).run();
     else db.prepare("DELETE FROM team_memberships WHERE github_id=? AND team='release'").bind('7').run();
     await expect(claimSigningIntent({ ...env, PACKAGE_SIGNING_FINGERPRINT: 'a'.repeat(40) }, intentId)).rejects.toThrow();
@@ -163,16 +174,20 @@ function insertOmarchySource(db: TestD1, revisionId: string, commit: string) {
 
 test('system Omarchy pair gate rejects missing/mismatched pairs and enforces RC final-byte carry-forward', async () => {
   const mismatch = fixture();
+
   try {
     const rows = pairRows();
+
     for (const [index, row] of rows.entries()) insertOmarchySource(mismatch.db, row.row.revision_id!, index === 3 ? 'b'.repeat(40) : 'a'.repeat(40));
     await expect(assertOmarchyPair(mismatch.env, rows.slice(0, 3), '4.0.3')).rejects.toThrow('both architectures');
     await expect(assertOmarchyPair(mismatch.env, rows, '4.0.3')).rejects.toThrow('same upstream commit');
   } finally { mismatch.db.close(); }
 
   const { db, artifacts, env } = fixture();
+
   try {
     const rows = pairRows();
+
     for (const row of rows) insertOmarchySource(db, row.row.revision_id!, 'a'.repeat(40));
     const rcPackages = rows.map(({ row }) => ({ name: row.name, architecture: row.architecture, version: row.version, artifactSha256: row.artifact_sha256 }));
     const rc = new TextEncoder().encode(JSON.stringify({ packages: rcPackages }));

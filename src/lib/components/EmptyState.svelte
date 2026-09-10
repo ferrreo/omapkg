@@ -2,9 +2,13 @@
   import Icon, { type IconName } from './Icon.svelte';
 
   export let title = 'Nothing here yet.';
+
   export let description = '';
+
   export let actionLabel = '';
+
   export let actionHref = '';
+
   export let icon: IconName = 'archive';
 </script>
 

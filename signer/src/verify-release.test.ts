@@ -13,6 +13,7 @@ test('public evidence verifies both subjects and rejects tampering, substitution
   const encode = (value: ArrayBuffer) => Buffer.from(value).toString('base64');
   const workerPublicKey = encode(await crypto.subtle.exportKey('raw', workerKey.publicKey));
   const recipe = 'pkgname=hello\n';
+
   const provenance = JSON.stringify({
     buildId: 'build-1', revisionId: 'revision-1', workerId: 'worker-1',
     recipeSha256: await sha256(recipe), artifactSha256: await sha256('package'),
@@ -20,22 +21,27 @@ test('public evidence verifies both subjects and rejects tampering, substitution
     imageDigest: `sha256:${'b'.repeat(64)}`, network: 'disabled', ...runtimeEvidence(`sha256:${'b'.repeat(64)}`),
     startedAt: '2026-09-09T10:00:00Z', finishedAt: '2026-09-09T10:01:00Z',
   });
+
   const input = {
     buildId: 'build-1', revisionId: 'revision-1', surface: 'binary' as const,
     artifactFilename: 'hello.pkg.tar.zst', artifactSha256: await sha256('package'),
     recipe, recipeSha256: await sha256(recipe), manifestSha256: 'c'.repeat(64), sbom: '{}',
     provenance, provenanceSignature: encode(await crypto.subtle.sign('Ed25519', workerKey.privateKey, bytes(provenance))), workerPublicKey,
   };
+
   const statement = bytes(await releaseAttestation(input));
   expect(statement).toEqual(bytes(await releaseAttestation(input)));
+
   async function sign(statement: Uint8Array) {
     return await openpgp.sign({ message: await openpgp.createMessage({ binary: statement }), signingKeys: privateKey, detached: true, format: 'binary' }) as Uint8Array;
   }
+
   const evidence = {
     statement, signature: await sign(statement), trustedPublicKey: generated.publicKey,
     trustedFingerprint: privateKey.getFingerprint(), subjectSha256: input.artifactSha256,
     subjectName: input.artifactFilename, sbomSha256: await sha256('{}'),
   };
+
   expect(await verifyReleaseEvidence(evidence)).toEqual({ buildId: 'build-1', surface: 'binary', workerId: 'worker-1' });
   await expect(verifyReleaseEvidence({ ...evidence, subjectSha256: await sha256('modified package') })).rejects.toThrow('subject');
   await expect(verifyReleaseEvidence({ ...evidence, trustedFingerprint: 'd'.repeat(40) })).rejects.toThrow('trusted fingerprint');

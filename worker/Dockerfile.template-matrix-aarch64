@@ -1,0 +1,28 @@
+# Private AArch64 matrix acceptance image. Build only on native ARM64 or an
+# approved AArch64 OCI runner with binfmt; never use this as a production image.
+FROM docker.io/library/omarpkg-arm-builder@sha256:e9cbff215a6022ff61f4542b9ab1325e742c89a6a3f736488b4359a373f76db8
+
+RUN cp /etc/pacman.conf /tmp/opr-pacman.conf \
+    && sed -i '/^[#[:space:]]*DownloadUser[[:space:]]*=/d; /^[#[:space:]]*DisableSandboxSyscalls[[:space:]]*$/d; /^\[options\]$/a DownloadUser = root\nDisableSandboxSyscalls\nDisableSandboxFilesystem' /tmp/opr-pacman.conf \
+    && pacman --config /tmp/opr-pacman.conf -Syu --noconfirm --needed \
+      arch-install-scripts devtools binutils libarchive rpm-tools squashfs-tools \
+      cmake meson ninja rust python python-build python-installer python-setuptools npm go \
+      pnpm yarn xorg-server-xvfb gtk3 nss alsa-lib libxss libx11 libxcb \
+      libxcomposite libxdamage libxrandr mesa libdrm at-spi2-core pango cairo \
+      dbus libpulse \
+    && pacman --config /tmp/opr-pacman.conf -Scc --noconfirm
+
+RUN install -d /tmp/electron-pkg \
+    && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      https://github.com/electron/electron/releases/download/v43.2.0/electron-v43.2.0-linux-arm64.zip \
+      --output /tmp/electron-pkg/electron.zip \
+    && printf '%s  %s\n' '50e1cdefbf8590e0d89b0276314a99c7b98e8eed732204c6f1a1c2a38376ed87' /tmp/electron-pkg/electron.zip | sha256sum -c -
+COPY testdata/template-matrix/electron-arm64.PKGBUILD /tmp/electron-pkg/PKGBUILD
+RUN useradd --create-home matrix-builder \
+    && chown -R matrix-builder:matrix-builder /tmp/electron-pkg \
+    && runuser -u matrix-builder -- bash -ceu 'export PKGDEST=/tmp/electron-pkg PKGEXT=.pkg.tar.zst; cd /tmp/electron-pkg && makepkg --nodeps --noconfirm' \
+    && package=$(find /tmp/electron-pkg -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit) \
+    && test -n "$package" \
+    && pacman --config /tmp/opr-pacman.conf -U --noconfirm "$package" \
+    && install -Dm644 "$package" /opt/electron43-arm-runtime.pkg.tar.zst \
+    && rm -rf /tmp/electron-pkg /tmp/opr-pacman.conf

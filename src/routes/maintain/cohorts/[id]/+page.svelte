@@ -7,21 +7,41 @@
   import { cohortPhaseLabels, cohortPhases } from '$lib/distribution';
   import { cohortCauses } from '$lib/cohorts';
   import type { ActionData, PageData } from './$types';
+
   export let data: PageData;
+
   export let form: ActionData;
+
   let busy = false;
+
   let addition = '';
+
   let narrative = '';
+
   let narrativeCohort = '';
+
   let planDraft = '';
+
   const tabs = ['overview', 'changes', 'phases', 'tests', 'history'] as const;
+
   const date = (timestamp: number) => new Date(timestamp * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
-  const planField = (json: string, path: string) => { try { let value: any = JSON.parse(json); for (const part of path.split('.')) value = value?.[part]; return typeof value === 'string' ? value : ''; } catch { return ''; } };
-  const enhanceAction: SubmitFunction = () => { busy = true; return async ({ update }) => { await update({ reset: false }); busy = false; }; };
+
+  const planField = (json: string, path: string) => { try { let value: any = JSON.parse(json);
+
+ for (const part of path.split('.')) value = value?.[part];
+
+ return typeof value === 'string' ? value : ''; } catch { return ''; } };
+
+  const enhanceAction: SubmitFunction = () => { busy = true;
+
+ return async ({ update }) => { await update({ reset: false }); busy = false; }; };
+
   $: editable = data.canEdit && !['publish', 'observe'].includes(data.record.phase);
   $: currentNotes = data.changelogs.find((entry) => entry.facts_sha256 === data.factsSha256);
   $: chosen = data.packages.find((item) => item.pkgbase === addition) ?? data.packages[0];
+
   $: if (!addition && data.packages[0]) addition = data.packages[0].pkgbase;
+
   $: if (narrativeCohort !== data.record.id) {
     narrativeCohort = data.record.id;
     narrative = data.changelogs[0] ? JSON.parse(data.changelogs[0].document_json).narrative : '';

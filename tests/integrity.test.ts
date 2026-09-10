@@ -79,6 +79,7 @@ function seedRevision(db: TestD1, request: RevisionSeed): void {
     '{"passed":true}', '{}', null, 'https://github.com/owner/recipes/pull/1', `${request.id.padEnd(40, 'c').slice(0, 40)}`, request.createdAt,
   ).run();
   db.prepare('INSERT INTO builds(id,revision_id,status) VALUES(?,?,?)').bind(`build-${request.id}`, request.id, 'succeeded').run();
+
   for (const kind of ['area', 'security']) {
     db.prepare('INSERT INTO approvals(id,revision_id,kind,manifest_sha256,revoked_at,revoked_by) VALUES(?,?,?,?,NULL,NULL)')
       .bind(`${kind}-${request.id}`, request.id, kind, 'manifest-hash').run();
@@ -105,15 +106,20 @@ test('source-of-truth checks only the latest eligible published revision per pac
   const previousFetch = globalThis.fetch;
   globalThis.fetch = (async (input) => {
     const url = new URL(String(input));
+
     if (url.pathname === '/repos/owner/recipes') return Response.json({ default_branch: 'main' });
+
     if (url.pathname === '/repos/owner/recipes/branches/main') return Response.json({ commit: { sha: 'd'.repeat(40) } });
     const prefix = '/repos/owner/recipes/contents/';
+
     if (!url.pathname.startsWith(prefix)) return new Response('unexpected', { status: 500 });
     const path = decodeURIComponent(url.pathname.slice(prefix.length));
     requestedPaths.push(path);
     const value = files[path];
+
     return value === undefined ? new Response('missing', { status: 404 }) : Response.json({ type: 'file', encoding: 'base64', content: encode(value) });
   }) as typeof globalThis.fetch;
+
   try {
     const result = await checkSourceOfTruth(sourceOfTruthEnv(db));
     expect(result).toMatchObject({ checked: 1, passed: true, issues: [], frozenRequestIds: [] });
@@ -135,11 +141,15 @@ test('source-of-truth checks still report a manual tamper on the latest revision
   const previousFetch = globalThis.fetch;
   globalThis.fetch = (async (input) => {
     const url = new URL(String(input));
+
     if (url.pathname === '/repos/owner/recipes') return Response.json({ default_branch: 'main' });
+
     if (url.pathname === '/repos/owner/recipes/branches/main') return Response.json({ commit: { sha: 'd'.repeat(40) } });
     const path = decodeURIComponent(url.pathname.split('/contents/')[1] ?? '');
+
     return Response.json({ type: 'file', encoding: 'base64', content: encode(files[path] ?? '') });
   }) as typeof globalThis.fetch;
+
   try {
     const result = await checkSourceOfTruth(sourceOfTruthEnv(db));
     expect(result.checked).toBe(1);

@@ -25,6 +25,7 @@ const pageLoad = load as unknown as (event: Parameters<typeof load>[0]) => Promi
 
 test('public loader honors channel, surface, and architecture filters and returns final descriptions', async () => {
   const db = new TestD1(schema);
+
   try {
     db.prepare('INSERT INTO requests(id,status) VALUES(?,?), (?,?)').bind('q1', 'built', 'q2', 'pending').run();
     db.prepare('INSERT INTO revisions(id,request_id,description,recipe,explanation,sources_json,license) VALUES(?,?,?,?,?,?,?), (?,?,?,?,?,?,?), (?,?,?,?,?,?,?)').bind(

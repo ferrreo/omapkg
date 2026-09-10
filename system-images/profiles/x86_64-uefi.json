@@ -24,8 +24,8 @@
   },
   "firmware": {
     "package": "edk2-ovmf",
-    "codePath": "/usr/share/edk2/x64/OVMF_CODE.fd",
-    "varsTemplatePath": "/usr/share/edk2/x64/OVMF_VARS.fd"
+    "codePath": "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+    "varsTemplatePath": "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
   },
   "basePackages": ["base", "linux", "grub"],
   "installPackages": ["base", "linux", "grub"],

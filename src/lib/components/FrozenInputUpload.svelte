@@ -2,33 +2,58 @@
   import { goto } from '$app/navigation';
   import type { FrozenManifest, InputObject } from '$lib/frozen-inputs';
   import { postCaptureRequest, uploadCaptureObjects } from '$lib/input-upload';
+
   export let candidates: { id: string; pkgbase: string; title: string; cohort_sha256: string; recipe_sha256: string }[];
+
   let files: FileList | undefined;
+
   let manifest: FrozenManifest | null = null;
+
   let reference: InputObject | null = null;
-  let revisionId = ''; let reason = ''; let busy = false; let error = ''; let message = ''; let completed = 0; let total = 0;
+
+  let revisionId = '';
+
+ let reason = '';
+
+ let busy = false;
+
+ let error = '';
+
+ let message = '';
+
+ let completed = 0;
+
+ let total = 0;
+
   $: matches = manifest ? candidates.filter((item) => item.recipe_sha256 === manifest!.recipeSha256 && item.cohort_sha256 === manifest!.cohortSha256) : [];
+
   async function readCapture(event: Event) {
     files = (event.currentTarget as HTMLInputElement).files ?? undefined;
     manifest = null; reference = null; revisionId = ''; error = '';
+
     try {
       const entries = Array.from(files ?? []);
       const header = entries.find((file) => file.webkitRelativePath.split('/').length === 2 && file.name === 'manifest.json');
       const ref = entries.find((file) => file.webkitRelativePath.split('/').length === 2 && file.name === 'reference.json');
+
       if (!header || !ref || header.size > 128 * 1024 || ref.size > 1024) throw new Error('Choose the capture folder containing manifest.json, reference.json and objects.');
       const parsed = JSON.parse(await header.text()); const root = JSON.parse(await ref.text());
+
       if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.environments) || !/^[a-f0-9]{64}$/.test(root.sha256)) throw new Error('Invalid frozen capture header.');
       manifest = parsed; reference = root;
       revisionId = candidates.find((item) => item.recipe_sha256 === parsed.recipeSha256 && item.cohort_sha256 === parsed.cohortSha256)?.id ?? '';
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Could not read capture.'; }
   }
+
   async function upload() {
     if (busy || !manifest || !reference || !revisionId) return;
     busy = true; error = ''; completed = 0;
+
     try {
       await uploadCaptureObjects(files, (progress) => { completed = progress.completed; total = progress.total; message = progress.message; });
       message = 'Checking complete input closure and retained source evidence…';
       const result = await postCaptureRequest<{ sha256: string }>('/api/maintain/inputs/locks', { revisionId, lock: reference, reason });
+
       if (typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(result.sha256)) throw new Error('Server returned invalid input lock.');
       await goto(`/maintain/inputs/${result.sha256}`);
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Input capture could not be retained.'; }

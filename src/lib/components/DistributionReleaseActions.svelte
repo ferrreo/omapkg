@@ -4,16 +4,24 @@
   import type { ReleaseView } from '$lib/release-workbench';
 
   export let candidate: ReleaseView;
+
   export let releaseTeam = false;
+
   let reason = '';
+
   let baseReason = '';
+
   let baseArea = '';
+
   let pending = false;
+
   let message = '';
+
   let error = '';
 
   $: needsReleaseApproval = candidate.blockers.some((blocker) => blocker.code === 'release-review');
   $: baseAreas = [...new Set(candidate.blockers.filter((blocker) => blocker.code === 'base-review' && blocker.owner).map((blocker) => blocker.owner as string))];
+
   $: if (!baseAreas.includes(baseArea)) baseArea = baseAreas[0] ?? '';
   $: signaturePending = candidate.blockers.some((blocker) => blocker.code === 'signature-pending');
   $: reviewsReady = !candidate.blockers.some((blocker) => blocker.code === 'release-review' || blocker.code === 'base-review');
@@ -22,19 +30,25 @@
 
   async function submit(operation: 'approve' | 'base' | 'sign' | 'activate') {
     const approvalReason = operation === 'base' ? baseReason.trim() : reason.trim();
+
     if (!candidate.candidateId || ((operation === 'approve' || operation === 'base') && !approvalReason)) return;
     pending = true; message = ''; error = '';
+
     const body = operation === 'approve' || operation === 'base'
       ? { operation: 'approve', approval: { candidateId: candidate.candidateId, kind: operation === 'base' ? 'base' : 'release', area: operation === 'base' ? baseArea : null, reason: approvalReason } }
       : operation === 'sign'
         ? { operation, candidateId: candidate.candidateId }
       : { operation, candidateId: candidate.candidateId, expectedParent: { digest: candidate.parentDigest ?? null, sequence: candidate.parentSequence ?? null } };
+
     try {
       const response = await fetch('/api/maintain/distribution-releases', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       const result = await response.json().catch(() => ({})) as { error?: string };
+
       if (!response.ok) throw new Error(result.error || 'Release action failed. Refresh and review current evidence.');
       message = operation === 'approve' ? 'Release-team approval recorded for this exact manifest.' : operation === 'base' ? `Base-owner approval recorded for ${baseArea}.` : operation === 'sign' ? 'Manifest signature recorded for this exact reviewed candidate.' : 'Activation recorded after server gate checks.';
+
       if (operation === 'approve') reason = '';
+
       if (operation === 'base') baseReason = '';
       await invalidateAll();
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Release action failed. Refresh and review current evidence.'; }

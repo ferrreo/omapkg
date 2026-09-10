@@ -2,12 +2,19 @@
   import { enhance } from '$app/forms';
   import { areas } from '$lib/model';
   import { collections, requiredArchitectures, type CatalogManifest } from '$lib/distribution';
+
   export let value: CatalogManifest | null = null;
+
   export let revision: number | null = null;
+
   export let action = '?/propose';
+
   let busy = false;
+
   let targets = value?.architectures ?? ['x86_64', 'aarch64'];
+
   let collection = value?.collection ?? 'omapkg';
+
   let role = value?.role ?? 'optional';
 </script>
 

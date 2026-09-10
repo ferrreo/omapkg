@@ -2,6 +2,7 @@ import { chmodSync, existsSync } from 'node:fs';
 import * as openpgp from 'openpgp';
 
 const output = process.argv[2] ?? '.env.local';
+
 if (existsSync(output)) throw new Error(`refusing to overwrite ${output}`);
 
 const { privateKey } = await openpgp.generateKey({
@@ -14,14 +15,20 @@ const { privateKey } = await openpgp.generateKey({
   format: 'armored',
   config: { v6Keys: false, preferredHashAlgorithm: openpgp.enums.hash.sha256 },
 });
+
 const parsed = await openpgp.readPrivateKey({ armoredKey: privateKey });
+
 const fingerprint = parsed.getFingerprint().toLowerCase();
+
 const encoded = btoa(privateKey);
+
 await Bun.write(output, [
   '# Generated locally. Keep this file private and never commit it.',
   `OPR_SIGNING_PRIVATE_KEY_B64=${encoded}`,
   `OPR_SIGNING_FINGERPRINT=${fingerprint}`,
   '',
 ].join('\n'));
+
 chmodSync(output, 0o600);
+
 console.log(`Generated signer key ${fingerprint} in ${output}.`);

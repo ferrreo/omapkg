@@ -2,9 +2,11 @@
   import type { AuditEvent } from '../model';
 
   export let event: AuditEvent;
+
   export let actorNames: Record<string, string> = {};
 
   type LabelledEvent = AuditEvent & { actor_name?: string | null; actor_login?: string | null; target_name?: string | null };
+
   $: labelled = event as LabelledEvent;
   $: actorLabel = actorNames[event.actor] || labelled.actor_name || labelled.actor_login || (event.actor.startsWith('github:') ? 'GitHub user' : event.actor.startsWith('user:') ? 'Signed-in user' : event.actor);
   $: targetLabel = labelled.target_name || actorNames[event.target] || event.target;

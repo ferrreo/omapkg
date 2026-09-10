@@ -5,21 +5,34 @@
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
+
   export let form: ActionData;
 
   $: user = data?.user || null;
   $: role = data?.role || 'public';
+
   const initialResult = form && typeof form === 'object' ? form as { message?: string; requestId?: string; values?: Record<string, string>; error?: string } : {};
+
   $: result = form && typeof form === 'object' ? form as { message?: string; requestId?: string; values?: Record<string, string>; error?: string } : {};
+
   let name = initialResult.values?.name || '';
+
   let upstreamUrl = initialResult.values?.upstream_url || '';
+
   let sourceKind = initialResult.values?.source_kind || 'git';
+
   let sourceKindManuallyChosen = Boolean(initialResult.values?.source_kind);
+
   let area = initialResult.values?.area || 'desktop';
+
   let description = initialResult.values?.description || '';
+
   const commonLicenses = ['MIT', 'Apache-2.0', 'GPL-3.0-or-later', 'BSD-2-Clause', 'BSD-3-Clause', 'LGPL-3.0-or-later', 'MPL-2.0'];
+
   const initialLicense = initialResult.values?.declared_license || '';
+
   let licenseChoice = initialLicense && (commonLicenses.includes(initialLicense) || ['proprietary', 'unknown'].includes(initialLicense)) ? initialLicense : initialLicense ? 'other' : '';
+
   let customLicense = licenseChoice === 'other' ? initialLicense : '';
 
   const downloadExtension = /(?:\.tar(?:\.[a-z0-9]+)?|\.tgz|\.tbz2?|\.txz|\.zip|\.deb|\.rpm|\.appimage|\.run)(?:[?#]|$)/i;

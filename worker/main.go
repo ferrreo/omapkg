@@ -57,7 +57,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: opr-worker enroll --origin URL --name NAME --architecture x86_64|aarch64 [--image IMAGE@sha256:DIGEST --image-digest sha256:DIGEST] [--token TOKEN | --token-stdin]")
+	fmt.Fprintln(os.Stderr, "usage: opr-worker enroll --origin URL --name NAME --architecture x86_64|aarch64 [--image IMAGE@sha256:DIGEST --image-digest sha256:DIGEST] [--factory-image --factory-image-builder PATH --factory-image-builder-sha256 SHA256] [--token TOKEN | --token-stdin]")
 	fmt.Fprintln(os.Stderr, "       opr-worker run [--config PATH] [--once]")
 	fmt.Fprintln(os.Stderr, "       opr-worker version")
 	fmt.Fprintln(os.Stderr, "       opr-worker capture-catalog --source arch|omarchy|opr --output DIRECTORY [--channel CHANNEL --arch ARCH]")
@@ -77,6 +77,9 @@ func enrollCommand(args []string) error {
 	imageDigest := flags.String("image-digest", "", "pinned builder image digest")
 	runtimeImage := flags.String("runtime-image", "", "digest-pinned minimal runtime image")
 	runtime := flags.String("runtime", "podman", "container runtime (podman or docker)")
+	factoryImage := flags.Bool("factory-image", false, "enable private image execution through the configured container runtime")
+	factoryBuilder := flags.String("factory-image-builder", "/usr/local/lib/opr-worker/build-system-image.sh", "operator-installed private image builder script")
+	factoryBuilderSHA := flags.String("factory-image-builder-sha256", "", "SHA-256 for operator-installed private image builder script")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -97,7 +100,11 @@ func enrollCommand(args []string) error {
 			return errors.New("image must include image-digest")
 		}
 	}
-	metadata, err := daemonMetadata(*runtime)
+	factoryConfig := Config{FactoryImage: *factoryImage, FactoryImageBuilderPath: *factoryBuilder, FactoryImageBuilderSHA256: *factoryBuilderSHA, Runtime: *runtime, Image: *image, ImageDigest: *imageDigest, Architecture: *architecture}
+	if err := validateFactoryImageConfig(factoryConfig); err != nil {
+		return err
+	}
+	metadata, err := daemonMetadataForConfig(factoryConfig)
 	if err != nil {
 		return err
 	}
@@ -139,17 +146,20 @@ func enrollCommand(args []string) error {
 		return err
 	}
 	cfg := Config{
-		Origin:           originURL.String(),
-		WorkerID:         workerID,
-		PrivateKey:       encodePrivateKey(privateKey),
-		Image:            *image,
-		ImageDigest:      *imageDigest,
-		RuntimeImage:     *runtimeImage,
-		Architecture:     *architecture,
-		Runtime:          *runtime,
-		StateDir:         absoluteStateDir,
-		MaxSourceBytes:   defaultMaxSourceBytes,
-		SourceTimeoutSec: 600,
+		Origin:                    originURL.String(),
+		WorkerID:                  workerID,
+		PrivateKey:                encodePrivateKey(privateKey),
+		Image:                     *image,
+		ImageDigest:               *imageDigest,
+		RuntimeImage:              *runtimeImage,
+		Architecture:              *architecture,
+		Runtime:                   *runtime,
+		StateDir:                  absoluteStateDir,
+		MaxSourceBytes:            defaultMaxSourceBytes,
+		SourceTimeoutSec:          600,
+		FactoryImage:              *factoryImage,
+		FactoryImageBuilderPath:   *factoryBuilder,
+		FactoryImageBuilderSHA256: *factoryBuilderSHA,
 	}
 	configPath := filepath.Join(absoluteStateDir, "config.json")
 	if err := saveConfig(configPath, cfg); err != nil {
@@ -206,6 +216,40 @@ func maxInt(value, minimum int) int {
 func runLoop(ctx context.Context, client *Client, runner *Runner, cfg Config, once bool, pollInterval time.Duration) error {
 	backoff := pollInterval
 	for {
+		var imageJob *factoryImageJob
+		var imageErr error
+		if cfg.FactoryImage {
+			imageJob, imageErr = client.claimFactoryImage(ctx)
+		}
+		if imageErr != nil {
+			if once {
+				return imageErr
+			}
+			fmt.Fprintln(os.Stderr, "image claim:", imageErr)
+			if err := sleepContext(ctx, backoff); err != nil {
+				return err
+			}
+			if backoff < time.Minute {
+				backoff *= 2
+				if backoff > time.Minute {
+					backoff = time.Minute
+				}
+			}
+			continue
+		}
+		if imageJob != nil {
+			backoff = pollInterval
+			if err := runFactoryImageJob(ctx, client, cfg, imageJob); err != nil {
+				fmt.Fprintln(os.Stderr, "image job:", err)
+				if once {
+					return err
+				}
+			}
+			if once {
+				return nil
+			}
+			continue
+		}
 		job, err := client.claim(ctx)
 		if err != nil {
 			if once {

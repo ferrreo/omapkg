@@ -25,7 +25,9 @@ const profile = {
   login: 'fixture-user', id: 12345, type: 'User', name: 'Fixture User', avatar_url: 'https://avatars.githubusercontent.com/u/12345?v=4',
 };
 
-function event(db: TestD1, url: string, actor: Actor = { id: 'github:1', role: 'admin', areas: [] }, envOverrides: Record<string, unknown> = {}) {
+type TestEnvOverrides = Record<string, string>;
+
+function event(db: TestD1, url: string, actor: Actor = { id: 'github:1', role: 'admin', areas: [] }, envOverrides: TestEnvOverrides = {}) {
   return {
     request: new Request(`https://omapkg.example${url}`),
     url: new URL(`https://omapkg.example${url}`),
@@ -34,11 +36,13 @@ function event(db: TestD1, url: string, actor: Actor = { id: 'github:1', role: '
   } as any;
 }
 
-function formEvent(db: TestD1, values: Record<string, string | string[]>, envOverrides: Record<string, unknown> = {}) {
+function formEvent(db: TestD1, values: Record<string, string | string[]>, envOverrides: TestEnvOverrides = {}) {
   const body = new URLSearchParams();
+
   for (const [key, value] of Object.entries(values)) {
     for (const item of Array.isArray(value) ? value : [value]) body.append(key, item);
   }
+
   return {
     request: new Request('https://omapkg.example/maintain/team', { method: 'POST', body }),
     locals: { actor: { id: 'github:1', role: 'admin' as const, areas: [] } },
@@ -55,8 +59,10 @@ describe('GitHub identity directory', () => {
       calls++;
       expect(String(input)).toBe('https://api.github.com/user/12345');
       expect(init?.redirect).toBe('manual');
+
       return new Response(null, { status: 302, headers: { Location: 'https://untrusted.example/' } });
     }) as typeof globalThis.fetch;
+
     try {
       await expect(backfillGithubIdentity(asD1(db), '12345', 'test-oauth-token')).rejects.toThrow('unexpectedly redirected');
       expect(calls).toBe(1);
@@ -80,15 +86,17 @@ describe('GitHub identity directory', () => {
     const previous = globalThis.fetch;
     globalThis.fetch = (async (input, init) => {
       calls.push(`${String(input)} ${init?.headers instanceof Headers ? init.headers.get('Authorization') ?? '' : ''}`);
+
       return Response.json(profile);
     }) as typeof globalThis.fetch;
+
     try {
       const granted = await resolveGithubUsernameForGrant(asD1(db), '@FixtureUser');
       expect(granted.githubId).toBe('12345');
       expect(granted.username).toBe('fixture-user');
       expect(calls[0]).toContain('/users/FixtureUser');
       expect(calls[0]).not.toContain('Bearer');
-      globalThis.fetch = (async () => { throw new Error('cached revoke must not call GitHub'); }) as unknown as typeof globalThis.fetch;
+      globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => { throw new Error('cached revoke must not call GitHub'); }, { preconnect: globalThis.fetch.preconnect });
       const cached = await cachedGithubIdentity(asD1(db), '12345');
       expect(cached?.githubId).toBe('12345');
     } finally {
@@ -103,8 +111,10 @@ describe('GitHub identity directory', () => {
     const previous = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       calls.push(String(input));
+
       return Response.json(profile);
-    }) as unknown as typeof globalThis.fetch;
+    }) as typeof globalThis.fetch;
+
     try {
       const identity = await backfillGithubIdentity(asD1(db), '12345');
       expect(identity?.username).toBe('fixture-user');
@@ -126,17 +136,23 @@ describe('GitHub identity directory', () => {
     const calls: Array<{ url: string; authorization: string | null }> = [];
     globalThis.fetch = (async (input, init) => {
       calls.push({ url: String(input), authorization: new Headers(init?.headers).get('Authorization') });
+
       return Response.json({ ...profile, id: 12345, login: 'fixture-user' });
     }) as typeof globalThis.fetch;
+
     try {
       db.prepare('INSERT INTO user(id,name,email,createdAt,updatedAt) VALUES(?,?,?,?,?)').bind('user-existing', 'Fixture User', 'existing@example.com', 1, 1).run();
       db.prepare("INSERT INTO account(id,accountId,providerId,issuer,userId,accessToken,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)")
         .bind('account-existing', '12345', 'github', 'local:oauth:github', 'user-existing', encryptedToken, 1, 1).run();
+
+      const artifacts = {} as R2Bucket;
+
       const actor = await actorFor({
-        DB: asD1(db), ARTIFACTS: {} as R2Bucket, PUBLIC_ORIGIN: 'https://omapkg.example',
+        DB: asD1(db), ARTIFACTS: artifacts, PUBLIC_ORIGIN: 'https://omapkg.example',
         BETTER_AUTH_SECRET: secret, GITHUB_CLIENT_ID: 'client', GITHUB_CLIENT_SECRET: 'secret',
         MAINTAINER_GITHUB_IDS: '12345', SECURITY_GITHUB_IDS: '12345', QUARANTINE_HOURS: '48',
       }, 'user-existing');
+
       expect(actor.id).toBe('github:12345');
       expect(calls).toEqual([{ url: 'https://api.github.com/user/12345', authorization: `Bearer ${token}` }]);
       expect((await cachedGithubIdentity(asD1(db), '12345'))?.username).toBe('fixture-user');
@@ -148,6 +164,7 @@ describe('GitHub identity directory', () => {
 
   test('verified OAuth profile refreshes directory, user field and suggestions', async () => {
     const db = new TestD1(schema);
+
     try {
       db.prepare('INSERT INTO user(id,name,email,createdAt,updatedAt) VALUES(?,?,?,?,?)').bind('user-1', 'Fixture User', 'fixture-user@example.com', 1, 1).run();
       db.prepare("INSERT INTO account(id,accountId,providerId,issuer,userId,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)")
@@ -168,19 +185,23 @@ describe('GitHub identity directory', () => {
     const previous = globalThis.fetch;
     globalThis.fetch = (async (input) => {
       const url = String(input);
+
       if (url.endsWith('/users/fixture-user')) return Response.json(profile);
+
       if (url.endsWith('/users/organization')) return Response.json({ ...profile, type: 'Organization' });
+
       return new Response('missing', { status: 404 });
     }) as typeof globalThis.fetch;
+
     try {
       const valid = await GET(event(db, '/api/admin/github-users?username=%40fixture-user'));
       expect(valid.status).toBe(200);
-      const validBody = await valid.json() as Record<string, unknown>;
+      const validBody = await valid.json() as { exists: boolean; username: string; name?: string; avatarUrl?: string; githubId?: string };
       expect(validBody).toEqual({ exists: true, username: 'fixture-user', name: 'Fixture User', avatarUrl: profile.avatar_url });
       expect(validBody.githubId).toBeUndefined();
       const missing = await GET(event(db, '/api/admin/github-users?username=missing'));
       expect(missing.status).toBe(404);
-      expect(await missing.json() as Record<string, unknown>).toEqual({ exists: false, username: 'missing' });
+      expect(await missing.json() as { exists: boolean; username: string }).toEqual({ exists: false, username: 'missing' });
       const organization = await GET(event(db, '/api/admin/github-users?username=organization'));
       expect(organization.status).toBe(422);
       const denied = await GET(event(db, '/api/admin/github-users?username=fixture-user', { id: 'github:2', role: 'maintainer', areas: ['system'] }));
@@ -200,8 +221,10 @@ describe('GitHub identity directory', () => {
     const calls: Array<{ url: string; authorization: string | null; redirect: RequestRedirect | undefined }> = [];
     globalThis.fetch = (async (input, init) => {
       calls.push({ url: String(input), authorization: new Headers(init?.headers).get('Authorization'), redirect: init?.redirect });
+
       return Response.json(profile);
     }) as typeof globalThis.fetch;
+
     try {
       db.prepare('INSERT INTO user(id,name,email,createdAt,updatedAt) VALUES(?,?,?,?,?)').bind('admin-user', 'Admin', 'admin@example.com', 1, 1).run();
       db.prepare("INSERT INTO account(id,accountId,providerId,issuer,userId,accessToken,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)")
@@ -216,8 +239,10 @@ describe('GitHub identity directory', () => {
       expect(calls).toHaveLength(2);
       expect(calls.every((call) => call.authorization === `Bearer ${token}` && call.redirect === 'manual')).toBe(true);
       const serviceToken = 'profile-integration-fixture';
+
       const serviceLookup = await GET(event(db, '/api/admin/github-users?username=fixture-user', undefined,
         { ...env, GITHUB_REPO_TOKEN: serviceToken }));
+
       expect(serviceLookup.status).toBe(200);
       expect(calls.at(-1)?.authorization).toBe(`Bearer ${serviceToken}`);
       expect(await serviceLookup.text()).not.toContain(serviceToken);
@@ -230,13 +255,16 @@ describe('GitHub identity directory', () => {
   test('team grant and revoke accept usernames while revoking current approvals', async () => {
     const db = new TestD1(schema);
     const previous = globalThis.fetch;
-    globalThis.fetch = (async () => Response.json(profile)) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(profile), { preconnect: globalThis.fetch.preconnect });
+
     try {
       const grant = await actions.grant(formEvent(db, { github_username: '@fixture-user', area: 'system' }));
       expect(grant).toMatchObject({ success: true });
+
       const revision = {
         id: 'revision-1', requestId: 'request-1', manifest: 'a'.repeat(64),
       };
+
       db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?)`).bind('request-1', 'hello', 'https://example.com/hello.tar.gz', 'archive', 'system', 'github:9', 'queued', 1, 1).run();
       db.prepare(`INSERT INTO revisions(id,request_id,version,recipe,recipe_sha256,manifest_sha256,sources_json,dependencies_json,smoke_commands_json,architectures_json,
@@ -264,7 +292,8 @@ describe('GitHub identity directory', () => {
   test('revoke uses hidden expected ID for recycled usernames and deleted profiles', async () => {
     const db = new TestD1(schema);
     const previous = globalThis.fetch;
-    globalThis.fetch = (async () => { throw new Error('revoke must not resolve a cached username through GitHub'); }) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => { throw new Error('revoke must not resolve a cached username through GitHub'); }, { preconnect: globalThis.fetch.preconnect });
+
     try {
       db.prepare('INSERT INTO github_identities(github_id,username,display_name,avatar_url,last_login_at,updated_at) VALUES(?,?,?,?,?,?)')
         .bind('111', 'shared-name', 'First', null, null, 1).run();
@@ -272,7 +301,7 @@ describe('GitHub identity directory', () => {
         .bind('222', 'shared-name', 'Second', null, null, 2).run();
       db.prepare('INSERT INTO team_memberships(github_id,team) VALUES(?,?),(?,?),(?,?)')
         .bind('111', 'system', '222', 'system', '333', 'system').run();
-      const page = await load(event(db, '/maintain/team')) as any;
+      const page = await load(event(db, '/maintain/team')) as { members: Array<{ accountId: string; github_username: string; canRevoke: boolean }> };
       expect(page.members).toEqual(expect.arrayContaining([
         expect.objectContaining({ accountId: '111', github_username: 'shared-name', canRevoke: true }),
         expect.objectContaining({ accountId: '333', github_username: 'GitHub user', canRevoke: true }),
@@ -291,7 +320,8 @@ describe('GitHub identity directory', () => {
   test('grants multiple teams and keeps final administrator protected', async () => {
     const db = new TestD1(schema);
     const previous = globalThis.fetch;
-    globalThis.fetch = (async () => Response.json(profile)) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(profile), { preconnect: globalThis.fetch.preconnect });
+
     try {
       const grant = await actions.grant(formEvent(db, { github_username: '@fixture-user', teams: ['system', 'security', 'admin'] }));
       expect(grant).toMatchObject({ success: true });
@@ -299,19 +329,19 @@ describe('GitHub identity directory', () => {
         .toEqual(['admin', 'security', 'system']);
       expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='team.membership_granted'").first<{ count: number }>()?.count).toBe(3);
 
-      const page = await load(event(db, '/maintain/team')) as any;
+      const page = await load(event(db, '/maintain/team')) as { teams: string[]; members: Array<{ team: string; canRevoke: boolean }> };
       expect(page.teams).toContain('security');
       expect(page.members.find((member: any) => member.team === 'admin')?.canRevoke).toBe(false);
 
       const blocked = await actions.revoke(formEvent(db, { expected_github_id: '12345', github_username: 'fixture-user', team: 'admin' }));
-      expect((blocked as any).data).toMatchObject({ success: false, error: 'At least one administrator must remain.' });
+      expect((blocked as { data?: unknown }).data).toMatchObject({ success: false, error: 'At least one administrator must remain.' });
       expect(db.prepare("SELECT 1 FROM team_memberships WHERE github_id='12345' AND team='admin'").first()).not.toBeNull();
 
       db.prepare("INSERT INTO team_memberships(github_id,team) VALUES('99999','admin')").run();
       const revoke = await actions.revoke(formEvent(db, { expected_github_id: '12345', github_username: 'fixture-user', team: 'admin' }));
       expect(revoke).toMatchObject({ success: true });
       const lastBlocked = await actions.revoke(formEvent(db, { expected_github_id: '99999', github_username: 'GitHub user', team: 'admin' }));
-      expect((lastBlocked as any).data).toMatchObject({ success: false, error: 'At least one administrator must remain.' });
+      expect((lastBlocked as { data?: unknown }).data).toMatchObject({ success: false, error: 'At least one administrator must remain.' });
     } finally {
       globalThis.fetch = previous;
       db.close();
@@ -321,7 +351,8 @@ describe('GitHub identity directory', () => {
   test('fences unpublished work only when no retained team covers approvals', async () => {
     const db = new TestD1(schema);
     const previous = globalThis.fetch;
-    globalThis.fetch = (async () => Response.json(profile)) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(profile), { preconnect: globalThis.fetch.preconnect });
+
     try {
       await actions.grant(formEvent(db, { github_username: '@fixture-user', teams: ['system', 'security'] }));
       db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at)
@@ -357,7 +388,8 @@ describe('GitHub identity directory', () => {
   test('preserves published approvals but fails and fences an active sibling', async () => {
     const db = new TestD1(schema);
     const previous = globalThis.fetch;
-    globalThis.fetch = (async () => Response.json(profile)) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(profile), { preconnect: globalThis.fetch.preconnect });
+
     try {
       await actions.grant(formEvent(db, { github_username: '@fixture-user', teams: ['system'] }));
       db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at)

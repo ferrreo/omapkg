@@ -17,15 +17,16 @@ import (
 )
 
 type recipeInspectionReport struct {
-	SchemaVersion int                 `json:"schemaVersion"`
-	Kind          string              `json:"kind"`
-	JobID         string              `json:"jobId"`
-	Attempt       int64               `json:"attempt"`
-	Capture       inputObject         `json:"capture"`
-	Architecture  string              `json:"architecture"`
-	ImageRef      string              `json:"imageRef"`
-	Host          *nativeHostEvidence `json:"host"`
-	Sandbox       struct {
+	SchemaVersion  int                 `json:"schemaVersion"`
+	Kind           string              `json:"kind"`
+	JobID          string              `json:"jobId"`
+	Attempt        int64               `json:"attempt"`
+	Capture        inputObject         `json:"capture"`
+	RecipeOverride *inputObject        `json:"recipeOverride"`
+	Architecture   string              `json:"architecture"`
+	ImageRef       string              `json:"imageRef"`
+	Host           *nativeHostEvidence `json:"host"`
+	Sandbox        struct {
 		Network  string `json:"network"`
 		ReadOnly bool   `json:"readOnly"`
 		User     string `json:"user"`
@@ -40,6 +41,7 @@ type recipeInspectionReport struct {
 
 func validateRecipeInspectionJob(job Job, cfg Config) error {
 	if job.Kind != "recipe-inspection" || job.RecipeCapture == nil || !validInputObject(*job.RecipeCapture, 512<<10) ||
+		(job.RecipeOverride != nil && !validInputObject(*job.RecipeOverride, maxRecipeBytes)) ||
 		!idPattern.MatchString(job.ID) || job.LeaseToken == "" || !depNamePattern.MatchString(job.PackageName) || job.Attempt < 1 ||
 		job.Architecture != cfg.Architecture || !archPattern.MatchString(job.Architecture) || validateImageReference(job.ImageRef, job.ImageDigest) != nil ||
 		job.InputLock != nil || job.OutputContract != nil || job.DependencyPlan != nil || job.PreservedRecipe != nil || len(job.Sources) != 0 || job.Recipe != "" {
@@ -83,7 +85,7 @@ func runRecipeInspection(parent context.Context, client *Client, runner *Runner,
 			}
 		}
 	}()
-	report := recipeInspectionReport{SchemaVersion: 1, Kind: "recipe-inspection", JobID: job.ID, Attempt: job.Attempt, Capture: *job.RecipeCapture,
+	report := recipeInspectionReport{SchemaVersion: 1, Kind: "recipe-inspection", JobID: job.ID, Attempt: job.Attempt, Capture: *job.RecipeCapture, RecipeOverride: job.RecipeOverride,
 		Architecture: job.Architecture, ImageRef: job.ImageRef, StartedAt: time.Now().UTC().Format(time.RFC3339)}
 	report.Sandbox.Network = "disabled"
 	report.Sandbox.ReadOnly = true
@@ -148,6 +150,21 @@ func (r *Runner) inspectRecipeCapture(ctx context.Context, client *Client, job J
 			return client.fetchPrivateInput(ctx, "inspections", job, ref, path)
 		}); err != nil {
 		return err
+	}
+	if job.RecipeOverride != nil {
+		override := filepath.Join(jobDir, "recipe-override")
+		if err := client.fetchPrivateInput(ctx, "inspections", job, *job.RecipeOverride, override); err != nil {
+			return err
+		}
+		if err := os.Remove(filepath.Join(workdir, "PKGBUILD")); err != nil {
+			return err
+		}
+		if err := os.Rename(override, filepath.Join(workdir, "PKGBUILD")); err != nil {
+			return err
+		}
+		if err := os.Chmod(filepath.Join(workdir, "PKGBUILD"), 0o644); err != nil {
+			return err
+		}
 	}
 	if err := r.ensureImageReference(ctx, job.ImageRef, job.ImageDigest, client.inspectionRegistryCredentials, job.ID, job.LeaseToken); err != nil {
 		return err

@@ -10,27 +10,39 @@
   export let data: PageData;
 
   $: packages = (Array.isArray(data?.packages) ? data.packages : Array.isArray(data?.releases) ? data.releases : []) as Release[];
+
   let query = data?.query || '';
+
   let channel = data?.channel || 'stable';
+
   let surface = data?.surface || '';
+
   let architecture = data?.architecture || '';
+
   $: if (data) {
     query = data.query || '';
     channel = data.channel || 'stable';
     surface = data.surface || '';
     architecture = data.architecture || '';
   }
+
   $: loading = Boolean($navigating);
   $: user = data?.user || null;
   $: role = data?.role || 'public';
 
   function nextPageHref() {
     const params = new URLSearchParams();
+
     if (query) params.set('q', query);
+
     if (channel) params.set('channel', channel);
+
     if (surface) params.set('surface', surface);
+
     if (architecture) params.set('architecture', architecture);
+
     if (data.nextCursor) params.set('cursor', data.nextCursor);
+
     return `/packages?${params}`;
   }
 </script>

@@ -22,6 +22,7 @@ function plan(operation = 'install') {
 
 const schema = readdirSync(new URL('../migrations', import.meta.url)).filter((name) => name.endsWith('.sql')).sort()
   .map((name) => readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8')).join('\n');
+
 const base64 = (bytes: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 
 async function fixture() {
@@ -53,6 +54,7 @@ async function fixture() {
     db.prepare("INSERT INTO build_artifacts(build_id,attempt,filename,artifact_key,sha256,size,created_at) VALUES('build-1',1,'demo-1-1-x86_64.pkg.tar.zst','artifacts/demo',?,1,?)").bind(artifactSha256, timestamp),
   ]);
   const env = { DB: db, ARTIFACTS: {} } as unknown as Env;
+
   return { holder, db, env, first, second, publicKey };
 }
 
@@ -60,12 +62,15 @@ async function signedEvidence(state: Awaited<ReturnType<typeof fixture>>, planRe
   const observed = { files: [{ name: 'packages', kind: 'package-state', sha256: '1'.repeat(64), size: 1, value: [{ name: 'demo', version: '1', architecture: 'x86_64' }] }], states: { packages: [{ name: 'demo', version: '1', architecture: 'x86_64' }] } };
   const machine = { architecture: 'x86_64', goarch: 'amd64', goos: 'linux', runtime: 'go1.26' };
   const details = { profileId: 'x86-uefi', operation: 'install' };
+
   const evidence = { schemaVersion: 1, planId: planRecord.id, testPlanSha256: planRecord.planSha256, cohortId: 'cohort-1', revision: 1, operation: 'install', architecture: 'x86_64',
     candidate: { sha256: 'a'.repeat(64) }, input: { sha256: 'c'.repeat(64) }, artifact: { sha256: 'f'.repeat(64) }, environment: { sha256: await sha256(canonicalJson({ machine, details })), machine, details }, profile: planRecord.profile,
     coverage: planRecord.coverage, command: { sha256: await sha256(canonicalJson(planRecord.commands)) }, result: { startedAt: new Date(0).toISOString(), finishedAt: new Date(1000).toISOString(), exitCode: 0, commands: [{ name: 'state', exitCode: 0, passed: true, stdoutSha256: '2'.repeat(64), stderrSha256: '3'.repeat(64) }] }, observed,
     observedSha256: await sha256(canonicalJson(observed)), workerId: 'worker-1', workerPublicKey: state.publicKey, signature: '', ...overrides };
+
   const payload = { ...evidence }; delete (payload as { signature?: string }).signature;
   evidence.signature = base64(await crypto.subtle.sign({ name: 'Ed25519' }, state.first.privateKey, new TextEncoder().encode(canonicalJson(payload))));
+
   return evidence;
 }
 
@@ -73,12 +78,14 @@ async function workerRequest(state: Awaited<ReturnType<typeof fixture>>, body: U
   const path = '/api/worker/qualification'; const timestamp = Math.floor(Date.now() / 1000).toString(); const nonce = crypto.randomUUID().replaceAll('-', '').padEnd(32, '0').slice(0, 32);
   const bodySha256 = await sha256(body); const message = new TextEncoder().encode(`POST\n${path}\n${timestamp}\n${nonce}\n${bodySha256}`);
   const signed = signature || base64(await crypto.subtle.sign({ name: 'Ed25519' }, signatureKey, message));
+
   return new Request(`https://opr.test${path}`, { method: 'POST', body: body as unknown as BodyInit, headers: { 'content-type': 'application/json', 'X-OPR-Worker': 'worker-1', 'X-OPR-Timestamp': timestamp, 'X-OPR-Nonce': nonce, 'X-OPR-Signature': signed } });
 }
 
 async function workerPlanRequest(state: Awaited<ReturnType<typeof fixture>>, planId: string) {
   const path = `/api/worker/qualification?planId=${encodeURIComponent(planId)}`; const timestamp = Math.floor(Date.now() / 1000).toString(); const nonce = crypto.randomUUID().replaceAll('-', '').padEnd(32, '0').slice(0, 32);
   const body = new Uint8Array(); const bodySha256 = await sha256(body); const message = new TextEncoder().encode(`GET\n${path}\n${timestamp}\n${nonce}\n${bodySha256}`); const signature = base64(await crypto.subtle.sign({ name: 'Ed25519' }, state.first.privateKey, message));
+
   return new Request(`https://opr.test${path}`, { method: 'GET', headers: { 'X-OPR-Worker': 'worker-1', 'X-OPR-Timestamp': timestamp, 'X-OPR-Nonce': nonce, 'X-OPR-Signature': signature } });
 }
 
@@ -96,6 +103,7 @@ test('reproducibility plans name both retained attempts', async () => {
 
 test('worker qualification endpoint stores only signed plan-bound observations and keeps failures exception-scoped', async () => {
   const state = await fixture();
+
   try {
     const input = plan(); input.inputSha256 = 'c'.repeat(64); input.artifactSha256 = 'f'.repeat(64); input.coverage.sha256 = await sha256(canonicalJson({ kind: 'member', pkgbase: 'demo', rootSha256: null, releaseId: '4.0.3-rc2', members: ['demo'], artifactSha256: input.artifactSha256 })); input.expectedObservationSha256 = await sha256(canonicalJson({ files: [{ name: 'packages', kind: 'package-state', sha256: '1'.repeat(64), size: 1, value: [{ name: 'demo', version: '1', architecture: 'x86_64' }] }], states: { packages: [{ name: 'demo', version: '1', architecture: 'x86_64' }] } }));
     const machine = { architecture: 'x86_64', goarch: 'amd64', goos: 'linux', runtime: 'go1.26' }; const details = { profileId: 'x86-uefi', operation: 'install' };
@@ -122,8 +130,10 @@ test('worker qualification endpoint stores only signed plan-bound observations a
     const endpointBody = new TextEncoder().encode(JSON.stringify(await signedEvidence(state, planRecord)));
     const endpoint = await workerQualificationPost({ request: await workerRequest(state, endpointBody), platform: { env: state.env }, url: new URL('https://opr.test/api/worker/qualification') } as any);
     expect(endpoint.status).toBe(200);
+
     try { await workerQualificationPost({ request: await workerRequest(state, endpointBody, state.first.privateKey, 'invalid'), platform: { env: state.env }, url: new URL('https://opr.test/api/worker/qualification') } as any); throw new Error('invalid worker signature accepted'); }
     catch (cause) { expect((cause as { status?: number }).status).toBe(401); }
+
     const invalid = await signedEvidence(state, planRecord); invalid.signature = 'invalid';
     await expect(recordNativeQualification(state.env, auth, invalid)).rejects.toThrow('Invalid qualification evidence signature.');
     const wrongWorker = await signedEvidence(state, planRecord); wrongWorker.workerId = 'worker-2';

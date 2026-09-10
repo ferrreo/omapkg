@@ -15,6 +15,7 @@ const plan = (architecture: 'x86_64' | 'aarch64') => ({ architecture, missingSee
   architecture, seeds: ['library'], members: [{ pkgbase: 'library', changed: true, removed: false, affectedBy: [] }],
   buildGroups: [{ members: ['library'], requiresBootstrapReview: false }], findings: [], unresolvedCandidateRelations: 0, ambiguousCandidateRelations: 0,
 } });
+
 const report = () => ({ schemaVersion: 1, kind: 'rebuild-scope-proposal', baseline: 'a'.repeat(64), candidate: 'b'.repeat(64),
   requiredArchitectures: ['x86_64', 'aarch64'], repositoryOrder: [], shadowed: [], rules: [], plans: [plan('x86_64'), plan('aarch64')], limits: [],
 });
@@ -34,6 +35,7 @@ test('operations coverage reports queue age and scoped target parity, with check
     CREATE TABLE cohort_checks(kind TEXT,architecture TEXT);
     CREATE TABLE catalog_packages(current_revision INTEGER,admitted_revision INTEGER);
   `);
+
   db.exec("INSERT INTO builds VALUES('recipe','queued','x86_64',90)");
   db.exec("INSERT INTO cohorts VALUES('cohort',1)");
   db.exec("INSERT INTO cohort_members VALUES('cohort',1,'library',1,'recipe')");
@@ -51,19 +53,23 @@ test('operations coverage reports queue age and scoped target parity, with check
 test('scope preview maps only current admitted policy and reviewed recipe, then creates no builds', async () => {
   const db = new TestD1(fullSchema); const d1 = asD1(db); const owner = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
   db.exec("INSERT INTO team_memberships VALUES('1','system'),('2','security')");
+
   const policy: CatalogManifest = { schemaVersion: 1, pkgbase: 'library', outputs: ['library'], collection: 'core', lane: 'system', role: 'base-system', origin: 'arch',
     upstreamUrl: 'https://example.org/library.git', sourceKind: 'git', description: 'Library', license: 'MIT', ownerArea: 'system', architectures: ['aarch64', 'x86_64'],
     artifactArchitecture: 'native', architectureExceptions: [], sourceReference: null, rebuildOn: [] };
+
   const catalog = await proposeCatalogPackage(d1, owner, policy, null, 'Admit current library policy.');
   await approveCatalogPackage(d1, owner, 'library', 1, catalog.manifestSha256, 'area', 'Area review.');
   await approveCatalogPackage(d1, { id: 'github:2', role: 'security', areas: ['system'] }, 'library', 1, catalog.manifestSha256, 'security', 'Security review.');
   db.prepare(`INSERT INTO requests(id,name,upstream_url,source_kind,area,requested_by,status,created_at,updated_at)
     VALUES('request-library','library',?,'git','system','github:1','review',1,1)`).bind(policy.upstreamUrl).run();
   const recipe = 'pkgname=library\npkgver=2.0\npkgrel=1\n';
+
   const revision = { id: 'recipe-library', request_id: 'request-library', version: '2.0', recipe, recipe_sha256: await sha256(recipe), manifest_sha256: '',
     sources_json: '[]', dependencies_json: '[]', smoke_commands_json: '[]', architectures_json: '["aarch64","x86_64"]', source_date_epoch: 1,
     image_digest: `registry.example/builder@sha256:${'b'.repeat(64)}`, license: 'MIT', surface: 'binary' as const, explanation: 'test', sbom_json: '{}', lint_json: '{}', upstream_commit: null,
     pr_url: null, commit_sha: 'c'.repeat(40), created_at: 1 };
+
   revision.manifest_sha256 = await manifestDigest(revision);
   db.prepare(`INSERT INTO revisions(${Object.keys(revision).join(',')}) VALUES(${Object.keys(revision).map(() => '?').join(',')})`).bind(...Object.values(revision)).run();
   db.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,1),(?,?,?,?,?,1)')
