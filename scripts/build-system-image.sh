@@ -302,7 +302,7 @@ sgdisk --zap-all "$image_tmp" >/dev/null
 sgdisk --disk-guid="$disk_guid" --new=1:2048:+"${esp_size}"M --partition-guid=1:"$esp_partition_guid" --typecode=1:ef00 --change-name=1:ESP --new=2:0:0 --partition-guid=2:"$root_partition_guid" --typecode=2:8300 --change-name=2:ROOT "$image_tmp" >/dev/null
 loop=$(losetup --find --show --partscan "$image_tmp")
 created_partition_nodes=()
-mounted=0
+mounted=0; esp_mounted=0
 dev_mounted=0; proc_mounted=0; sys_mounted=0
 remove_partition_nodes() {
   local node
@@ -323,7 +323,8 @@ detach() {
   if (( sys_mounted )); then umount -R "$temporary_root/root/sys" || return 1; fi
   if (( proc_mounted )); then umount -R "$temporary_root/root/proc" || return 1; fi
   if (( dev_mounted )); then umount -R "$temporary_root/root/dev" || return 1; fi
-  if (( mounted )); then umount "$temporary_root/root/boot/efi" || return 1; umount "$temporary_root/root" || return 1; mounted=0; fi
+  if (( esp_mounted )); then umount "$temporary_root/root/boot/efi" || return 1; esp_mounted=0; fi
+  if (( mounted )); then umount "$temporary_root/root" || return 1; mounted=0; fi
   detach_partitioned_loop
   cleanup_all
 }
@@ -363,7 +364,7 @@ mkdir -p "$temporary_root/root"
 mount "$root_device" "$temporary_root/root"; mounted=1
 root=$temporary_root/root
 mkdir -p "$root/boot/efi" "$root/dev" "$root/proc" "$root/sys"
-mount "$esp_device" "$root/boot/efi"
+mount "$esp_device" "$root/boot/efi"; esp_mounted=1
 mount --rbind /dev "$root/dev"; mount --make-rslave "$root/dev"; dev_mounted=1
 mount -t proc proc "$root/proc"; proc_mounted=1
 mount -t sysfs sysfs "$root/sys"; sys_mounted=1
@@ -422,8 +423,14 @@ filesystem=$(jq -er '.disk.filesystem' "$profile")
 printf '%s\n' "UUID=$root_uuid / $filesystem defaults 0 1" "UUID=$(blkid -s UUID -o value "$esp_device") /boot/efi vfat umask=0077 0 2" >"$root/etc/fstab"
 kernel_args=$(jq -er '.boot.kernelArguments' "$profile" | sed "s/{rootUuid}/$root_uuid/g")
 printf '%s\n' "search --no-floppy --fs-uuid --set=root $root_uuid" "linux $kernel_path $kernel_args" "initrd $initramfs_path" >"$root/boot/grub/grub.cfg"
+esp_epoch=$((source_date_epoch - source_date_epoch % 2))
+esp_stage="$temporary_root/esp-stage"
+mkdir -p "$esp_stage"
+cp -a "$root/boot/efi/." "$esp_stage/"
+umount -R "$root/sys"; sys_mounted=0; umount -R "$root/proc"; proc_mounted=0; umount -R "$root/dev"; dev_mounted=0
+umount "$root/boot/efi"; esp_mounted=0
 find "$root" -xdev -print0 | xargs -0 touch -h -d "@$source_date_epoch"
-find "$root/boot/efi" -xdev -print0 | xargs -0 touch -h -d "@$source_date_epoch"
+find "$esp_stage" -print0 | xargs -0 touch -h -d "@$esp_epoch"
 declare -A image_uids=() image_gids=()
 safe_file "$root/etc/passwd"; safe_file "$root/etc/group"
 while IFS=: read -r _ _ uid _; do
@@ -437,25 +444,22 @@ while IFS= read -r path; do
   uid=${owner%:*}; gid=${owner#*:}
   [[ -n "${allowed_owners[$owner]:-}" || ( -n "${image_uids[$uid]:-}" && -n "${image_gids[$gid]:-}" ) ]] || die "image path has undeclared ownership: $path ($owner)"
 done < <(find "$root" -xdev -print)
-[[ -z "$(find "$root" -xdev -printf '%T@ %p\n' | awk -v epoch="$source_date_epoch" '$1 + 0 != epoch { print; exit }')" ]] || die "image root contains an uncontrolled timestamp"
-esp_epoch=$((source_date_epoch - source_date_epoch % 2))
-[[ -z "$(find "$root/boot/efi" -xdev -printf '%T@ %p\n' | awk -v epoch="$esp_epoch" '$1 + 0 != epoch { print; exit }')" ]] || die "ESP contains an uncontrolled timestamp"
+uncontrolled_timestamp=$(find "$root" -xdev -printf '%T@ %p\n' | awk -v epoch="$source_date_epoch" '$1 + 0 != epoch { print; exit }')
+[[ -z "$uncontrolled_timestamp" ]] || die "image root contains an uncontrolled timestamp: $uncontrolled_timestamp"
+uncontrolled_timestamp=$(find "$esp_stage" -printf '%T@ %p\n' | awk -v epoch="$esp_epoch" '$1 + 0 != epoch { print; exit }')
+[[ -z "$uncontrolled_timestamp" ]] || die "ESP contains an uncontrolled timestamp: $uncontrolled_timestamp"
 root_inodes="$temporary_root/root-inodes.txt"
 find "$root" -xdev -printf '%i\n' | sort -nu >"$root_inodes"
-esp_stage="$temporary_root/esp-stage"
-mkdir -p "$esp_stage"
-cp -a "$root/boot/efi/." "$esp_stage/"
-find "$esp_stage" -print0 | xargs -0 touch -h -d "@$esp_epoch"
 sync
 [[ "$(blkid -s UUID -o value "$root_device")" == "$root_uuid" ]] || die "root filesystem UUID changed during image build"
 [[ "$(blkid -s UUID -o value "$esp_device" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "ESP filesystem UUID changed during image build"
-umount -R "$root/sys"; sys_mounted=0; umount -R "$root/proc"; proc_mounted=0; umount -R "$root/dev"; dev_mounted=0; umount "$root/boot/efi"; umount "$root"; mounted=0
+umount "$root"; mounted=0
 normalize_ext4_metadata "$root_device" "$root_inodes" "$source_date_epoch"
 detach_partitioned_loop
 esp_image="$temporary_root/esp.img"
 truncate -s "$((esp_size * 1024 * 1024))" "$esp_image"
 mkfs.fat -F32 -i "$esp_uuid_raw" "$esp_image" >/dev/null
-mcopy -s -p -i "$esp_image" "$esp_stage"/* :: >/dev/null
+mcopy -s -p -m -i "$esp_image" "$esp_stage"/* :: >/dev/null
 [[ "$(blkid -s UUID -o value "$esp_image" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "staged ESP filesystem UUID changed"
 dd if="$esp_image" of="$image_tmp" bs=512 seek=2048 conv=notrunc status=none
 install -m0644 "$image_tmp" "$output"

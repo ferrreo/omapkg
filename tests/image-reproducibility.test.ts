@@ -43,7 +43,7 @@ declare -p allowed_owners
 test('system image ownership accepts target accounts and groups but rejects undeclared IDs', () => {
   const builder = readFileSync(join(root, 'scripts/build-system-image.sh'), 'utf8');
   const start = builder.indexOf('declare -A image_uids=()');
-  const end = builder.indexOf('\n[[ -z "$(find "$root" -xdev -printf', start);
+  const end = builder.indexOf('\nuncontrolled_timestamp=$(find "$root"', start);
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   const directory = mkdtempSync(join(tmpdir(), 'omapkg-image-owners-'));
