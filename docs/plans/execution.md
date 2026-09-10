@@ -3,6 +3,12 @@
 Baseline: `af76fec7397b8f8293175485d55271a765592670` on `fer/arch-repository-plan`.
 Specification: [approved plan](arch-repository-ownership.md).
 
+Execution scope was clarified on 10 September: implement the plan; do not run
+bulk imports. Bulk source capture and local retention jobs were stopped. Existing
+local data remains test evidence. Production imports, admissions and cutover are
+not authorized by this implementation task. The exposed ARM image was separately
+authorized for containment.
+
 This ledger records implementation and acceptance separately. A checked-in
 feature is not evidence of full catalog coverage, native hardware acceptance,
 human release approval, or production cutover.
@@ -625,7 +631,8 @@ recipes, resumes interrupted attempts and respects upstream request quotas.
 
 At this checkpoint, 1,712 of 12,327 versioned recipe tasks passed independent
 Git/object verification. Eleven lacked original `.SRCINFO`; no metadata was
-invented. Capture continues. The first 712 recipes were retained through the
+invented. Bulk capture was subsequently stopped after scope clarification. The
+first 712 recipes were retained through the
 actual local private input/mapping API, using labelled test identities. They
 produced 612 matching original metadata mappings, 98 differences and two missing
 metadata results. Differences include generated dependency declarations and need
@@ -637,3 +644,54 @@ metadata. Split outputs count once per source recipe. Retries and older capture
 links do not inflate coverage. Local source uploads, private access and layout
 at 320, 375, 414, 768, 1440 and 1920 pixels passed browser checks. Full source
 capture, native inspection/adaptation and human admission remain pending.
+
+### ARM image containment completed
+
+On explicit user authorization, production image `arm-runtime-20260909` was
+disabled and removed as default. Read-back verified `enabled=0` and
+`is_default=0`; an attributed audit record was written. A follow-up query found
+no queued or leased builds pinned to the exposed digest.
+
+The replacement images passed layer checks and native dependency/isolation
+regression in [run 34457104505](https://github.com/ferrreo/omapkg/actions/runs/34457104505):
+
+- Builder: `sha256:b1228c8de6e17ec839ea40eed958c4db63d81a6a64c9a5cae7fa634f618ee7b3`.
+- Runtime: `sha256:d81281819870e21cb303836ec6bd2d462326888b7f58aa8cbe89b6b0a8609707`.
+
+Both use the original signature-verified rootfs with a freshly initialized
+keyring. Neither saved image contains package-manager private/revocation files.
+No capture artifact was uploaded. The temporary registry credential was deleted
+and the GitHub secret list verified empty. These candidates have not been
+selected as production defaults.
+
+### Dependency-based rebuild scope
+
+The new [rebuild planner](../rebuild-planning.md) follows old and candidate
+runtime/build/check relations, versioned virtual providers, split outputs and
+explicit static/runtime rebuild rules across repository boundaries. It retains
+removed providers, ambiguous choices and unresolved candidate relations; cycles
+become ordered components requiring bootstrap review. Iterative graph traversal
+avoids the call-stack and 512-member limits of the current cohort edit path.
+
+Tests cover a complete 15,000-package chain and targeted provider/cycle/removal
+cases. An offline check against already stored x86 inventories produced 12,202
+affected package bases and 54 cyclic components for a glibc change. It exposed
+10 unresolved candidate relations and preserved seven repository-shadowed names
+under explicit repository ordering. This was a local analysis, with no new
+imports or remote work. It is not ABI evidence or native dependency closure.
+Integration of full proposals into chunked cohort revisions and artifact-level
+checks remains required.
+
+### Owned input verification at cohort transitions
+
+Cohort verification now checks each native build against its currently selected,
+independently reviewed input lock and complete retained ancestry. A signed
+bootstrap build remains component evidence and cannot satisfy the owned-input
+gate. The phase transaction also binds input selection, lock availability and
+the worker public key used during verification, so a concurrent review revocation
+cannot turn a previously prepared check into authorization.
+
+Regression checks cover shadow/bootstrapped builds, review revocation and stale
+transaction fences. The SQL compiles under D1's expression-depth budget of 100.
+Dependency closure, artifact ABI, reproducibility, install/upgrade/recovery and
+boot gates remain distinct required checks.

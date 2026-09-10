@@ -31,6 +31,7 @@ import { TestD1, asD1 } from './d1';
 import { proposeCatalogPackage, approveCatalogPackage } from '../src/lib/server/catalog-ownership';
 import { proposeCohort, getCohort } from '../src/lib/server/cohorts';
 import { changeCohortPhase } from '../src/lib/server/cohort-phases';
+import { evaluateCohortGate } from '../src/lib/server/cohort-gates';
 import { buildArtifacts, packageFilename } from '../src/lib/server/build-outputs';
 import { manifestDigest } from '../src/lib/server/policy';
 import { env as testEnv } from './release-fixtures';
@@ -649,6 +650,9 @@ for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} com
     expect((await db.prepare('SELECT output_contract_json FROM build_attempts WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ output_contract_json: string }>())?.output_contract_json).toBe(JSON.stringify(job.outputContract));
     expect(() => holder.exec('DELETE FROM build_attempt_results')).toThrow('immutable');
     const service = { ...testEnv(holder), ARTIFACTS: bucket as unknown as R2Bucket, PACKAGE_SIGNING_FINGERPRINT: 'a'.repeat(40) };
+    const verification = await evaluateCohortGate(service, { ...cohort, phase: 'verify' });
+    expect(verification.blockers.some((item) => item.code === 'native-evidence')).toBe(false);
+    expect(verification.blockers.filter((item) => item.code === 'check-owned-inputs').map((item) => item.pkgbase)).toEqual([seeded.name]);
     const intents: string[] = [];
     service.SIGNER = { async fetch(request: Request) {
       const { intentId } = await request.json() as { intentId: string };
@@ -681,6 +685,8 @@ for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} com
       await expect(proposeInputLock(inputEnv, actor, revision.id, await retained.retain(invalid), 'Cannot relabel bootstrap.')).rejects.toThrow('verified native origin');
       const review = (await db.prepare("SELECT id FROM input_lock_reviews WHERE lock_sha256=? AND kind='security' AND revoked_at IS NULL").bind(retained.lock.sha256).first<{ id: string }>())!;
       await revokeInputReview(inputEnv, security, retained.lock.sha256, review.id, 'INERT revocation test.');
+      expect((await evaluateCohortGate(service, { ...cohort, phase: 'verify' })).blockers.some((item) => item.code === 'native-evidence')).toBe(true);
+      expect(() => db.batch(verification.fences)).toThrow();
       expect(await db.prepare('SELECT COUNT(*) AS count FROM eligible_owned_inputs').first<{ count: number }>()).toEqual({ count: 0 });
       await expect(claimSigningIntent(service, intents[0])).rejects.toThrow();
       await reviewInputLock(inputEnv, security, retained.lock.sha256, 'security', 'INERT renewed review.');

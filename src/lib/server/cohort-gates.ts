@@ -14,6 +14,8 @@ import { buildArtifacts, cohortOutputContract, storedOutputContract } from './bu
 import { verifyOutputProvenance } from './build-output-evidence';
 import { getBuildForWorker } from './worker-protocol';
 import type { Worker } from '../model';
+import type { FrozenEvidence } from '../frozen-inputs';
+import { selectedInputLock } from './input-locks';
 
 export interface CohortMatrixRow {
   pkgbase: string; architecture: Architecture; required: boolean; status: string;
@@ -114,6 +116,7 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
         block('native-build', build?.error ?? `A successful native ${architecture} build is required.`, member.pkgbase, architecture, buildLink);
         continue;
       }
+      let ownedInputs = false;
       try {
         const joined = await joinedBuild(env, build.id);
         await assertReviewed(joined, env);
@@ -121,14 +124,25 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
           const worker = build.worker_id ? await env.DB.prepare('SELECT * FROM workers WHERE id=?').bind(build.worker_id).first<Worker>() : null;
           const lease = worker ? await getBuildForWorker(env.DB, build.id, worker.id) : null;
           if (!worker || worker.status !== 'active' || !lease || !build.provenance || !build.provenance_signature) throw new PolicyError(409, 'Native worker output evidence is missing.');
+          gate.fences.push(env.DB.prepare("INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*) FROM workers WHERE id=? AND public_key=? AND status='active' AND architecture=?")
+            .bind(worker.id, worker.public_key, architecture));
           const contract = storedOutputContract(lease);
           const expected = await cohortOutputContract(env.DB, { ...revision, pkgrel: revision.pkgrel ?? 1 }, architecture);
           if (canonicalJson(contract) !== canonicalJson(expected)) throw new PolicyError(409, 'Output evidence belongs to a different cohort revision.');
+          if (build.input_lock_sha256) {
+            const selected = await selectedInputLock(env, revision.id, architecture, expected!);
+            if (selected?.sha256 !== build.input_lock_sha256) throw new PolicyError(409, 'Native build no longer uses the selected reviewed input lock.');
+            gate.fences.push(env.DB.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*)
+              FROM build_input_selections s JOIN current_input_locks l ON l.sha256=s.lock_sha256
+              WHERE s.recipe_revision_id=? AND s.architecture=? AND s.cohort_id=? AND s.cohort_revision=? AND s.lock_sha256=?`)
+              .bind(revision.id, architecture, current.id, current.current_revision, selected.sha256));
+          }
           const artifacts = await buildArtifacts(env.DB, lease);
           await verifyOutputProvenance(worker, lease, artifacts, build.provenance, build.provenance_signature, build.installed_size ?? undefined);
           if (verifyArtifacts) for (const artifact of artifacts) await verifyR2Object(env, artifact.key, artifact.sha256, artifact.size);
-          const report = JSON.parse(build.provenance) as { outputs: { packageMetadata: { name: string; architecture: string } }[];
+          const report = JSON.parse(build.provenance) as { frozenInputs?: FrozenEvidence; outputs: { packageMetadata: { name: string; architecture: string } }[];
             runtimeTests: { analyses: { name: string; runtimeAnalysis: { payloadSha256: string } }[] }[] };
+          ownedInputs = Boolean(build.input_lock_sha256 && report.frozenInputs?.manifest.purpose === 'owned');
           const portable = new Set(report.outputs.filter((output) => output.packageMetadata.architecture === 'any').map((output) => output.packageMetadata.name));
           for (const analysis of report.runtimeTests.flatMap((test) => test.analyses).filter((item) => portable.has(item.name))) {
             const previous = portablePayloads.get(analysis.name);
@@ -139,16 +153,17 @@ export async function evaluateCohortGate(env: Env, current: CohortRow, verifyArt
           throw new PolicyError(409, 'Native binary evidence must bind every output to this exact cohort revision. Rebuild using a v2 worker.');
         } else await assertAttestation(joined, env);
       } catch (cause) { block('native-evidence', message(cause), member.pkgbase, architecture, buildLink); }
+      if (phaseIndex >= 3 && !ownedInputs) block('check-owned-inputs', 'Build and runtime environments must use the selected reviewed owned input lock. Bootstrap builds do not qualify.', member.pkgbase, architecture, buildLink);
       gate.fences.push(env.DB.prepare(`INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*) FROM builds
-        WHERE id=? AND status='succeeded' AND smoke_passed=1 AND artifact_sha256 IS ? AND provenance_signature IS ?`)
-        .bind(build.id, build.artifact_sha256, build.provenance_signature));
+        WHERE id=? AND status='succeeded' AND smoke_passed=1 AND artifact_sha256 IS ? AND provenance_signature IS ? AND input_lock_sha256 IS ?`)
+        .bind(build.id, build.artifact_sha256, build.provenance_signature, build.input_lock_sha256 ?? null));
       gate.fences.push(env.DB.prepare("INSERT INTO distribution_assertions(expected,actual) SELECT 1,COUNT(*) FROM workers WHERE id=? AND status='active' AND architecture=?")
         .bind(build.worker_id, architecture));
     }
   }
   if (phaseIndex >= 3) {
-    const kinds = phaseIndex === 3 ? ['owned-inputs', 'dependency-closure', 'abi', 'reproducibility']
-      : ['owned-inputs', 'dependency-closure', 'abi', 'reproducibility', 'install', 'upgrade', 'recovery', ...(manifest.lane === 'system' ? ['boot'] : [])];
+    const kinds = phaseIndex === 3 ? ['dependency-closure', 'abi', 'reproducibility']
+      : ['dependency-closure', 'abi', 'reproducibility', 'install', 'upgrade', 'recovery', ...(manifest.lane === 'system' ? ['boot'] : [])];
     for (const architecture of requiredArchitectures.filter((target) => manifest.members.some((member) => member.policy.architectures.includes(target)))) {
       for (const kind of kinds) block(`check-${kind}`, `Verified ${kind} evidence bound to this candidate is required.`, null, architecture);
     }
