@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: factory-native-acceptance
+  group: factory-native-acceptance-${{ github.sha }}
   cancel-in-progress: false
 
 env:

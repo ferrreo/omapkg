@@ -14,7 +14,7 @@ RUN install -d /tmp/electron-pkg \
     && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
       https://github.com/electron/electron/releases/download/v43.2.0/electron-v43.2.0-linux-arm64.zip \
       --output /tmp/electron-pkg/electron.zip \
-    && printf '%s  %s\\n' '50e1cdefbf8590e0d89b0276314a99c7b98e8eed732204c6f1a1c2a38376ed87' /tmp/electron-pkg/electron.zip | sha256sum -c -
+    && printf '%s  %s\n' '50e1cdefbf8590e0d89b0276314a99c7b98e8eed732204c6f1a1c2a38376ed87' /tmp/electron-pkg/electron.zip | sha256sum -c -
 COPY testdata/template-matrix/electron-arm64.PKGBUILD /tmp/electron-pkg/PKGBUILD
 RUN useradd --create-home matrix-builder \
     && chown -R matrix-builder:matrix-builder /tmp/electron-pkg \
