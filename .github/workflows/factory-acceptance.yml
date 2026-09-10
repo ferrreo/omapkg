@@ -199,25 +199,16 @@ jobs:
           mkdir -p "$FACTORY_EVIDENCE"
           upload="$RUNNER_TEMP/factory-upload-x86"
           mkdir -p "$upload"
-          copy_allowed() {
-            local root=$1
-            local depth=${2:-}
-            [[ -d "$root" ]] || return 0
-            while IFS= read -r -d '' file; do
-              relative=${file#"$FACTORY_EVIDENCE"/}
-              destination="$upload/$relative"
-              mkdir -p "$(dirname "$destination")"
-              sudo cat -- "$file" >"$destination"
-            done < <(
-              sudo find "$root" $depth -type f \
-                \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
-                -print0
-            )
-          }
-          copy_allowed "$FACTORY_EVIDENCE" -maxdepth 1
-          for root in "$FACTORY_EVIDENCE/template-matrix" "$FACTORY_EVIDENCE/oci" "$FACTORY_EVIDENCE/filesystem"; do
-            copy_allowed "$root"
-          done
+          while IFS= read -r -d '' file; do
+            relative=${file#"$FACTORY_EVIDENCE"/}
+            destination="$upload/$relative"
+            mkdir -p "$(dirname "$destination")"
+            sudo cat -- "$file" >"$destination"
+          done < <(
+            sudo find "$FACTORY_EVIDENCE" -type f \
+              \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
+              -print0
+          )
           (
             find "$upload" -type f -print0 \
               | sort -z \
@@ -400,25 +391,16 @@ jobs:
           mkdir -p "$FACTORY_EVIDENCE"
           upload="$RUNNER_TEMP/factory-upload-arm"
           mkdir -p "$upload"
-          copy_allowed() {
-            local root=$1
-            local depth=${2:-}
-            [[ -d "$root" ]] || return 0
-            while IFS= read -r -d '' file; do
-              relative=${file#"$FACTORY_EVIDENCE"/}
-              destination="$upload/$relative"
-              mkdir -p "$(dirname "$destination")"
-              sudo cat -- "$file" >"$destination"
-            done < <(
-              sudo find "$root" $depth -type f \
-                \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
-                -print0
-            )
-          }
-          copy_allowed "$FACTORY_EVIDENCE" -maxdepth 1
-          for root in "$FACTORY_EVIDENCE/template-matrix"; do
-            copy_allowed "$root"
-          done
+          while IFS= read -r -d '' file; do
+            relative=${file#"$FACTORY_EVIDENCE"/}
+            destination="$upload/$relative"
+            mkdir -p "$(dirname "$destination")"
+            sudo cat -- "$file" >"$destination"
+          done < <(
+            sudo find "$FACTORY_EVIDENCE" -type f \
+              \( -name '*.log' -o -name 'reproducibility-log.txt' -o -name '*.json' -o -name '*.tsv' -o -name '*.diff' \) \
+              -print0
+          )
           (
             find "$upload" -type f -print0 \
               | sort -z \
