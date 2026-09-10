@@ -116,7 +116,7 @@ jobs:
           OPR_WORKER_TEMPLATE_MATRIX_EVIDENCE="$FACTORY_EVIDENCE/template-matrix" \
             go test . -run '^(TestTemplateFamilyFixtureMatrixIsComplete|TestTemplateFamilyReproducibilityNativeOCI)$' -count=1 -v \
             2>&1 | tee "$FACTORY_EVIDENCE/template-matrix.log"
-          if grep -q '^--- SKIP:' "$FACTORY_EVIDENCE/template-matrix.log"; then
+          if grep -Eq '^[[:space:]]*--- SKIP:' "$FACTORY_EVIDENCE/template-matrix.log"; then
             echo 'template matrix reported an incomplete family' >&2
             exit 1
           fi
@@ -378,7 +378,7 @@ jobs:
           OPR_WORKER_TEMPLATE_MATRIX_EVIDENCE="$FACTORY_EVIDENCE/template-matrix" \
             go test . -run '^(TestTemplateFamilyFixtureMatrixIsComplete|TestTemplateFamilyReproducibilityNativeOCI)$' -count=1 -v \
             2>&1 | tee "$FACTORY_EVIDENCE/template-matrix.log"
-          if grep -q '^--- SKIP:' "$FACTORY_EVIDENCE/template-matrix.log"; then
+          if grep -Eq '^[[:space:]]*--- SKIP:' "$FACTORY_EVIDENCE/template-matrix.log"; then
             echo 'template matrix reported an incomplete family' >&2
             exit 1
           fi

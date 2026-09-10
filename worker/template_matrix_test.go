@@ -498,8 +498,9 @@ func rpmFixtureBytes(t *testing.T, architecture string) []byte {
 		rpmbuildRoot = "/tmp/rpmbuild"
 		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	}
-	args = append(args, "-v", mount, image, "rpmbuild", "-bb", rpmbuildRoot+"/SPECS/demo.spec")
-	if output, err := exec.Command(runtime, args...).CombinedOutput(); err != nil {
+	args = append(args, "-v", mount, image, "rpmbuild", "--define", "_topdir "+rpmbuildRoot, "-bb", rpmbuildRoot+"/SPECS/demo.spec")
+	output, err := exec.Command(runtime, args...).CombinedOutput()
+	if err != nil {
 		t.Skipf("incomplete: generate RPM fixture in pinned image: %v (%s)", err, output)
 	}
 	packageArchitecture := "x86_64"
@@ -509,7 +510,7 @@ func rpmFixtureBytes(t *testing.T, architecture string) []byte {
 	path := filepath.Join(root, "RPMS", packageArchitecture, "demo-1.0-1."+packageArchitecture+".rpm")
 	bytes, err := os.ReadFile(path)
 	if err != nil {
-		t.Skipf("incomplete: generated RPM fixture missing: %v", err)
+		t.Fatalf("generated RPM fixture missing: %v (%s)", err, output)
 	}
 	return bytes
 }
