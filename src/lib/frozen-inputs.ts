@@ -137,16 +137,21 @@ export async function assertFrozenEvidence(value: unknown, expected: { architect
       m.sourceDateEpoch !== expected.sourceDateEpoch || !m.helperImage.endsWith(`@${expected.imageDigest}`) || m.environments.length !== expected.environments.length) {
     throw new Error('Frozen input evidence differs from native build');
   }
-  const host = evidence.host;
-  exact(host, 'architecture,kernel,cpuInfoSha256,cpuModel,runtime,runtimeVersion,goVersion');
-  if (host.architecture !== expected.architecture || !INPUT_HASH.test(host.cpuInfoSha256) || !['podman', 'docker'].includes(host.runtime) ||
-      [host.kernel, host.cpuModel, host.runtimeVersion, host.goVersion].some((value) => typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value))) {
-    throw new Error('Native host evidence is missing or invalid');
-  }
+  assertNativeHost(evidence.host, expected.architecture);
   for (const [index, environment] of expected.environments.entries()) {
     if (environment.baseImage !== m.helperImage || !/^sha256:[a-f0-9]{64}$/.test(environment.preparedImage) ||
         !Array.isArray(environment.packages) || environment.packages.length !== m.environments[index].packageCount ||
         await sha256([...environment.packages].sort().join('\n') + '\n') !== m.environments[index].inventorySha256) throw new Error('Prepared environment differs from frozen inventory');
   }
   return evidence;
+}
+
+export function assertNativeHost(value: unknown, architecture: Architecture): FrozenEvidence['host'] {
+  exact(value, 'architecture,kernel,cpuInfoSha256,cpuModel,runtime,runtimeVersion,goVersion');
+  const host = value as FrozenEvidence['host'];
+  if (host.architecture !== architecture || !INPUT_HASH.test(host.cpuInfoSha256) || !['podman', 'docker'].includes(host.runtime) ||
+      [host.kernel, host.cpuModel, host.runtimeVersion, host.goVersion].some((value) => typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value))) {
+    throw new Error('Native host evidence is missing or invalid');
+  }
+  return host;
 }

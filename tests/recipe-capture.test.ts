@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseRecipeCapture, verifyRecipeCapture, } from '../src/lib/recipe-capture';
+import { parseRecipeCapture, verifyRecipeCapture } from '../src/lib/recipe-capture';
 import { parseSrcinfo, srcinfoField } from '../src/lib/srcinfo';
 import { retainRecipeCapture, getRecipeCapture } from '../src/lib/server/recipe-captures';
 import { retainInputBytes } from '../src/lib/server/input-objects';
@@ -12,6 +12,13 @@ import { beginCatalogImport, appendCatalogImport, sealCatalogImport } from '../s
 import type { ImportEntry, ImportManifest } from '../src/lib/imports';
 import { sha256 } from '../src/lib/server/db';
 import { TestD1, asD1 } from './d1';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { requestRecipeInspection, claimRecipeInspection, requireRecipeInspectionLease, recipeInspectionObject, completeRecipeInspection, listRecipeInspections } from '../src/lib/server/recipe-inspections';
+import { proposeCatalogPackage, approveCatalogPackage } from '../src/lib/server/catalog-ownership';
+import { registerBuildImage, setBuildImageEnabled } from '../src/lib/server/build-images';
+import type { Worker } from '../src/lib/model';
+import type { WorkerMetadata } from '../src/lib/server/worker-protocol';
+import { POST as inspectionInput } from '../src/routes/api/worker/inspections/[id]/inputs/[digest]/+server';
 
 const metadata = `pkgbase = demo
 \tpkgver = 1.4
@@ -47,7 +54,8 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
   const db = new TestD1(schema); const objects = new Map<string, Uint8Array>();
   const env = { DB: asD1(db), GITHUB_REPOSITORY: 'example/recipes', ARTIFACTS: {
     put: async (key: string, bytes: Uint8Array) => { objects.set(key, bytes.slice()); },
-    get: async (key: string) => { const bytes = objects.get(key); return bytes ? { size: bytes.length, arrayBuffer: async () => bytes.slice().buffer } : null; },
+    get: async (key: string) => { const bytes = objects.get(key); return bytes ? { size: bytes.length, arrayBuffer: async () => bytes.slice().buffer,
+      body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) } : null; },
   } as unknown as R2Bucket };
   const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] };
   db.exec("INSERT INTO team_memberships VALUES('1','system')");
@@ -100,6 +108,66 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     for (const table of ['catalog_packages', 'approvals', 'builds']) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>()).toEqual({ n: 0 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM catalog_import_entries WHERE disposition='unreviewed'").first<{ n: number }>()).toEqual({ n: 2 });
     expect(() => db.exec("UPDATE recipe_captures SET summary_json='{}'")).toThrow('immutable');
+
+    const imageRef = `registry.example.org/inspection@sha256:${'d'.repeat(64)}`;
+    const image = await registerBuildImage(env, { id: 'github:3', role: 'admin', areas: ['system'] }, { label: 'Test inspection image', image_ref: imageRef, architecture: 'x86_64', mirror: 'custom' });
+    await setBuildImageEnabled(env, { id: 'github:3', role: 'admin', areas: ['system'] }, image.id, true);
+    await expect(requestRecipeInspection(env, actor, ref.sha256, image.id, 'Inspect admitted source.')).rejects.toThrow('admission');
+    db.exec("INSERT INTO team_memberships VALUES('2','security')");
+    const policy = await proposeCatalogPackage(env.DB, actor, { schemaVersion: 1, pkgbase: 'demo', outputs: ['demo', 'demo-docs'], collection: 'omapkg', lane: 'opr', role: 'optional',
+      origin: 'aur-reference', upstreamUrl: 'https://example.org/demo.tar.xz', sourceKind: 'archive', description: 'Test source admission', license: 'MIT', ownerArea: 'system',
+      architectures: ['x86_64', 'aarch64'], artifactArchitecture: 'native', portableOutputs: ['demo-docs'], architectureExceptions: [], rebuildOn: [],
+      sourceReference: { url: 'https://github.com/example/recipes', commit } }, null, 'Local test source admission.');
+    await approveCatalogPackage(env.DB, actor, 'demo', policy.revision, policy.manifestSha256, 'area', 'Local source review.');
+    await expect(requestRecipeInspection(env, actor, ref.sha256, image.id, 'Inspect admitted source.')).rejects.toThrow('admission');
+    await approveCatalogPackage(env.DB, { id: 'github:2', role: 'security', areas: ['system'] }, 'demo', policy.revision, policy.manifestSha256, 'security', 'Local security source review.');
+    const queued = await requestRecipeInspection(env, actor, ref.sha256, image.id, 'Inspect admitted source.');
+    expect(await requestRecipeInspection(env, actor, ref.sha256, image.id, 'Identical retry.')).toEqual(queued);
+    const keys = generateKeyPairSync('ed25519');
+    const publicKey = Buffer.from(keys.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)).toString('base64');
+    db.prepare("INSERT INTO workers(id,name,architecture,public_key,status,enrolled_at,accepting_jobs) VALUES('inspection-worker','Inspection test','x86_64',?,'active',?,1)").bind(publicKey, Math.floor(Date.now() / 1000)).run();
+    const worker = db.prepare("SELECT * FROM workers WHERE id='inspection-worker'").first<Worker>()!;
+    const workerMetadata: WorkerMetadata = { version: 'test', runtime: 'podman', capabilities: ['recipe-inspection-v1'] };
+    expect(await claimRecipeInspection(env.DB, worker, { ...workerMetadata, capabilities: [] })).toBeNull();
+    const first = (await claimRecipeInspection(env.DB, worker, workerMetadata))!;
+    expect(first).toMatchObject({ kind: 'recipe-inspection', id: queued.id, recipeCapture: ref, attempt: 1 });
+    expect((await listRecipeInspections(env.DB, ref.sha256))[0]).not.toHaveProperty('lease_token');
+    const leased = await requireRecipeInspectionLease(env.DB, worker, first.id, first.leaseToken);
+    const recipeFile = manifest.files.find((file) => file.path === 'PKGBUILD')!;
+    expect((await recipeInspectionObject(env.DB, leased, recipeFile.object.sha256)).size).toBe(recipeFile.object.size);
+    const outside = await retainInputBytes(env, actor, new TextEncoder().encode('outside the leased recipe'));
+    await expect(recipeInspectionObject(env.DB, leased, outside.sha256)).rejects.toMatchObject({ status: 403 });
+    const requestInput = async (digest: string, token: string) => {
+      const path = `/api/worker/inspections/${first.id}/inputs/${digest}`;
+      const body = JSON.stringify({ leaseToken: token }), timestamp = String(Math.floor(Date.now() / 1000)), nonce = crypto.randomUUID().replaceAll('-', '');
+      const signature = Buffer.from(sign(null, Buffer.from(`POST\n${path}\n${timestamp}\n${nonce}\n${await sha256(body)}`), keys.privateKey)).toString('base64');
+      return inspectionInput({ params: { id: first.id, digest }, platform: { env }, url: new URL('https://example.org' + path),
+        request: new Request('https://example.org' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-OPR-Worker': worker.id, 'X-OPR-Timestamp': timestamp, 'X-OPR-Nonce': nonce, 'X-OPR-Signature': signature }, body }) } as unknown as Parameters<typeof inspectionInput>[0]);
+    };
+    expect(new Uint8Array(await (await requestInput(recipeFile.object.sha256, first.leaseToken)).arrayBuffer())).toEqual(await read(recipeFile.object));
+    await expect(requestInput(outside.sha256, first.leaseToken)).rejects.toMatchObject({ status: 403 });
+
+    db.exec("DELETE FROM team_memberships WHERE github_id='2'");
+    db.exec("INSERT INTO team_memberships VALUES('2','security')");
+    await expect(requireRecipeInspectionLease(env.DB, worker, first.id, first.leaseToken)).rejects.toThrow('unavailable');
+    await requestRecipeInspection(env, actor, ref.sha256, image.id, 'Retry after source authority restored.');
+    const second = (await claimRecipeInspection(env.DB, worker, workerMetadata))!;
+    expect(second.attempt).toBe(2); expect(second.leaseToken).not.toBe(first.leaseToken);
+    await expect(requestInput(recipeFile.object.sha256, first.leaseToken)).rejects.toMatchObject({ status: 409 });
+    const report = { schemaVersion: 1, kind: 'recipe-inspection', jobId: second.id, attempt: second.attempt, capture: ref, architecture: 'x86_64', imageRef,
+      host: { architecture: 'x86_64', kernel: 'test-only', cpuInfoSha256: 'e'.repeat(64), cpuModel: 'Protocol fixture', runtime: 'podman', runtimeVersion: 'test', goVersion: 'test' },
+      sandbox: { network: 'disabled', readOnly: true, user: '65534:65534' }, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      srcinfo: metadata, srcinfoSha256: await sha256(metadata), log: '', error: null };
+    const completion = (value = report) => { const report = JSON.stringify(value); return { leaseToken: second.leaseToken, report, signature: Buffer.from(sign(null, Buffer.from(report), keys.privateKey)).toString('base64') }; };
+    await expect(completeRecipeInspection(env.DB, worker, second.id, completion({ ...report, imageRef: `registry.example.org/changed@sha256:${'e'.repeat(64)}` }))).rejects.toThrow('scope');
+    await expect(completeRecipeInspection(env.DB, worker, second.id, { ...completion(), signature: Buffer.alloc(64).toString('base64') })).rejects.toThrow('signature');
+    expect(await completeRecipeInspection(env.DB, worker, second.id, completion())).toEqual({ status: 'succeeded' });
+    expect(await completeRecipeInspection(env.DB, worker, second.id, completion())).toEqual({ status: 'succeeded' });
+    expect((await listRecipeInspections(env.DB, ref.sha256))[0]).toMatchObject({ current: 1, status: 'succeeded' });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM recipe_inspection_results').first<{ n: number }>()).toEqual({ n: 1 });
+    for (const table of ['approvals', 'builds']) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>()).toEqual({ n: 0 });
+    db.exec("UPDATE workers SET status='revoked' WHERE id='inspection-worker'");
+    expect((await listRecipeInspections(env.DB, ref.sha256))[0].current).toBe(0);
     db.exec("DELETE FROM team_memberships WHERE github_id='1'");
     await expect(retainRecipeCapture(env, actor, ref, importId, 'opr-x86', 'Stale authority.')).rejects.toThrow();
 

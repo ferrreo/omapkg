@@ -42,7 +42,8 @@ function describeRecipe(value: RecipeCapture, files: Map<string, Uint8Array>): R
   const rebuildOn = Array.isArray(omarchy?.rebuild_on) && omarchy.rebuild_on.every((name) => typeof name === 'string' && /^[a-z0-9][a-z0-9@._+-]{0,63}$/.test(name))
     ? [...new Set(omarchy.rebuild_on as string[])].sort() : [];
   if (omarchy?.rebuild_on !== undefined && !rebuildOn.length) reviewNotes.push('Review unsupported or empty rebuild_on policy.');
-  const admissionRequired = ['aur-reference', 'alarm-reference'].includes(value.origin) || ['aur', 'alarm'].includes(String(omarchy?.source));
+  const admissionRequired = ['aur-reference', 'alarm-reference'].includes(value.origin) ||
+    (omarchy?.source !== undefined && !['local', 'arch'].includes(String(omarchy.source).toLowerCase()));
   if (admissionRequired) reviewNotes.push('AUR/ALARM reference needs human OPR admission before adaptation or execution.');
   const installFiles = metadata ? [...new Set(metadata.outputs.flatMap((output) => srcinfoField(metadata!, output, 'install')))].sort() : [];
   for (const path of installFiles) if (!value.files.some((file) => file.path === path)) reviewNotes.push(`Install script is missing from captured directory: ${path}`);
@@ -67,8 +68,7 @@ export async function retainRecipeCapture(env: CaptureEnv, actor: Actor | null, 
   try { manifest = parseRecipeCapture(await inputJson(env, ref, 512 * 1024), env.GITHUB_REPOSITORY); }
   catch (cause) { throw new PolicyError(400, cause instanceof Error ? cause.message : 'Invalid recipe capture'); }
   if (!captured.manifest.sources.some((source) => source.id === sourceId && source.status === 'captured')) throw new PolicyError(400, 'Select a captured source.');
-  const rows = await query<{ entry_json: string }>(env.DB, 'SELECT entry_json FROM catalog_import_entries WHERE import_id=? AND source_id=? AND pkgbase=? ORDER BY name LIMIT 257', importId, sourceId, manifest.pkgbase);
-  if (!rows.length || rows.length > 256) throw new PolicyError(409, 'Recipe has no captured output set, or exceeds 256 outputs.');
+  const entries = await recipeCapturedEntries(env.DB, importId, sourceId, manifest.pkgbase);
   let files: Map<string, Uint8Array>;
   try {
     files = await verifyRecipeCapture(manifest, async (ref) => {
@@ -80,7 +80,20 @@ export async function retainRecipeCapture(env: CaptureEnv, actor: Actor | null, 
     });
   } catch (cause) { throw new PolicyError(409, cause instanceof Error ? cause.message : 'Recipe proof failed'); }
   const summary = describeRecipe(manifest, files), metadata = summary.metadata;
-  const entries = rows.map((row) => JSON.parse(row.entry_json) as ImportEntry);
+  const comparison = compareRecipeMetadata(metadata, entries);
+  const timestamp = now();
+  await env.DB.batch([
+    env.DB.prepare('INSERT OR IGNORE INTO recipe_captures(sha256,pkgbase,manifest_json,summary_json,created_by,created_at) VALUES(?,?,?,?,?,?)')
+      .bind(ref.sha256, manifest.pkgbase, canonicalJson(manifest), canonicalJson(summary), human.id, timestamp),
+    env.DB.prepare('INSERT OR IGNORE INTO recipe_capture_links(import_id,source_id,pkgbase,capture_sha256,comparison_json,actor,reason,created_at) VALUES(?,?,?,?,?,?,?,?)')
+      .bind(importId, sourceId, manifest.pkgbase, ref.sha256, canonicalJson(comparison), human.id, message, timestamp),
+    env.DB.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,'recipe.capture_retained',?,?,? WHERE changes()=1`)
+      .bind(human.id, ref.sha256, canonicalJson({ importId, sourceId, pkgbase: manifest.pkgbase, matches: comparison.matches, reason: message }), timestamp),
+  ]);
+  return { sha256: ref.sha256, comparison };
+}
+
+export function compareRecipeMetadata(metadata: Srcinfo | null, entries: ImportEntry[]): RecipeComparison {
   const differences: string[] = [];
   for (const entry of entries) {
     const output = metadata?.outputs.find((output) => output.name === entry.name);
@@ -94,15 +107,13 @@ export async function retainRecipeCapture(env: CaptureEnv, actor: Actor | null, 
     }
   }
   for (const output of metadata?.outputs ?? []) if (!entries.some((entry) => entry.name === output.name)) differences.push(`Recipe output ${output.name} is absent from this captured source.`);
-  const comparison: RecipeComparison = { metadataPresent: metadata !== null, matches: metadata !== null && differences.length === 0, differences, capturedOutputs: entries.map((entry) => entry.name) };
-  const timestamp = now();
-  await env.DB.batch([
-    env.DB.prepare('INSERT OR IGNORE INTO recipe_captures(sha256,pkgbase,manifest_json,summary_json,created_by,created_at) VALUES(?,?,?,?,?,?)')
-      .bind(ref.sha256, manifest.pkgbase, canonicalJson(manifest), canonicalJson(summary), human.id, timestamp),
-    env.DB.prepare('INSERT OR IGNORE INTO recipe_capture_links(import_id,source_id,pkgbase,capture_sha256,comparison_json,actor,reason,created_at) VALUES(?,?,?,?,?,?,?,?)')
-      .bind(importId, sourceId, manifest.pkgbase, ref.sha256, canonicalJson(comparison), human.id, message, timestamp),
-    env.DB.prepare(`INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,'recipe.capture_retained',?,?,? WHERE changes()=1`)
-      .bind(human.id, ref.sha256, canonicalJson({ importId, sourceId, pkgbase: manifest.pkgbase, matches: comparison.matches, reason: message }), timestamp),
-  ]);
-  return { sha256: ref.sha256, comparison };
+  return { metadataPresent: metadata !== null, matches: metadata !== null && differences.length === 0, differences, capturedOutputs: entries.map((entry) => entry.name) };
+}
+
+export async function recipeCapturedEntries(db: D1Database, importId: string, sourceId: string, pkgbase: string): Promise<ImportEntry[]> {
+  const size = await db.prepare(`SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(entry_json AS BLOB))),0) AS bytes FROM catalog_import_entries
+    WHERE import_id=? AND source_id=? AND pkgbase=?`).bind(importId, sourceId, pkgbase).first<{ count: number; bytes: number }>();
+  if (!size?.count || size.count > 256 || size.bytes > 4 * 1024 * 1024) throw new PolicyError(409, 'Captured recipe mapping must contain 1–256 outputs within its 4 MiB metadata budget.');
+  const rows = await query<{ entry_json: string }>(db, 'SELECT entry_json FROM catalog_import_entries WHERE import_id=? AND source_id=? AND pkgbase=? ORDER BY name', importId, sourceId, pkgbase);
+  return rows.map((row) => JSON.parse(row.entry_json) as ImportEntry);
 }

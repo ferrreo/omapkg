@@ -9,7 +9,7 @@ with sqlite3.connect(":memory:") as db:
     for migration in sorted((root / "migrations").glob("*.sql")):
         db.executescript(migration.read_text())
     checked = 0
-    for name in ("workers.ts", "worker-protocol.ts", "native-signing.ts", "input-locks.ts"):
+    for name in ("workers.ts", "worker-protocol.ts", "native-signing.ts", "input-locks.ts", "recipe-inspections.ts"):
         source = (root / "src/lib/server" / name).read_text()
         for sql in re.findall(r"prepare\(`([^`]+)`\)", source):
             if "${" in sql:

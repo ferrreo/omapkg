@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from '@sveltejs/kit';
+import { claimRecipeInspection } from '$lib/server/recipe-inspections';
 import {
   MAX_JSON_BODY_BYTES,
   authenticateWorker,
@@ -22,6 +23,8 @@ export const POST: RequestHandler = async (event) => {
     if (Object.keys(input).some((key) => !['version', 'runtime', 'capabilities'].includes(key))) throw new WorkerProtocolError(400, 'Unexpected claim field');
     const metadata = parseWorkerMetadata(input);
     const auth = await authenticateWorker(env.DB, event.request, event.url.pathname + event.url.search, body);
+    const inspection = await claimRecipeInspection(env.DB, auth.worker, metadata);
+    if (inspection) return json({ job: inspection });
     return json({ job: await claimJob(env.DB, auth.worker, metadata, {
       ARTIFACTS: env.ARTIFACTS,
       PUBLIC_ORIGIN: env.PUBLIC_ORIGIN,

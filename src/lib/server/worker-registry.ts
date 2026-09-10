@@ -98,6 +98,11 @@ export async function issueRegistryCredentials(
   const build = await requireWorkerLease(env.DB, worker, buildId, token);
   if (build.architecture !== worker.architecture) protocolError(409, 'Worker architecture does not match build');
   const { imageRef } = workerImage(build);
+  return issueScopedRegistryCredentials(env, worker, build.id, imageRef);
+}
+
+/** Call only after validating the specific job lease and its immutable image. */
+export async function issueScopedRegistryCredentials(env: RegistryEnv, worker: Worker, jobId: string, imageRef: string): Promise<RegistryCredentials> {
   const account = configuredAccount(env);
   privateRegistryImage(imageRef, account);
   const apiToken = env.REGISTRY_API_TOKEN;
@@ -119,7 +124,7 @@ export async function issueRegistryCredentials(
   const credentials = await readCredentials(response, requestedExpiry);
   try {
     await env.DB.batch([
-      audit(env.DB, `worker:${worker.id}`, 'worker.registry_credentials_issued', build.id, {
+      audit(env.DB, `worker:${worker.id}`, 'worker.registry_credentials_issued', jobId, {
         registry: REGISTRY_HOST, imageRef, expiresAt: credentials.expiresAt
       })
     ]);

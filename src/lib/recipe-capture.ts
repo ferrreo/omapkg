@@ -89,7 +89,11 @@ export async function verifyRecipeCapture(value: RecipeCapture, read: (ref: Inpu
   const first = new TextDecoder('utf-8', { fatal: true }).decode(commit.subarray(0, commit.indexOf(10)));
   if (!/^tree [a-f0-9]{40}$/.test(first)) throw new Error('Recipe commit has no root tree');
   const trees = new Map<string, ReturnType<typeof parseTree>>();
-  for (const ref of value.git.trees) { const bytes = await load(ref); trees.set(gitHash('tree', bytes), parseTree(bytes)); }
+  for (const ref of value.git.trees) {
+    const bytes = await load(ref), sha = gitHash('tree', bytes);
+    if (trees.has(sha)) throw new Error('Duplicate recipe Git tree proof');
+    trees.set(sha, parseTree(bytes));
+  }
   const used = new Set<string>();
   const tree = (sha: string) => { const entries = trees.get(sha); if (!entries) throw new Error('Recipe Git tree proof is incomplete'); used.add(sha); return entries; };
   let root = first.slice(5);

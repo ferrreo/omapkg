@@ -137,6 +137,10 @@ func validInputObject(ref inputObject, max int64) bool {
 }
 
 func (c *Client) fetchInputObject(ctx context.Context, job Job, ref inputObject, destination string) error {
+	return c.fetchPrivateInput(ctx, "jobs", job, ref, destination)
+}
+
+func (c *Client) fetchPrivateInput(ctx context.Context, scope string, job Job, ref inputObject, destination string) error {
 	if !idPattern.MatchString(job.ID) || !validInputObject(ref, maxFrozenTransferBytes) {
 		return errors.New("invalid frozen input reference")
 	}
@@ -144,7 +148,7 @@ func (c *Client) fetchInputObject(ctx context.Context, job Job, ref inputObject,
 	if err != nil {
 		return err
 	}
-	resp, err := c.signedRequest(ctx, http.MethodPost, "/api/worker/jobs/"+url.PathEscape(job.ID)+"/inputs/"+ref.SHA256, body)
+	resp, err := c.signedRequest(ctx, http.MethodPost, "/api/worker/"+scope+"/"+url.PathEscape(job.ID)+"/inputs/"+ref.SHA256, body)
 	if err != nil {
 		return err
 	}
@@ -200,10 +204,18 @@ type nativeHostEvidence struct {
 }
 
 func (r *Runner) nativeInputEvidence(ctx context.Context, job Job) (*frozenInputEvidence, error) {
+	host, err := r.nativeHost(ctx, job.Architecture)
+	if err != nil {
+		return nil, err
+	}
+	return &frozenInputEvidence{Lock: *job.InputLock, Host: host}, nil
+}
+
+func (r *Runner) nativeHost(ctx context.Context, target string) (nativeHostEvidence, error) {
 	architecture := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
 	var kernel syscall.Utsname
 	if err := syscall.Uname(&kernel); err != nil {
-		return nil, err
+		return nativeHostEvidence{}, err
 	}
 	field := func(value []int8) string {
 		var result []byte
@@ -215,17 +227,20 @@ func (r *Runner) nativeInputEvidence(ctx context.Context, job Job) (*frozenInput
 		}
 		return string(result)
 	}
-	if architecture != job.Architecture || field(kernel.Machine[:]) != architecture {
-		return nil, errors.New("frozen builds require matching native worker and kernel architectures")
+	if architecture != target || field(kernel.Machine[:]) != architecture {
+		return nativeHostEvidence{}, errors.New("native jobs require matching worker and kernel architectures")
 	}
 	file, err := os.Open("/proc/cpuinfo")
 	if err != nil {
-		return nil, err
+		return nativeHostEvidence{}, err
 	}
 	info, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
 	file.Close()
 	if err != nil || len(info) == 0 || len(info) > 1<<20 {
-		return nil, errors.New("native CPU evidence is missing or oversized")
+		return nativeHostEvidence{}, errors.New("native CPU evidence is missing or oversized")
+	}
+	if cpuInfoArchitecture(info) != architecture {
+		return nativeHostEvidence{}, errors.New("native worker architecture differs from kernel CPU information")
 	}
 	model := ""
 	for _, line := range strings.Split(string(info), "\n") {
@@ -236,16 +251,36 @@ func (r *Runner) nativeInputEvidence(ctx context.Context, job Job) (*frozenInput
 		}
 	}
 	if len(model) > 256 {
-		return nil, errors.New("native CPU model is oversized")
+		return nativeHostEvidence{}, errors.New("native CPU model is oversized")
 	}
 	version, err := r.run(ctx, "--version")
 	if err != nil || len(version) > 1024 {
-		return nil, errors.New("container runtime version is unavailable")
+		return nativeHostEvidence{}, errors.New("container runtime version is unavailable")
 	}
-	return &frozenInputEvidence{Lock: *job.InputLock, Host: nativeHostEvidence{
+	return nativeHostEvidence{
 		Architecture: architecture, Kernel: field(kernel.Release[:]), CPUInfoSHA256: hashBytes(info), CPUModel: model,
 		Runtime: runtimeKind(r.Runtime), RuntimeVersion: strings.TrimSpace(version), GoVersion: runtime.Version(),
-	}}, nil
+	}, nil
+}
+
+// User-mode emulation can rewrite uname; procfs still describes the host kernel's CPU family.
+func cpuInfoArchitecture(info []byte) string {
+	var x86, arm bool
+	for _, line := range strings.Split(string(info), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		x86 = x86 || strings.TrimSpace(key) == "vendor_id"
+		arm = arm || (strings.TrimSpace(key) == "CPU architecture" && strings.TrimSpace(value) == "8")
+	}
+	if x86 && !arm {
+		return "x86_64"
+	}
+	if arm && !x86 {
+		return "aarch64"
+	}
+	return ""
 }
 
 func (inputs *materializedInputs) verifyEnvironment(name string, evidence environmentEvidence) error {
@@ -322,27 +357,7 @@ func materializeFrozenInputs(ctx context.Context, job Job, directory string, get
 		if err != nil {
 			return err
 		}
-		decoder := json.NewDecoder(strings.NewReader(string(data)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(target); err != nil {
-			return err
-		}
-		if decoder.Decode(new(any)) != io.EOF {
-			return errors.New("frozen input JSON has trailing data")
-		}
-		encoded, err := encodeJSON(target)
-		if err != nil {
-			return err
-		}
-		var canonical any
-		if err := json.Unmarshal(encoded, &canonical); err != nil {
-			return err
-		}
-		encoded, err = encodeJSON(canonical)
-		if err != nil || string(encoded) != string(data) {
-			return errors.New("frozen input JSON must use exact canonical fields")
-		}
-		return nil
+		return decodeCanonicalDocument(data, target)
 	}
 	result := &materializedInputs{Reference: *job.InputLock, Directory: directory, Environments: map[string][]frozenPackage{}}
 	if err := readJSON(*job.InputLock, 128<<10, &result.Manifest); err != nil {
@@ -588,3 +603,27 @@ cp "/inputs/$OPR_MAKEPKG" /etc/makepkg.conf
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 rm -f /etc/machine-id
 `
+
+func decodeCanonicalDocument(data []byte, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return errors.New("frozen input JSON has trailing data")
+	}
+	encoded, err := encodeJSON(target)
+	if err != nil {
+		return err
+	}
+	var canonical any
+	if err := json.Unmarshal(encoded, &canonical); err != nil {
+		return err
+	}
+	encoded, err = encodeJSON(canonical)
+	if err != nil || string(encoded) != string(data) {
+		return errors.New("frozen input JSON must use exact canonical fields")
+	}
+	return nil
+}

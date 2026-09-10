@@ -20,9 +20,14 @@ export const load: PageServerLoad = async (event) => {
     query<{ version: string; target: string }>(DB, "SELECT json_extract(entry_json,'$.version') AS version,target_architecture AS target FROM catalog_import_entries WHERE import_id=? AND name='omarchy'", event.params.id),
   ]);
   for (const comparison of comparisons) if (await sha256(comparison.report_json) !== comparison.report_sha256) error(409, 'Stored reconciliation integrity check failed.');
-  const recipeLinks = await query<{ source_id: string; pkgbase: string; capture_sha256: string; matches: number; metadata_present: number }>(DB,
+  const recipeLinks = await query<{ source_id: string; pkgbase: string; capture_sha256: string; matches: number; metadata_present: number; inspected: number }>(DB,
     `SELECT l.source_id,l.pkgbase,l.capture_sha256,json_extract(l.comparison_json,'$.matches') AS matches,
-      json_extract(l.comparison_json,'$.metadataPresent') AS metadata_present FROM recipe_capture_links l WHERE l.import_id=?
+      json_extract(l.comparison_json,'$.metadataPresent') AS metadata_present,
+      EXISTS(SELECT 1 FROM current_recipe_inspections i JOIN recipe_inspection_results r ON r.job_id=i.id AND r.attempt=i.attempt
+        JOIN recipe_inspection_attempts a ON a.job_id=i.id AND a.attempt=i.attempt JOIN workers w ON w.id=a.worker_id AND w.public_key=a.public_key AND w.status='active'
+        WHERE i.capture_sha256=l.capture_sha256 AND i.status='succeeded' AND r.error IS NULL AND r.metadata_json IS NOT NULL
+        AND i.architecture=(SELECT target_architecture FROM catalog_import_entries WHERE import_id=l.import_id AND source_id=l.source_id AND pkgbase=l.pkgbase LIMIT 1)) AS inspected
+      FROM recipe_capture_links l WHERE l.import_id=?
       AND EXISTS(SELECT 1 FROM json_each(?) scope WHERE json_extract(scope.value,'$.source')=l.source_id AND json_extract(scope.value,'$.pkgbase')=l.pkgbase)
       AND l.rowid=(SELECT latest.rowid FROM recipe_capture_links latest WHERE latest.import_id=l.import_id AND latest.source_id=l.source_id
         AND latest.pkgbase=l.pkgbase ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)`, event.params.id, JSON.stringify(entries.map((entry) => ({ source: entry.source_id, pkgbase: entry.pkgbase }))));

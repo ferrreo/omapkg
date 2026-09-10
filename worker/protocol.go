@@ -81,6 +81,7 @@ var supportedWorkerCapabilities = [...]string{
 	"runtime-analysis-v1",
 	"multi-output-v2",
 	"frozen-inputs-v1",
+	"recipe-inspection-v1",
 }
 
 func daemonMetadata(runtime string) (WorkerMetadata, error) {
@@ -134,6 +135,8 @@ type DependencyPackage struct {
 }
 
 type Job struct {
+	Kind                string             `json:"kind,omitempty"`
+	RecipeCapture       *inputObject       `json:"recipeCapture,omitempty"`
 	InputLock           *inputObject       `json:"inputLock,omitempty"`
 	OutputContract      *outputContract    `json:"outputContract,omitempty"`
 	Attempt             int64              `json:"attempt,omitempty"`
@@ -388,6 +391,9 @@ func validArchDependency(value string) bool {
 }
 
 func validateJob(job Job, cfg Config) error {
+	if job.Kind != "" || job.RecipeCapture != nil {
+		return errors.New("non-build job cannot use the build protocol")
+	}
 	if err := validateOutputContract(job); err != nil {
 		return err
 	}

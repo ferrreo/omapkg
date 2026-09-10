@@ -276,11 +276,19 @@ func (c *Client) claim(ctx context.Context) (*Job, error) {
 }
 
 func (c *Client) registryCredentials(ctx context.Context, jobID, leaseToken string) (RegistryCredentials, error) {
+	return c.registryCredentialsFor(ctx, "jobs", jobID, leaseToken)
+}
+
+func (c *Client) inspectionRegistryCredentials(ctx context.Context, jobID, leaseToken string) (RegistryCredentials, error) {
+	return c.registryCredentialsFor(ctx, "inspections", jobID, leaseToken)
+}
+
+func (c *Client) registryCredentialsFor(ctx context.Context, scope, jobID, leaseToken string) (RegistryCredentials, error) {
 	if !idPattern.MatchString(jobID) {
 		return RegistryCredentials{}, errors.New("invalid job ID")
 	}
 	var result RegistryCredentials
-	if err := c.doJSON(ctx, http.MethodPost, "/api/worker/jobs/"+url.PathEscape(jobID)+"/registry-credentials", HeartbeatRequest{LeaseToken: leaseToken}, &result); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/worker/"+scope+"/"+url.PathEscape(jobID)+"/registry-credentials", HeartbeatRequest{LeaseToken: leaseToken}, &result); err != nil {
 		return RegistryCredentials{}, err
 	}
 	if result.Registry != "registry.cloudflare.com" || len(result.Username) > 256 || len(result.Password) > 4096 || len(result.ExpiresAt) > 128 || result.Username == "" || result.Password == "" || strings.ContainsAny(result.Registry+result.Username+result.Password, "\x00\r\n") {

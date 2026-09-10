@@ -273,6 +273,9 @@ func heartbeatLoop(ctx context.Context, client *Client, job Job, status *heartbe
 }
 
 func runJob(parent context.Context, client *Client, runner *Runner, cfg Config, job Job) error {
+	if job.Kind == "recipe-inspection" {
+		return runRecipeInspection(parent, client, runner, cfg, job)
+	}
 	if err := validateJob(job, cfg); err != nil {
 		if job.ID != "" && job.LeaseToken != "" {
 			_ = reportFailure(parent, client, job, nil, err)

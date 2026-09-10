@@ -334,9 +334,41 @@ publication writes complete recipe directories in one tree commit with a
 non-forced ref update; byte substitution, stale parents, no-op retries and
 multiple coupled directories have runnable checks. Integrity checks and public
 recipe links share the recorded path. Preserved recipe adaptation, sandbox
-inspection, source archive preparation and full catalog qualification remain
+inspection, source archive preparation and full catalog qualification remained
 required before this capture evidence can become executable owned recipes.
 
 Validation passed: 235 application tests, Svelte checks with zero errors or
 warnings, pipeline TypeScript, production web build, the Python capture
 self-check, and the real browser upload/download flow described above.
+
+## Native source metadata inspection
+
+Migration 0037 adds a separate inspection queue with immutable worker attempts,
+signed reports, private source grants and live source/image/worker authority
+checks. Revocation fences leases. Workers verify the original Git directory and
+evaluate metadata in a native, unprivileged container with networking disabled
+and read-only recipe/root mounts. Successful inspection supplies source metadata
+for human review; it creates no package approval, build or release.
+
+All 131 original Omarchy recipe captures are now retained in local D1/R2 and
+linked to 489 captured source/snapshot records. The `yaru-icon-theme` directory
+correctly maps to package base `yaru`. The 54 captures without AUR admission
+requirements passed real native x86 inspection through the authenticated local
+coordinator and compiled Go worker. The other 77 remain unexecuted pending human
+source admission. The first `1password` attempt exposed makepkg's writable
+destination check; its signed failure remains retained, followed by a successful
+retry using temporary destinations. Original recipe bytes remain unchanged.
+
+The real browser verified signed success/failure downloads, exact original file
+downloads, private access and import comparison labels. Viewports at 320, 375,
+414, 768, 1440 and 1920 pixels passed. A separate native Git fixture checks
+non-root execution, network and filesystem isolation, executable files,
+symlinks and signed protocol completion. These local checks use labelled test
+identities and do not grant production admission.
+
+Validation passed: 235 application tests with 1,510 assertions, 12 signer tests,
+Go tests and vet, ARM cross-compilation, Svelte checks with zero errors/warnings,
+pipeline TypeScript, production web build, and 40 native D1 queries at expression
+depth 100. Native ARM inspection remains to be run. Preserved recipe adaptation,
+source archive/VCS/language-cache preparation, full inventory qualification,
+ABI cohorts, release/client integration and cutover remain open.
