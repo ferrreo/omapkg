@@ -180,6 +180,7 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const derivedLock = (await env.DB.prepare('SELECT derived_lock_sha256 FROM factory_derived_input_locks WHERE revision_id=?').bind(successor.id).first<{ derived_lock_sha256: string }>())!;
   expect(successorJob.revisionId).toBe(successor.id); expect(successorJob.inputLock?.sha256).toBe(derivedLock.derived_lock_sha256); expect(successorJob.inputLock?.sha256).not.toBe(frozen.lock.sha256);
   job = successorJob;
+  holder.prepare('UPDATE workers SET capabilities_json=capabilities_json WHERE id=?').bind(worker.id).run();
   expect(await sha256(new Uint8Array(await (await download(derivedLock.derived_lock_sha256)).arrayBuffer()))).toBe(derivedLock.derived_lock_sha256);
   await expect(download(frozen.lock.sha256)).rejects.toMatchObject({ status: 403 });
   await stopFactoryRun(env.DB, successorRun.id, 'Fixture successor claim complete.');
