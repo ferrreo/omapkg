@@ -506,7 +506,7 @@ export async function persistFactoryRevision(
       dependencies_json, make_dependencies_json, smoke_commands_json, architectures_json, build_images_json, pkgrel, source_date_epoch,
       image_digest, license, surface, description, explanation, sbom_json, lint_json,
       upstream_commit, pr_url, commit_sha, created_at, preserved_origin_revision_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(
         revision.id, revision.request_id, revision.version, revision.recipe, revision.recipe_sha256,
         revision.public_recipe ?? null, revision.public_recipe_sha256 ?? null, revision.manifest_sha256, revision.sources_json, revision.dependencies_json, revision.make_dependencies_json ?? '[]',

@@ -61,6 +61,18 @@ test('revision persistence rolls back when generation changes between read and w
   } finally { db.close(); }
 });
 
+test('private preserved successors persist all revision columns with their origin', async () => {
+  const db = new TestD1(readdirSync('migrations').filter((name) => name.endsWith('.sql')).sort().map((name) => readFileSync(`migrations/${name}`, 'utf8')).join('\n'));
+  try {
+    db.prepare("INSERT INTO requests(id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at,factory_run_id) VALUES('request-1','hello','https://example.org/hello.tar.gz','archive','system','MIT','github:1','generating',1,1,'generation')").run();
+    const parent = { revision: revision({ id: 'parent', manifest_sha256: 'a'.repeat(64) }) } as FactoryRevisionDraft;
+    await persistFactoryRevision(env(db), parent, 'factory', 'generation');
+    const successor = { revision: revision({ id: 'successor', manifest_sha256: 'b'.repeat(64), pkgrel: 2, preserved_origin_revision_id: 'parent' }) } as FactoryRevisionDraft;
+    await persistFactoryRevision(env(db), successor, 'factory', 'generation', { privateCandidate: true });
+    expect(db.prepare("SELECT preserved_origin_revision_id,pkgrel FROM revisions WHERE id='successor'").first<{ preserved_origin_revision_id: string; pkgrel: number }>()).toEqual({ preserved_origin_revision_id: 'parent', pkgrel: 2 });
+  } finally { db.close(); }
+});
+
 function revision(overrides: Partial<Revision> = {}): Revision {
   return {
     id: 'revision-1', request_id: 'request-1', version: '1.0.0', recipe: 'pkgname=hello\n', recipe_sha256: '', manifest_sha256: '',
