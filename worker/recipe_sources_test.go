@@ -114,10 +114,14 @@ func TestPreservedSourceObjectsBindOriginalTreeAndNativePlan(t *testing.T) {
 	if info, _ := os.Stat(filepath.Join(work, "fix.patch")); info.Mode().Perm() != 0o755 {
 		t.Fatal("original executable mode changed")
 	}
-	repaired := recipe + "# bounded repair successor\n"
+	repaired := strings.Replace(recipe, "pkgrel=1", "pkgrel=2", 1) + "# bounded repair successor\n"
 	repairedRef := object([]byte(repaired))
 	repairedJob := job
 	repairedJob.Recipe = repaired
+	repairedJob.Pkgrel = 2
+	contract := *job.OutputContract
+	contract.Outputs = []expectedOutput{{Name: "demo", FullVersion: "1.0-2", Architecture: "x86_64"}}
+	repairedJob.OutputContract = &contract
 	repairedJob.RecipeSHA256 = repairedRef.SHA256
 	repairedJob.PreservedRecipe = &preservedBuildInputs{Capture: captureRef, SourceBundle: job.PreservedRecipe.SourceBundle, Recipe: &repairedRef, Inspection: &struct {
 		SrcinfoSHA256 string            `json:"srcinfoSha256"`
@@ -129,6 +133,22 @@ func TestPreservedSourceObjectsBindOriginalTreeAndNativePlan(t *testing.T) {
 	}
 	if string(mustReadFile(t, filepath.Join(repairedWork, "PKGBUILD"))) != repaired || repairedMaterialized.Inputs.Recipe == nil || repairedMaterialized.Inputs.Inspection == nil {
 		t.Fatal("successor recipe override was not materialized with fresh inspection binding")
+	}
+	uninspected := repairedJob
+	uninspectedInputs := *repairedJob.PreservedRecipe
+	uninspectedInputs.Inspection = nil
+	uninspected.PreservedRecipe = &uninspectedInputs
+	if _, _, err := load(uninspected, false); err == nil {
+		t.Fatal("accepted release change without fresh inspection")
+	}
+	for _, version := range []string{"2.0-2", "1:1.0-2", "1.0-0"} {
+		changed := repairedJob
+		changedContract := *repairedJob.OutputContract
+		changedContract.Outputs = []expectedOutput{{Name: "demo", FullVersion: version, Architecture: "x86_64"}}
+		changed.OutputContract = &changedContract
+		if _, _, err := load(changed, false); err == nil {
+			t.Fatalf("accepted changed source version %s", version)
+		}
 	}
 	if _, _, err := load(job, true); err == nil {
 		t.Fatal("accepted substituted recipe bytes")

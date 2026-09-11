@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -317,8 +318,18 @@ func materializePreservedRecipe(ctx context.Context, job Job, directory, workdir
 		plan.Inspection.Attempt < 1 || !sha256Pattern.MatchString(plan.Inspection.ReportSHA256) || !sha256Pattern.MatchString(plan.Inspection.SrcinfoSHA256) {
 		return nil, errors.New("source plan differs from reviewed native scope")
 	}
+	repairVersion := ""
+	if job.PreservedRecipe.Recipe != nil && job.PreservedRecipe.Inspection != nil {
+		parts := regexp.MustCompile(`^(.+)-([1-9][0-9]{0,3})(?:\.[1-9][0-9]{0,3})?$`).FindStringSubmatch(plan.Version)
+		if len(parts) == 3 {
+			previousRelease, _ := strconv.ParseInt(parts[2], 10, 64)
+			if job.Pkgrel > previousRelease {
+				repairVersion = fmt.Sprintf("%s-%d", parts[1], job.Pkgrel)
+			}
+		}
+	}
 	for _, output := range job.OutputContract.Outputs {
-		if output.FullVersion != plan.Version {
+		if output.FullVersion != plan.Version && (repairVersion == "" || output.FullVersion != repairVersion) {
 			return nil, errors.New("source plan version differs from reviewed outputs")
 		}
 	}

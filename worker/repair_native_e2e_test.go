@@ -146,7 +146,7 @@ func TestPreservedRepairNativeRunner(t *testing.T) {
 	captureBytes := repairCanonical(capture)
 	captureRef := object(captureBytes)
 	srcinfo := "pkgbase = opr-repair-fixture\n\tpkgver = 1.0\n\tpkgrel = 2\n\tarch = x86_64\n\tlicense = MIT\n\npkgname = opr-repair-fixture\n"
-	plan := recipeSourcePlan{SchemaVersion: 1, Kind: "recipe-source-plan", Capture: captureRef, Pkgbase: "opr-repair-fixture", Version: "1.0-2", Architecture: "x86_64", Sources: []plannedRecipeSource{}, ValidPGPKeys: []string{}}
+	plan := recipeSourcePlan{SchemaVersion: 1, Kind: "recipe-source-plan", Capture: captureRef, Pkgbase: "opr-repair-fixture", Version: "1.0-1", Architecture: "x86_64", Sources: []plannedRecipeSource{}, ValidPGPKeys: []string{}}
 	plan.Inspection.JobID, plan.Inspection.Attempt, plan.Inspection.ReportSHA256, plan.Inspection.SrcinfoSHA256 = "repair-inspection", 1, hashBytes([]byte("repair-report")), hashBytes([]byte(srcinfo))
 	planRef := object(repairCanonical(plan))
 	bundle := recipeSourceBundle{SchemaVersion: 1, Kind: "recipe-source-bundle", Plan: planRef, Sources: []retainedRecipeSource{}, Caches: []struct {
