@@ -931,5 +931,21 @@ native builds, reviews, and cohort publication. The [demonstration record](../bo
 contains three captured metadata records, successful GNU Hello builds on both
 native architectures, GNU Which on x86, retained failure/recovery history,
 reviewed recipes, and verifiable dossier exports. Publication is **not complete**:
-the application records an unresolved owned dependency, and production has no
-owned input locks or qualified System baseline. Those gates were not bypassed.
+the application requires cohort-bound native build evidence, and production
+has no owned input locks or qualified System baseline. Those gates were not bypassed.
+
+Web correction `c361ce0` is deployed at 100% as version
+`8bf09e41-42c8-498e-bf9e-de67ec86076e`. It retires dependency findings from
+superseded recipes. The refreshed cohort passed planning and recipe review,
+then correctly stopped at missing cohort-bound build evidence. Validation
+passed 344 application tests and 16 signer tests (15,023 assertions; two opt-in
+fixtures skipped), with zero Svelte errors or warnings. Signer and pipeline
+versions remain as recorded above.
+
+Native image acceptance [34551134781](https://github.com/ferrreo/omapkg/actions/runs/34551134781)
+passed on both architectures after fixture path and archive corrections. Each
+native target reproduced its filesystem image, then passed actual worker
+construction, signature verification, and streamed upload. This closes the
+factory image execution acceptance gap, not the separate production owned-System
+bootstrap and cohort qualification prerequisites. Full release publication
+remains outstanding.
