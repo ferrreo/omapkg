@@ -386,7 +386,8 @@ export async function signingRequest(env: Env, input: {
 
   if (!response.ok) {
     await env.DB.prepare("UPDATE signing_intents SET status='failed' WHERE id=? AND status='pending'").bind(intentId).run();
-    fail(503, `Package signing service rejected request (${response.status}).`);
+    const detail = await response.json().catch(() => null) as { error?: unknown } | null;
+    fail(503, `Package signing service rejected request (${response.status}).${typeof detail?.error === 'string' ? ` ${detail.error.slice(0, 1000)}` : ''}`);
   }
 
   let result: Record<string, unknown>;
