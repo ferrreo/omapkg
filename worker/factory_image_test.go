@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -118,7 +119,11 @@ func TestFactoryImageStartupValidationChecksScriptAndBuilderImage(t *testing.T) 
 		}
 	}
 	imageDigest := "sha256:" + strings.Repeat("a", 64)
-	imageRuntime := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo podman; exit 0; fi\nif [ \"$1\" = image ] && [ \"$2\" = inspect ]; then echo '" + imageDigest + "\tlinux\tamd64'; exit 0; fi\nexit 1\n"
+	otherArchitecture := "arm64"
+	if runtime.GOARCH == "arm64" {
+		otherArchitecture = "amd64"
+	}
+	imageRuntime := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo podman; exit 0; fi\nif [ \"$1\" = image ] && [ \"$2\" = inspect ]; then echo '" + imageDigest + "\tlinux\t" + runtime.GOARCH + "'; exit 0; fi\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte(imageRuntime), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +135,7 @@ func TestFactoryImageStartupValidationChecksScriptAndBuilderImage(t *testing.T) 
 	}
 	cfg := testConfig(t, dir, testKey(t))
 	cfg.FactoryImage = true
+	cfg.Architecture = map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
 	cfg.ImageDigest = imageDigest
 	cfg.Image = "localhost/opr-builder@" + imageDigest
 	cfg.FactoryImageBuilderPath = builder
@@ -157,7 +163,7 @@ func TestFactoryImageStartupValidationChecksScriptAndBuilderImage(t *testing.T) 
 	if err := os.WriteFile(builder, builderBytes, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo podman; exit 0; fi\nif [ \"$1\" = image ] && [ \"$2\" = inspect ]; then echo '"+imageDigest+"\tlinux\tarm64'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo podman; exit 0; fi\nif [ \"$1\" = image ] && [ \"$2\" = inspect ]; then echo '"+imageDigest+"\tlinux\t"+otherArchitecture+"'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "platform") {
