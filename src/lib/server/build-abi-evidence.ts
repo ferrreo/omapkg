@@ -47,7 +47,10 @@ export async function uploadAbiEvidence(env: Storage, worker: Worker, buildId: s
     SELECT id,attempt,?,?,?,?,?,?,?,?,? FROM builds WHERE id=? AND attempt=? AND worker_id=? AND lease_token=? AND status='leased' AND lease_expires_at>?
     AND output_contract_json=? AND EXISTS(SELECT 1 FROM workers WHERE id=? AND public_key=? AND status='active')
     AND revision_id=(SELECT r.id FROM revisions r WHERE r.request_id=(SELECT request_id FROM revisions WHERE id=builds.revision_id) ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1)
-    AND (SELECT COUNT(DISTINCT kind) FROM approvals WHERE revision_id=builds.revision_id AND manifest_sha256=(SELECT manifest_sha256 FROM revisions WHERE id=builds.revision_id) AND revoked_at IS NULL)=2
+    AND (builds.private_candidate=1 AND EXISTS (SELECT 1 FROM factory_runs fr JOIN factory_run_attempts fa ON fa.run_id=fr.id AND fa.attempt=fr.current_attempt
+      WHERE fr.id=builds.factory_run_id AND fr.status='running' AND fr.current_attempt=builds.factory_attempt AND fr.lease_expires_at>unixepoch()
+        AND fa.status='running' AND fa.lease_expires_at>unixepoch() AND fa.candidate_revision_id=builds.revision_id)
+      OR builds.private_candidate=0 AND (SELECT COUNT(DISTINCT kind) FROM approvals WHERE revision_id=builds.revision_id AND manifest_sha256=(SELECT manifest_sha256 FROM revisions WHERE id=builds.revision_id) AND revoked_at IS NULL)=2)
     AND (SELECT COUNT(*) FROM build_abi_evidence e WHERE e.build_id=builds.id AND e.attempt=builds.attempt)<4096`)
     .bind(digest, bytes.length, document.artifactSha256, document.kind, document.kind === 'abi-records' ? document.start : 0,
       files, symbols, document.kind === 'abi-inventory' ? text : null, now(), build.id, build.attempt, worker.id, token, now(), build.output_contract_json, worker.id, worker.public_key).run();

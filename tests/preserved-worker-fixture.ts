@@ -15,6 +15,7 @@ import { proposeCohort, getCohort } from '../src/lib/server/cohorts';
 import { changeCohortPhase } from '../src/lib/server/cohort-phases';
 import { proposeInputLock, reviewInputLock, selectInputLock } from '../src/lib/server/input-locks';
 import { POST as downloadInput } from '../src/routes/api/worker/jobs/[id]/inputs/[digest]/+server';
+import { uploadAbiEvidence } from '../src/lib/server/build-abi-evidence';
 import { nativeBuildStatement, currentNativeBuild } from '../src/lib/server/native-signing';
 import { manifestDigest } from '../src/lib/server/policy';
 import { deriveFactoryInputLocks, deriveFactoryRevisionBinding } from '../src/lib/server/preserved-factory';
@@ -183,6 +184,12 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   holder.prepare('UPDATE workers SET capabilities_json=capabilities_json WHERE id=?').bind(worker.id).run();
   expect(await sha256(new Uint8Array(await (await download(derivedLock.derived_lock_sha256)).arrayBuffer()))).toBe(derivedLock.derived_lock_sha256);
   await expect(download(frozen.lock.sha256)).rejects.toMatchObject({ status: 403 });
+  const privateArtifact = await uploadArtifact(env.DB, env.ARTIFACTS, worker, job.id, job.leaseToken,
+    packageFilename(job.outputContract!.outputs[0]), new TextEncoder().encode('INERT private output'));
+  const abiBytes = new TextEncoder().encode(canonicalJson({ schemaVersion: 1, kind: 'abi-records', artifactSha256: privateArtifact.sha256, start: 0,
+    records: [{ kind: 'file', path: 'usr/share/fixture', sha256: privateArtifact.sha256, type: '0', mode: 420, link: '', nativeKind: null, elf: null }] }));
+  const abiSha = await sha256(abiBytes);
+  expect(await uploadAbiEvidence(env, worker, job.id, job.leaseToken, abiSha, abiBytes)).toEqual({ sha256: abiSha, size: abiBytes.length });
   await stopFactoryRun(env.DB, successorRun.id, 'Fixture successor claim complete.');
   job = originalJob;
   await expect(rejectRequest(env as Env, { ...actor, areas: ['desktop'] }, revision.request_id, 'Wrong owner.')).rejects.toMatchObject({ status: 403 });
