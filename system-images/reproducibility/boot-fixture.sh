@@ -142,7 +142,7 @@ jq -cS -n --arg candidateId fixture-candidate --arg architecture "$architecture"
 gpg --batch --no-tty --yes --homedir "$gpg_home" --detach-sign --local-user "$fingerprint" "$lock"
 
 context_archive="$results/system-context.tar"
-(cd "$fixture" && bsdtar --format=ustar --mtime "@$epoch" --numeric-owner -cf "$context_archive" candidate-lock.json candidate-lock.json.sig system.json system.json.sig opr.json opr.json.sig transaction.json transaction.json.sig packages)
+(cd "$fixture" && { printf '%s\0' candidate-lock.json candidate-lock.json.sig system.json system.json.sig opr.json opr.json.sig transaction.json transaction.json.sig; find packages -type f -print0; } | sort -z | bsdtar --null --no-recursion --format=ustar --mtime "@$epoch" --numeric-owner -cf "$context_archive" -T -)
 system_worker_fixture="$results/system-worker"
 mkdir -p -- "$system_worker_fixture"
 cp -- "$profile" "$system_worker_fixture/profile.json"

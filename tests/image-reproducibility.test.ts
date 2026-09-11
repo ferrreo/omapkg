@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -192,4 +192,30 @@ test('missing boot inputs are incomplete instead of a skipped pass', () => {
   } finally {
     rmSync(output, { recursive: true, force: true });
   }
+});
+
+
+test.skipIf(!Bun.which('bsdtar'))('system worker context excludes repository alias symlinks', () => {
+  const builder = readFileSync(filesystemFixture, 'utf8');
+  const command = builder.split('\n').find((line) => line.startsWith('(cd "$fixture"'));
+  expect(command).toBeDefined();
+  const directory = mkdtempSync(join(tmpdir(), 'omapkg-context-'));
+  try {
+    const fixture = join(directory, 'fixture');
+    mkdirSync(join(fixture, 'packages'), { recursive: true });
+    for (const name of ['candidate-lock', 'system', 'opr', 'transaction']) {
+      writeFileSync(join(fixture, name + '.json'), '{}');
+      writeFileSync(join(fixture, name + '.json.sig'), 'signature');
+    }
+    writeFileSync(join(fixture, 'packages/repository.db.tar.gz'), 'database');
+    symlinkSync('repository.db.tar.gz', join(fixture, 'packages/repository.db'));
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+fixture="$1"
+context_archive="$2"
+epoch=1700000000
+${command}
+bsdtar -tf "$context_archive"`, '--', fixture, join(directory, 'context.tar')], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim().split('\n')).toEqual(['candidate-lock.json', 'candidate-lock.json.sig', 'opr.json', 'opr.json.sig', 'packages/repository.db.tar.gz', 'system.json', 'system.json.sig', 'transaction.json', 'transaction.json.sig']);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
