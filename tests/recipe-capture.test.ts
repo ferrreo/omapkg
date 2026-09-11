@@ -244,7 +244,7 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
 
     await startFactoryRun(env.DB, { id: 'first-inspection-run', targetKind: 'preserved', targetId: 'demo', unitKey: 'first-inspection', policy: {}, createdBy: actor.id });
     const firstInspection = await requestFactoryRecipeInspection(env, 'first-inspection-run', 1, ref.sha256, image.id, repairOverride, 'Inspect the first candidate.\nBefore an attempt is reserved.');
-    expect(await env.DB.prepare('SELECT reason FROM recipe_inspections WHERE id=?').bind(firstInspection.id).first()).toEqual({ reason: 'Inspect the first candidate. Before an attempt is reserved.' });
+    expect(await env.DB.prepare('SELECT reason FROM recipe_inspections WHERE id=?').bind(firstInspection.id).first<{ reason: string }>()).toEqual({ reason: 'Inspect the first candidate. Before an attempt is reserved.' });
     const firstInspectionLease = (await claimRecipeInspection(env.DB, worker, overrideMetadata))!;
     expect(firstInspectionLease).toMatchObject({ id: firstInspection.id, factoryRunId: 'first-inspection-run', factoryAttempt: 1 });
     await stopFactoryRun(env.DB, 'first-inspection-run', 'First-inspection fixture complete.');
