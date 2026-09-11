@@ -184,12 +184,29 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   holder.prepare('UPDATE workers SET capabilities_json=capabilities_json WHERE id=?').bind(worker.id).run();
   expect(await sha256(new Uint8Array(await (await download(derivedLock.derived_lock_sha256)).arrayBuffer()))).toBe(derivedLock.derived_lock_sha256);
   await expect(download(frozen.lock.sha256)).rejects.toMatchObject({ status: 403 });
-  const privateArtifact = await uploadArtifact(env.DB, env.ARTIFACTS, worker, job.id, job.leaseToken,
-    packageFilename(job.outputContract!.outputs[0]), new TextEncoder().encode('INERT private output'));
+  const privateArtifacts = await Promise.all(job.outputContract!.outputs.map(output => uploadArtifact(env.DB, env.ARTIFACTS, worker, job.id, job.leaseToken,
+    packageFilename(output), new TextEncoder().encode('INERT private output ' + output.name))));
+  const privateArtifact = privateArtifacts[0];
   const abiBytes = new TextEncoder().encode(canonicalJson({ schemaVersion: 1, kind: 'abi-records', artifactSha256: privateArtifact.sha256, start: 0,
     records: [{ kind: 'file', path: 'usr/share/fixture', sha256: privateArtifact.sha256, type: '0', mode: 420, link: '', nativeKind: null, elf: null }] }));
   const abiSha = await sha256(abiBytes);
   expect(await uploadAbiEvidence(env, worker, job.id, job.leaseToken, abiSha, abiBytes)).toEqual({ sha256: abiSha, size: abiBytes.length });
+  const privateReport = structuredClone(report) as any;
+  Object.assign(privateReport, { buildId: job.id, revisionId: job.revisionId, attempt: job.attempt, outputContract: job.outputContract,
+    recipeSha256: job.recipeSha256, preservedRecipe: preservedBuildInputs(successor, 'x86_64'),
+    factoryRunId: job.factoryRunId, factoryAttempt: job.factoryAttempt, factoryInputSha256: job.factoryInputSha256 });
+  privateReport.reproducibility.execution = { runId: job.factoryRunId, attempt: job.factoryAttempt, inputSha256: job.factoryInputSha256 };
+  privateReport.frozenInputs.lock = job.inputLock;
+  privateReport.frozenInputs.manifest.recipeSha256 = job.recipeSha256;
+  Object.assign(privateReport.reproducibility.inputs, { recipeSha256: job.recipeSha256, inputLockSha256: job.inputLock!.sha256 });
+  const privateFiles = privateArtifacts.map(({ filename, size, sha256 }) => ({ filename, size, sha256 })).sort((a, b) => a.filename.localeCompare(b.filename));
+  privateReport.reproducibility.outputs.files = privateFiles;
+  privateReport.reproducibility.outputs.setSha256 = await sha256(canonicalJson(privateFiles));
+  for (const output of privateReport.outputs) output.artifactSha256 = privateArtifacts.find(item => item.filename === output.filename)!.sha256;
+  const privateProvenance = JSON.stringify(privateReport);
+  expect(await completeJob(env.DB, env.ARTIFACTS, worker, job.id, { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20,
+    smokePassed: true, artifacts: privateArtifacts, provenance: privateProvenance,
+    provenanceSignature: Buffer.from(sign(null, Buffer.from(privateProvenance), keys.privateKey)).toString('base64') })).toEqual({ status: 'succeeded', idempotent: false, privateCandidate: true });
   await stopFactoryRun(env.DB, successorRun.id, 'Fixture successor claim complete.');
   job = originalJob;
   await expect(rejectRequest(env as Env, { ...actor, areas: ['desktop'] }, revision.request_id, 'Wrong owner.')).rejects.toMatchObject({ status: 403 });

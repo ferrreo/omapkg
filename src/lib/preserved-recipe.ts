@@ -30,7 +30,7 @@ export function parsePreservedBuildInputs(value: unknown): PreservedBuildInputs 
   return inputs;
 }
 
-export function preservedBuildInputs(revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json'>, target: Architecture): PreservedBuildInputs | null {
+export function preservedBuildInputs(revision: Pick<Revision, 'id' | 'sbom_json' | 'architectures_json' | 'preserved_origin_revision_id'>, target: Architecture): PreservedBuildInputs | null {
   const evidence = preservedRecipe(revision);
 
   if (!evidence) return null;

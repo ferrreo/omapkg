@@ -167,7 +167,7 @@ const INTENT_QUERY = `
     r.id, r.id AS revision_id, r.request_id, r.version, r.recipe, r.recipe_sha256, r.public_recipe, r.public_recipe_sha256, r.manifest_sha256,
     r.sources_json, r.dependencies_json, r.make_dependencies_json, r.smoke_commands_json, r.architectures_json, r.build_images_json,
     r.pkgrel, r.source_date_epoch, r.image_digest, r.license, r.surface, r.description, r.explanation,
-    r.sbom_json, r.lint_json, r.upstream_commit, r.pr_url, r.commit_sha, r.created_at,
+    r.sbom_json, r.lint_json, r.upstream_commit, r.pr_url, r.commit_sha, r.created_at, r.preserved_origin_revision_id,
     q.status AS request_status, q.name AS request_name,
     (SELECT latest.id FROM revisions latest WHERE latest.request_id=r.request_id
       ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1) AS latest_revision_id,

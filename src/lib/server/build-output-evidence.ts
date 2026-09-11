@@ -25,7 +25,7 @@ export async function verifyOutputProvenance(worker: Pick<Worker, 'id' | 'public
 
   const { imageDigest } = workerImage(build);
   const revision = parseRevisionForJob(build);
-  const preserved = preservedBuildInputs({ id: build.revision_id, sbom_json: build.revision_sbom_json, architectures_json: build.revision_architectures_json }, build.architecture);
+  const preserved = preservedBuildInputs({ id: build.revision_id, preserved_origin_revision_id: build.revision_preserved_origin_revision_id ?? null, sbom_json: build.revision_sbom_json, architectures_json: build.revision_architectures_json }, build.architecture);
 
   if (!sameJson(report.preservedRecipe ?? null, preserved) || !sameJson(build.preserved_inputs_json ? JSON.parse(build.preserved_inputs_json) : null, preserved)) {
     throw new WorkerProtocolError(409, 'Preserved source inputs differ from reviewed attempt');
