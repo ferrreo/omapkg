@@ -189,6 +189,7 @@ export async function createFactorySuccessorDraft(
   const origin = revision.preserved_origin_revision_id ?? revision.id;
   const failureSha256 = await sha256(canonicalJson(failure));
   const originalEvidence = readOprEvidence(JSON.parse(revision.sbom_json)) ?? {};
+  if (originalEvidence.packageVersion) originalEvidence.packageVersion = { ...originalEvidence.packageVersion as Record<string, unknown>, pkgrel: String(nextPkgrel) };
   const sources = evidence ? [] : JSON.parse(revision.sources_json) as FactoryCandidate['sources'];
   const candidate: FactoryCandidate = {
     request: { id: request.id, name: request.name, descriptionHint: request.description ?? '', upstreamUrl: request.upstream_url, sourceKind: request.source_kind, area: request.area, declaredLicense: request.declared_license },
