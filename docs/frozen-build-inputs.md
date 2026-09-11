@@ -78,6 +78,21 @@ A failed or changed capture needs a new output directory.
 `--helper-shell-analysis` selects the explicit helper analysis option when preparing
 a new capture; otherwise the build package list must include ShellCheck.
 
+For a native hosted capture, copy `.github/workflows/bootstrap-input-capture.yml`
+and `services/pipeline/capture-bootstrap-inputs.py` into a private repository and
+dispatch **Private bootstrap input capture** there. Supply the reviewed helper, recipe and cohort checksums,
+source timestamp, and explicit build/runtime roots. The workflow retains one
+runtime environment, limits each root list to 32 packages and transfer to 3 GiB,
+and expires its private artifact after three days. It uses the existing capture
+script and requires a short-lived, pull-only `REGISTRY_NATIVE_TEST_AUTH` secret.
+Remove that secret after the run; retain the resulting objects through the app
+before reviewing the lock. The capture grants no build or publication approval.
+
+The restricted capture container omits `DownloadUser` so pacman does not attempt
+user switching with dropped capabilities. Package signatures remain required. Every root also needs the worker’s installation
+utilities; include `bash`, `coreutils`, `pacman`, `gawk` and `grep` in runtime roots
+even when the package itself has no runtime dependencies.
+
 From `worker/`, run:
 
 ```sh

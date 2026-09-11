@@ -1,0 +1,109 @@
+name: Private bootstrap input capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Native capture architecture
+        type: choice
+        options: [aarch64, x86_64]
+        required: true
+      helper_image:
+        description: Reviewed digest-pinned private helper image
+        type: string
+        required: true
+      recipe_sha256:
+        description: Exact recipe checksum
+        type: string
+        required: true
+      cohort_sha256:
+        description: Exact cohort manifest checksum
+        type: string
+        required: true
+      source_date_epoch:
+        description: Reviewed recipe source timestamp
+        type: string
+        required: true
+      build_packages:
+        description: Explicit build roots (at most 32)
+        type: string
+        default: pacman fakeroot binutils gawk coreutils findutils grep sed file tar gzip xz zstd
+      runtime_packages:
+        description: Explicit roots for one runtime environment (at most 32)
+        type: string
+        default: filesystem bash coreutils pacman glibc gawk grep
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-bootstrap-input-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ${{ inputs.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+      - name: Require private artifact storage
+        run: test '${{ github.event.repository.private }}' = true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Capture signed seed inputs without installing packages
+        shell: bash
+        env:
+          CAPTURE_ARCH: ${{ inputs.architecture }}
+          HELPER_IMAGE: ${{ inputs.helper_image }}
+          RECIPE_SHA: ${{ inputs.recipe_sha256 }}
+          COHORT_SHA: ${{ inputs.cohort_sha256 }}
+          SOURCE_EPOCH: ${{ inputs.source_date_epoch }}
+          BUILD_PACKAGES: ${{ inputs.build_packages }}
+          RUNTIME_PACKAGES: ${{ inputs.runtime_packages }}
+          REGISTRY_NATIVE_TEST_AUTH: ${{ secrets.REGISTRY_NATIVE_TEST_AUTH }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$CAPTURE_ARCH"
+          [[ "$HELPER_IMAGE" =~ ^registry\.cloudflare\.com/[a-f0-9]{32}/[a-z0-9._-]+@sha256:[a-f0-9]{64}$ ]]
+          [[ "$RECIPE_SHA" =~ ^[a-f0-9]{64}$ && "$COHORT_SHA" =~ ^[a-f0-9]{64}$ && "$SOURCE_EPOCH" =~ ^[0-9]{1,15}$ ]]
+          [[ "$BUILD_PACKAGES" =~ ^[a-z0-9@._+[:space:]-]+$ && "$RUNTIME_PACKAGES" =~ ^[a-z0-9@._+[:space:]-]+$ ]]
+          [[ "$BUILD_PACKAGES" != *$'\n'* && "$RUNTIME_PACKAGES" != *$'\n'* ]]
+          read -ra build_packages <<< "$BUILD_PACKAGES"
+          read -ra runtime_packages <<< "$RUNTIME_PACKAGES"
+          (( ${#build_packages[@]} > 0 && ${#build_packages[@]} <= 32 && ${#runtime_packages[@]} > 0 && ${#runtime_packages[@]} <= 32 ))
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+          capture="$RUNNER_TEMP/bootstrap"
+          mkdir -m 700 "$capture"
+          sudo chown root:root "$capture"
+          auth_dir=$(mktemp -d "$RUNNER_TEMP/bootstrap-registry.XXXXXX")
+          auth="$auth_dir/config.json"
+          trap 'rm -rf "$auth_dir"' EXIT
+          printf '%s' "$REGISTRY_NATIVE_TEST_AUTH" > "$auth"
+          chmod 600 "$auth"
+          unset REGISTRY_NATIVE_TEST_AUTH
+          docker --config "$auth_dir" pull "$HELPER_IMAGE"
+          sudo skopeo copy --preserve-digests --authfile "$auth" "docker://$HELPER_IMAGE" "oci-archive:$capture/helper.oci.tar"
+          rm -f "$auth"
+          docker run --rm --network=bridge --pull=never --security-opt=no-new-privileges --cap-drop=ALL \
+            -v "$capture:/capture:rw" -v "$PWD/services/pipeline/capture-bootstrap-inputs.py:/capture.py:ro" \
+            "$HELPER_IMAGE" bash -c '
+              set -euo pipefail
+              cp /etc/makepkg.conf /capture/makepkg.conf
+              mirror="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
+              if [[ $(uname -m) == aarch64 ]]; then mirror="https://fl.us.mirror.archlinuxarm.org/\$arch/\$repo"; fi
+              printf "[options]\nArchitecture = auto\nSigLevel = Required DatabaseOptional\nLocalFileSigLevel = Required\n[core]\nServer = %s\n[extra]\nServer = %s\n" "$mirror" "$mirror" > /capture/pacman.conf
+              python3 /capture.py "$@"
+            ' capture --output /capture/retained --architecture "$CAPTURE_ARCH" \
+              --helper-image "$HELPER_IMAGE" --helper-archive /capture/helper.oci.tar \
+              --makepkg-config /capture/makepkg.conf --pacman-config /capture/pacman.conf \
+              --recipe-sha256 "$RECIPE_SHA" --cohort-sha256 "$COHORT_SHA" --source-date-epoch "$SOURCE_EPOCH" \
+              --transfer-limit-bytes 3221225472 --helper-shell-analysis \
+              --build-packages "${build_packages[@]}" --runtime-packages "${runtime_packages[@]}"
+          sudo tar -cf "$RUNNER_TEMP/bootstrap-inputs.tar" -C "$capture/retained" manifest.json reference.json NOTICE.txt objects
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/bootstrap-inputs.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bootstrap-inputs-${{ inputs.architecture }}
+          path: ${{ runner.temp }}/bootstrap-inputs.tar
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
