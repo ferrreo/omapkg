@@ -1,17 +1,17 @@
 import { error, fail } from '@sveltejs/kit';
-import { environment, field, maintainer } from '$lib/server/http';
-import { getFactoryRun, listFactoryAttempts, FactoryRunError, factoryRunErrorStatus } from '$lib/server/factory-runs';
+import { environment, field, formAction, maintainer } from '$lib/server/http';
+import { getFactoryRun, listFactoryAttempts, stopFactoryRun, FactoryRunError, factoryRunErrorStatus } from '$lib/server/factory-runs';
 import { FACTORY_UNIT_KINDS, pipelineFactoryQueue, startFactoryUnitIntervention } from '$lib/server/factory-entrypoints';
 import { latestPrivateFactoryImageCandidate, startPrivateFactoryImageWorkflow } from '$lib/server/factory-private-image';
 import { startFactory } from '$lib/server/requests';
 import { humanMaintainer } from '$lib/server/catalog-ownership';
 import { PolicyError } from '$lib/server/policy';
-import { query } from '$lib/server/db';
+import { audit, query } from '$lib/server/db';
 import { redactText } from '../../../../../services/pipeline/security';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
-  maintainer(event);
+  const actor = maintainer(event);
   const env = environment(event);
   const run = await getFactoryRun(env.DB, event.params.id);
   if (!run) error(404, 'Factory run not found.');
@@ -37,11 +37,25 @@ export const load: PageServerLoad = async (event) => {
       candidateSha256: attempt.candidateSha256, inputSha256: attempt.inputSha256, buildIds: attempt.buildIds,
       failureKind: attempt.failureKind, failure: redactText(JSON.stringify(attempt.failure, null, 2)) })),
     requestId, dossiers, aggregateDossiers, cohortChildren, pagedCohortCoordinator, imageCandidateAvailable,
+    canStop: actor.id === run.createdBy || actor.role === 'admin' || actor.role === 'security',
     canIntervene: run.targetKind === 'generated' || run.targetKind === 'image' && imageCandidateAvailable || FACTORY_UNIT_KINDS.some((kind) => kind === run.targetKind) && !pagedCohortCoordinator,
   };
 };
 
 export const actions: Actions = {
+  stop: (event) => formAction(event, async (form) => {
+    const actor = humanMaintainer(maintainer(event));
+    const env = environment(event);
+    const run = await getFactoryRun(env.DB, event.params.id);
+    if (!run || !['queued', 'running'].includes(run.status)) throw new PolicyError(409, 'This run is already closed.');
+    if (run.createdBy !== actor.id && actor.role !== 'admin' && actor.role !== 'security') throw new PolicyError(403, 'Only the run owner or an operator can stop it.');
+    const reason = field(form, 'reason').trim();
+    if (!reason || reason.length > 2000) throw new PolicyError(400, 'Give a short reason for stopping the run.');
+    const stopped = await stopFactoryRun(env.DB, run.id, reason);
+    if (stopped.status !== 'needs-human-intervention') throw new PolicyError(409, 'The run finished before it could be stopped.');
+    await audit(env.DB, actor.id, 'factory.human_stopped', run.id, { reason }).run();
+    return { stopped: true };
+  }),
   intervene: async (event) => {
     const form = await event.request.formData();
     const reason = field(form, 'reason');

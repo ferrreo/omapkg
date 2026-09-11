@@ -5,14 +5,14 @@ record does not mark the combined plan complete or authorize package publication
 
 | Check | Observed result |
 | --- | --- |
-| Combined application and signer suite | 354 passed, two opt-in native fixtures skipped, zero failures; 14,989 assertions. The retained OCI bridge also passed separately with its native fixture enabled. |
+| Combined application and signer suite | 358 passed, two opt-in native fixtures skipped, zero failures; 15,017 assertions. The retained OCI bridge also passed separately with its native fixture enabled. |
 | Svelte and pipeline types | Zero errors; Svelte also reports zero warnings. |
 | Production web bundle | Built successfully. |
 | Go worker suite, race checks, and vet | Passed. Environment-dependent native cases require their explicit image settings. |
 | Read-only live-worker diagnostic | Every required check passed using the deployed worker's config, including Podman isolation, config validation, capacity, and coordinator HEAD request (HTTP 200). No job was submitted. |
 | Native x86 template matrix | All 18 fixtures independently reproduced using distinct builder and clean runtime images. See [template evidence](template-matrix-acceptance.md). |
 | Native ARM template matrix | All 18 retained JSON records report independent reproduction on AArch64, with no skipped subtests. [Native ARM job](https://github.com/ferrreo/omapkg/actions/runs/34521724281/job/103020607186). |
-| Filesystem images | Native CI verification in progress on `fer/factory-native-acceptance`; no passing result claimed yet. |
+| Filesystem images | Native images were built, but the independent comparison exposed differing filesystem write counters and journal state. Fresh filesystem construction from staged files passes the local deterministic-file check; full native acceptance remains pending. |
 | Release preparation UI | Named change-set selection and review replace manual repository IDs and candidate JSON. Server derives repository references and release notes, rejects stale selections, and retains qualification gates. Browser checks covered selection/review and 320/375/414/768-pixel layouts without horizontal page overflow. |
 | Local deep coordinator exercise | An injected first-attempt failure led to an actual isolated worker build on attempt two, authenticated artifact ingestion, and a retained coordinator dossier. A separate exhaustion case stopped after three attempts. |
 | Repaired preserved-recipe successor | Actual isolated override inspection supplied the observed metadata hash to the frozen build, runtime install, and smoke check. Coordinator regression verifies signed override completion and exclusion of older workers. |

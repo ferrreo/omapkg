@@ -137,19 +137,6 @@ inspect_package_archive() {
   archive_metadata_checked=1
   timestamp_ownership_order_checked=1
 }
-normalize_ext4_metadata() {
-  local device=$1 inodes=$2 epoch=$3 inode fs_time fsck_status
-  if e2fsck -fyD "$device" >/dev/null 2>&1; then fsck_status=0; else fsck_status=$?; fi
-  (( fsck_status < 2 )) || die "cannot verify ext4 image before normalization"
-  while IFS= read -r inode; do
-    [[ "$inode" =~ ^[0-9]+$ ]] || die "invalid staged inode identity"
-    printf '%s\n' "set_inode_field <$inode> atime $epoch" "set_inode_field <$inode> ctime $epoch" "set_inode_field <$inode> mtime $epoch" "set_inode_field <$inode> crtime $epoch" quit | debugfs -w "$device" >/dev/null 2>&1 || die "cannot normalize ext4 inode metadata: $inode"
-  done <"$inodes"
-  fs_time=$(date -u -d "@$epoch" +%Y%m%d%H%M%S)
-  tune2fs -T "$fs_time" "$device" >/dev/null 2>&1 || die "cannot normalize ext4 superblock time"
-  printf '%s\n' "set_super_value wtime $epoch" "set_super_value mtime $epoch" "set_super_value lastcheck $epoch" "set_super_value mkfs_time $epoch" quit | debugfs -w "$device" >/dev/null 2>&1 || die "cannot normalize ext4 superblock timestamps"
-}
-
 temporary_root=
 cleanup_paths=()
 cleanup_all() { for path in "${cleanup_paths[@]}"; do [[ -n "$path" && -d "$path" ]] && rm -rf -- "$path"; done; }
@@ -288,7 +275,7 @@ prov_parent=$(CDPATH='' cd -- "$(dirname -- "$provenance")" 2>/dev/null && pwd -
 [[ "$EUID" == 0 ]] || die "image build needs root for loop devices and filesystems"
 native_host=$(uname -m)
 case "$native_host" in x86_64) [[ "$architecture" == x86_64 ]] || die "x86_64 builder cannot produce aarch64 native image" ;; aarch64|arm64) [[ "$architecture" == aarch64 ]] || die "aarch64 builder cannot produce x86_64 native image" ;; *) die "unsupported native builder architecture: $native_host" ;; esac
-for command_name in curl qemu-img sgdisk losetup partx udevadm mknod mkfs.fat mkfs.ext4 mount umount blkid pacman grub-install arch-chroot gpg realpath bsdtar gzip unshare debugfs e2fsck tune2fs mcopy truncate dd; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
+for command_name in curl qemu-img sgdisk losetup partx udevadm mknod mkfs.fat mkfs.ext4 mount umount blkid blockdev pacman grub-install arch-chroot gpg realpath bsdtar gzip unshare mcopy truncate dd; do command -v "$command_name" >/dev/null || die "missing required command: $command_name"; done
 builder_script=$(realpath -e -- "$builder_script") || die "builder script path is unavailable"
 if [[ -n "$work_dir" ]]; then mkdir -p -- "$work_dir"; chmod 700 "$work_dir"; build_root=$(mktemp -d "$work_dir/build.XXXXXX"); else build_root=$(mktemp -d "${TMPDIR:-/tmp}/omapkg-system-image.XXXXXX"); fi
 cleanup_paths+=("$build_root"); temporary_root=$build_root
@@ -297,9 +284,13 @@ cache=$temporary_root/packages; mkdir -p "$cache"; chmod 700 "$cache"
 disk_size=$(jq -er '.disk.sizeBytes | numbers | select(. >= 2147483648)' "$profile")
 esp_size=$(jq -er '.disk.espSizeMiB | numbers | select(. >= 64)' "$profile")
 image_tmp=$temporary_root/image.raw
-qemu-img create -f raw "$image_tmp" "$disk_size" >/dev/null
-sgdisk --zap-all "$image_tmp" >/dev/null
-sgdisk --disk-guid="$disk_guid" --new=1:2048:+"${esp_size}"M --partition-guid=1:"$esp_partition_guid" --typecode=1:ef00 --change-name=1:ESP --new=2:0:0 --partition-guid=2:"$root_partition_guid" --typecode=2:8300 --change-name=2:ROOT "$image_tmp" >/dev/null
+initialize_disk() {
+  truncate -s 0 "$image_tmp"
+  qemu-img create -f raw "$image_tmp" "$disk_size" >/dev/null
+  sgdisk --zap-all "$image_tmp" >/dev/null
+  sgdisk --disk-guid="$disk_guid" --new=1:2048:+"${esp_size}"M --partition-guid=1:"$esp_partition_guid" --typecode=1:ef00 --change-name=1:ESP --new=2:0:0 --partition-guid=2:"$root_partition_guid" --typecode=2:8300 --change-name=2:ROOT "$image_tmp" >/dev/null
+}
+initialize_disk
 loop=$(losetup --find --show --partscan "$image_tmp")
 created_partition_nodes=()
 mounted=0; esp_mounted=0
@@ -448,20 +439,30 @@ uncontrolled_timestamp=$(find "$root" -xdev -printf '%T@ %p\n' | awk -v epoch="$
 [[ -z "$uncontrolled_timestamp" ]] || die "image root contains an uncontrolled timestamp: $uncontrolled_timestamp"
 uncontrolled_timestamp=$(find "$esp_stage" -printf '%T@ %p\n' | awk -v epoch="$esp_epoch" '$1 + 0 != epoch { print; exit }')
 [[ -z "$uncontrolled_timestamp" ]] || die "ESP contains an uncontrolled timestamp: $uncontrolled_timestamp"
-root_inodes="$temporary_root/root-inodes.txt"
-find "$root" -xdev -printf '%i\n' | sort -nu >"$root_inodes"
+root_stage="$temporary_root/root-stage"
+mkdir -p "$root_stage"
+cp -a "$root/." "$root_stage/"
+root_size=$(blockdev --getsize64 "$root_device")
+root_start=$(sgdisk --info=2 "$image_tmp" | awk '/^First sector:/ { print $3 }')
+[[ "$root_size" =~ ^[0-9]+$ && "$root_start" =~ ^[0-9]+$ ]] || die "root partition geometry is unavailable"
 sync
 [[ "$(blkid -s UUID -o value "$root_device")" == "$root_uuid" ]] || die "root filesystem UUID changed during image build"
 [[ "$(blkid -s UUID -o value "$esp_device" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "ESP filesystem UUID changed during image build"
 umount "$root"; mounted=0
-normalize_ext4_metadata "$root_device" "$root_inodes" "$source_date_epoch"
 detach_partitioned_loop
+root_image="$temporary_root/root.img"
+truncate -s "$root_size" "$root_image"
+# Build an untouched filesystem from the final files, excluding kernel journal
+# history, inode generations, and write counters from the installation mount.
+mkfs.ext4 -F -U "$root_uuid" -E lazy_itable_init=0,lazy_journal_init=0,hash_seed="$root_uuid" -d "$root_stage" "$root_image" >/dev/null
 esp_image="$temporary_root/esp.img"
 truncate -s "$((esp_size * 1024 * 1024))" "$esp_image"
 mkfs.fat -F32 -i "$esp_uuid_raw" "$esp_image" >/dev/null
 mcopy -s -p -m -i "$esp_image" "$esp_stage"/* :: >/dev/null
 [[ "$(blkid -s UUID -o value "$esp_image" | tr -d '-' | tr '[:upper:]' '[:lower:]')" == "$esp_uuid_raw" ]] || die "staged ESP filesystem UUID changed"
-dd if="$esp_image" of="$image_tmp" bs=512 seek=2048 conv=notrunc status=none
+initialize_disk
+dd if="$esp_image" of="$image_tmp" bs=1M seek=1048576 oflag=seek_bytes conv=notrunc,sparse status=none
+dd if="$root_image" of="$image_tmp" bs=1M seek="$((root_start * 512))" oflag=seek_bytes conv=notrunc,sparse status=none
 install -m0644 "$image_tmp" "$output"
 image_sha256=$(sha256_value "$output")
 image_size=$(stat -c '%s' "$output")
@@ -483,7 +484,7 @@ bsdtar --list --file "$firmware_archive" | grep -Fqx "${firmware_vars#/}" || die
 archive_code_sha=$(bsdtar --extract --to-stdout --file "$firmware_archive" -- "${firmware_code#/}" | sha256sum | awk '{print $1}')
 archive_vars_sha=$(bsdtar --extract --to-stdout --file "$firmware_archive" -- "${firmware_vars#/}" | sha256sum | awk '{print $1}')
 jq -cS -n --arg profile "$profile_sha256" --arg profileId "$(jq -er '.id' "$profile")" --arg recipe "$profile_recipe" --arg lock "$lock_sha256" --arg inputLock "$input_identity_sha" --arg transaction "$transaction_digest" --arg system "$system_digest" --arg opr "$opr_digest" --arg packageSet "$package_set" --arg image "$image_sha256" --arg imageName "$image_name" --arg sourceManifest "$source_manifest_sha" --arg imageSet "$image_output_set_sha" --arg candidateId "$candidate_id" --arg candidateOwned "$candidate_owned_universe" --arg candidateInput "$candidate_input_lock" --arg candidatePlan "$candidate_native_plan" --arg architecture "$profile_arch" --arg version "$(jq -er '.systemVersion' "$lock")" --arg generation "$(jq -er '.oprGeneration' "$lock")" --arg kernel "$(jq -er '.kernel.path' "$profile")" --arg bootloader "$(jq -er '.bootloader.target' "$profile")" --arg firmware "$firmware_package" --arg firmwarePackageSHA "$firmware_package_sha" --arg codePath "$firmware_code" --arg codeSHA "$archive_code_sha" --arg varsPath "$firmware_vars" --arg varsSHA "$archive_vars_sha" --argjson imageSize "$image_size" --argjson epoch "$source_date_epoch" --slurpfile packageRows <(jq -cS '[.packages[]] | sort_by(.name,.architecture,.version,.sha256)' "$lock") --slurpfile repoRows <(jq -cS '.repositories' "$lock") --argjson candidateMode "$candidate_mode" '{schemaVersion:1,authority:(if ($candidateMode == 1) then "factory-candidate-v1" else "omarchy-manifest-client-v1" end),candidate:(if ($candidateMode == 1) then {id:$candidateId,executionScope:"private",ownedUniverseSha256:$candidateOwned,inputLockSha256:$candidateInput,nativePlanSha256:$candidatePlan} else null end),transactionSha256:$transaction,systemManifestSha256:$system,oprManifestSha256:$opr,packageSetSha256:$packageSet,releaseLockSha256:$lock,profileId:$profileId,profileSha256:$profile,platformProfile:$profileId,recipeSha256:$recipe,systemVersion:$version,oprGeneration:$generation,architecture:$architecture,nativeArchitecture:$architecture,sourceDateEpoch:$epoch,kernel:$kernel,bootloader:$bootloader,firmware:{package:$firmware,packageSha256:$firmwarePackageSHA,codePath:$codePath,codeSha256:$codeSHA,varsTemplatePath:$varsPath,varsTemplateSha256:$varsSHA},imageSha256:$image,repositories:$repoRows[0],packages:$packageRows[0],reproducibility:{schemaVersion:1,status:"reproducibility-contract-verified",mode:"single-build",target:$architecture,inputs:{recipeSha256:$recipe,sourceManifestSha256:$sourceManifest,inputLockSha256:$inputLock,dependencyPlanSha256:$transaction,imageDigest:("sha256:" + $profile),sourceDateEpoch:$epoch},controls:{network:"disabled",locale:"C",timezone:"UTC",umask:"022",hostSecrets:"excluded",writableCaches:"excluded",nativeTarget:$architecture,archivePathsChecked:true,filesystemIds:"derived-from-inputs",timestamps:"SOURCE_DATE_EPOCH+E2FSPROGS_FAKE_TIME",partitionLayout:"reviewed-profile",ordering:"sorted-lock-and-pacman"},outputs:{setSha256:$imageSet,files:[{filename:$imageName,size:$imageSize,sha256:$image}],unexpected:[],prohibitedPaths:[]},limitations:["one image execution does not establish independent byte reproduction","bootloader and filesystem tools remain constrained by their reviewed native environment"]}}' >"$provenance"
-jq -cS '.reproducibility.controls += {archiveMetadataChecked:true,timestampOwnershipOrderChecked:true,filesystemMetadataChecked:true,networkPreparation:"verified-https-before-offline-stage",pacmanInstallDates:"normalized-to-source-epoch",fatTimestampResolutionSeconds:2,mkinitcpioOutput:"pinned-package-bytes",grubOutput:"offline-native-tool",filesystemOrder:"deterministic-guid-and-tooling",filesystemConstruction:"normalized-ext4-inodes-and-staged-fat",machineIdentity:"first-boot",secrets:"first-boot"}' "$provenance" >"$provenance.tmp"
+jq -cS '.reproducibility.controls += {archiveMetadataChecked:true,timestampOwnershipOrderChecked:true,filesystemMetadataChecked:true,networkPreparation:"verified-https-before-offline-stage",pacmanInstallDates:"normalized-to-source-epoch",fatTimestampResolutionSeconds:2,mkinitcpioOutput:"pinned-package-bytes",grubOutput:"offline-native-tool",filesystemOrder:"deterministic-guid-and-tooling",filesystemConstruction:"fresh-ext4-from-staged-tree-and-fat",machineIdentity:"first-boot",secrets:"first-boot"}' "$provenance" >"$provenance.tmp"
 mv -- "$provenance.tmp" "$provenance"
 chmod 644 "$output"; chmod 644 "$provenance"
 echo "built $output ($image_sha256)"

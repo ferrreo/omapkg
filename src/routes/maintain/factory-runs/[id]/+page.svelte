@@ -15,9 +15,16 @@
       <div>{data.run.status} · {data.run.attemptCount}/{data.run.maxAttempts} attempts</div>
     </header>
     {#if form?.error}<p class="form-notice form-notice--danger" role="alert">{form.error}</p>{/if}
+    {#if form?.stopped}<p class="notice-bar" role="status">Run stopped. Its attempts and logs are retained below.</p>{/if}
     {#if form?.successorId}<p class="notice-bar" role="status">New bounded run authorized. <a href={form.successorRequestId ? `/maintain/requests/${encodeURIComponent(form.successorRequestId)}` : `/maintain/factory-runs/${encodeURIComponent(form.successorId)}`}>Open successor work</a>.</p>{/if}
     {#if data.run.sourceRunId}<p>Continues <a href={`/maintain/factory-runs/${encodeURIComponent(data.run.sourceRunId)}`}>{data.run.sourceRunId}</a>. Earlier attempts remain in that run.</p>{/if}
     {#if data.requestId}<p><a href={`/maintain/requests/${encodeURIComponent(data.requestId)}`}>Open recipe, review decisions, or rejection controls</a></p>{/if}
+    {#if data.canStop && ['queued', 'running'].includes(data.run.status)}
+      <form class="review-form" method="POST" action="?/stop" use:enhance>
+        <div class="field"><label for="stop-reason">Reason to stop</label><input id="stop-reason" name="reason" required maxlength="2000" /></div>
+        <button class="button button--danger" type="submit">Stop automatic attempts</button>
+      </form>
+    {/if}
     <section class="workbench-panel" aria-labelledby="attempts-title">
       <h2 id="attempts-title">Retained attempts</h2>
       {#each data.attempts as attempt}

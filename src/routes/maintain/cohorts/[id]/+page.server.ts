@@ -64,8 +64,7 @@ export const load: PageServerLoad = async (event) => {
     record.id, record.current_revision, JSON.stringify(packages.map((item) => item.pkgbase)));
 
   const qualificationPlans = await query<any>(env.DB, `SELECT p.id,p.operation,p.architecture,p.coverage_kind,p.coverage_pkgbase,p.coverage_root_sha256,p.coverage_release_id,p.coverage_sha256,p.plan_sha256,p.plan_json,p.created_by,p.created_at,
-    (SELECT COUNT(DISTINCT r.kind) FROM native_qualification_plan_reviews r WHERE r.plan_id=p.id) AS review_kinds,
-    (SELECT COUNT(DISTINCT r.actor) FROM native_qualification_plan_reviews r WHERE r.plan_id=p.id) AS review_actors
+    (SELECT COUNT(DISTINCT r.kind) FROM native_qualification_plan_reviews r WHERE r.plan_id=p.id) AS review_kinds
     FROM native_qualification_plans p WHERE p.cohort_id=? AND p.revision=? ORDER BY p.created_at DESC,p.rowid DESC LIMIT 100`, record.id, record.current_revision);
 
   const qualificationEvidence = await query<any>(env.DB, `SELECT e.id,e.plan_id,e.operation,e.architecture,e.coverage_kind,e.coverage_pkgbase,e.coverage_root_sha256,e.status,e.reproducibility_status,e.worker_id,e.created_at,

@@ -5,6 +5,9 @@ import { createFactoryRevision } from '../services/pipeline/revision';
 import { startFactoryCohort, startFactoryUnit, startFactoryUnitIntervention, type FactoryUnitDispatch, type FactoryUnitQueue } from '../src/lib/server/factory-entrypoints';
 import { startFactoryCohortPaged, type FactoryCohortPageDispatch, type FactoryCohortPageQueue } from '../src/lib/server/factory-cohort-dispatch';
 import { finishFactoryAttempt, getFactoryAttempt } from '../src/lib/server/factory-runs';
+import { createFactorySuccessorDraft } from '../src/lib/server/preserved-factory';
+import type { Revision } from '../src/lib/model';
+import { actions as factoryRunActions } from '../src/routes/maintain/factory-runs/[id]/+page.server';
 
 const digest = (value: string) => value.repeat(64);
 const builder = `registry.example/builder@sha256:${'f'.repeat(64)}`;
@@ -72,6 +75,67 @@ test('recipe unit entry points persist one durable queued run per unit and dispa
     }
     expect(calls.map((call) => call.targetKind)).toEqual(['manual', 'cohort-member', 'bootstrap', 'toolchain']);
     expect(db.prepare("SELECT COUNT(*) AS count FROM factory_runs WHERE status='running'").first<{ count: number }>()?.count).toBe(4);
+  } finally { db.close(); }
+});
+
+test('human restart of an already-built revision defers a fresh candidate without reusing historical builds', async () => {
+  const db = database(); const calls: FactoryUnitDispatch[] = []; const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] as const };
+  try {
+    insertRequest(db, 'restart-request', 'restart-demo', 1);
+    await insertRevision(db, 'restart-request', 'restart-revision', 'restart-demo', 1);
+    const input = { targetKind: 'manual' as const, targetId: 'restart-revision', unitKey: 'restart-demo', policy: { network: 'disabled' }, requestedRevisionId: 'restart-revision' };
+    const source = await startFactoryUnit(asD1(db), actor, queue(calls), input);
+    const attempt = await getFactoryAttempt(asD1(db), source.run.id, 1);
+    if (!attempt) throw Error('Initial attempt missing');
+    await finishFactoryAttempt(asD1(db), source.run.id, 1, attempt.leaseToken, { status: 'failed', failureKind: 'policy', failure: { message: 'Worker input permissions need intervention.' } });
+    const restarted = await startFactoryUnitIntervention(asD1(db), actor, queue(calls), { ...input, sourceRunId: source.run.id, reason: 'Worker permissions fixed; retry the same input scope.' });
+    expect(restarted.run.sourceRunId).toBe(source.run.id);
+    expect(restarted.run.attemptCount).toBe(0);
+    expect(calls.at(-1)?.buildIds).toEqual([]);
+    expect(calls.at(-1)?.revisionId).toBe('restart-revision');
+    expect(db.prepare('SELECT COUNT(*) AS count FROM builds WHERE factory_run_id=?').bind(source.run.id).first<{ count: number }>()?.count).toBe(1);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM builds WHERE factory_run_id=?').bind(restarted.run.id).first<{ count: number }>()?.count).toBe(0);
+    const parent = db.prepare('SELECT * FROM revisions WHERE id=?').bind('restart-revision').first<Revision>();
+    if (!parent) throw Error('Parent revision missing');
+    const draft = await createFactorySuccessorDraft({ DB: asD1(db) }, parent, parent.recipe, 1, null, 'Human-authorized restart', undefined, `factory-${restarted.run.id}-attempt-1`);
+    expect(draft.revision.id).not.toBe(parent.id);
+    expect(draft.revision.pkgrel).toBe((parent.pkgrel ?? 1) + 1);
+    expect(draft.revision.sources_json).toBe(parent.sources_json);
+    expect(draft.revision.architectures_json).toBe(parent.architectures_json);
+  } finally { db.close(); }
+});
+
+test('a first factory run also preserves an existing build of its reviewed revision', async () => {
+  const db = database(); const calls: FactoryUnitDispatch[] = []; const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] as const };
+  try {
+    insertRequest(db, 'existing-request', 'existing-demo', 1);
+    await insertRevision(db, 'existing-request', 'existing-revision', 'existing-demo', 1);
+    db.prepare("INSERT INTO builds(id,revision_id,architecture,status,created_at) VALUES('existing-build','existing-revision','x86_64','failed',1)").run();
+    const started = await startFactoryUnit(asD1(db), actor, queue(calls), { targetKind: 'manual', targetId: 'existing-revision', unitKey: 'existing-demo', policy: { network: 'disabled' }, requestedRevisionId: 'existing-revision' });
+    expect(started.run.attemptCount).toBe(0);
+    expect(calls.at(-1)?.buildIds).toEqual([]);
+    expect(db.prepare("SELECT factory_run_id FROM builds WHERE id='existing-build'").first<{ factory_run_id: string | null }>()?.factory_run_id).toBeNull();
+  } finally { db.close(); }
+});
+
+test('run owner can stop private work while unrelated maintainers cannot', async () => {
+  const db = database(); const calls: FactoryUnitDispatch[] = []; const actor = { id: 'github:1', role: 'maintainer' as const, areas: ['system'] as const };
+  try {
+    insertRequest(db, 'stop-request', 'stop-demo', 1);
+    await insertRevision(db, 'stop-request', 'stop-revision', 'stop-demo', 1);
+    const started = await startFactoryUnit(asD1(db), actor, queue(calls), { targetKind: 'manual', targetId: 'stop-revision', unitKey: 'stop-demo', policy: { network: 'disabled' }, requestedRevisionId: 'stop-revision' });
+    const stop = factoryRunActions.stop;
+    if (!stop) throw Error('Stop action missing');
+    const event = (who: typeof actor) => {
+      const body = new FormData(); body.set('reason', 'Replace the retired builder before restarting.');
+      // The action reads only these event fields; no browser/session hooks run in this unit check.
+      return { request: new Request('https://repo.test/maintain/factory-runs/test?/stop', { method: 'POST', body }), locals: { actor: who },
+        params: { id: started.run.id }, platform: { env: { DB: asD1(db) } } } as unknown as Parameters<typeof stop>[0];
+    };
+    expect(await stop(event({ ...actor, id: 'github:2' }))).toMatchObject({ status: 403 });
+    expect(await stop(event(actor))).toMatchObject({ success: true, stopped: true });
+    expect(db.prepare('SELECT status FROM factory_runs WHERE id=?').bind(started.run.id).first<{ status: string }>()?.status).toBe('needs-human-intervention');
+    expect(db.prepare('SELECT status FROM builds WHERE factory_run_id=?').bind(started.run.id).first<{ status: string }>()?.status).toBe('cancelled');
   } finally { db.close(); }
 });
 

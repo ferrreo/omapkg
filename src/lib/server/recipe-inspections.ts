@@ -84,7 +84,7 @@ export async function requestRecipeInspection(env: InspectionEnv, actor: Actor |
 export async function requestFactoryRecipeInspection(env: InspectionEnv, runId: string, attempt: number, captureSha: string, imageId: string, override: InputObject, reason: string) {
   const run = await env.DB.prepare(`SELECT created_by FROM factory_runs WHERE id=? AND (
     (status='running' AND current_attempt=? AND lease_token IS NOT NULL AND lease_expires_at>?) OR
-    (status='queued' AND attempt_count=?-1 AND current_attempt=?-1 AND lease_token IS NULL AND lease_expires_at IS NULL))`)
+    (status='queued' AND attempt_count=?-1 AND COALESCE(current_attempt,0)=?-1 AND lease_token IS NULL AND lease_expires_at IS NULL))`)
     .bind(runId, attempt, now(), attempt, attempt).first<{ created_by: string }>();
   if (!run || !/^github:[1-9][0-9]{0,19}$/.test(run.created_by)) throw new PolicyError(409, 'Factory inspection authority is no longer active.');
   const actor = await actorForGithubId(env.DB, run.created_by.slice(7));

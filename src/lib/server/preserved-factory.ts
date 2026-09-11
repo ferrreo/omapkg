@@ -171,7 +171,7 @@ export async function createFactorySuccessorDraft(
   repairInputs?: { recipe?: { sha256: string; size: number }; inspection?: { srcinfoSha256: string; architectures?: Record<string, string> } },
   revisionId: string = crypto.randomUUID(),
 ): Promise<FactoryRevisionDraft> {
-  if (!Number.isSafeInteger(attempt) || attempt < 2 || attempt > 3) throw new Error('Invalid preserved repair attempt.');
+  if (!Number.isSafeInteger(attempt) || attempt < 1 || attempt > 3) throw new Error('Invalid factory successor attempt.');
   const evidence = preservedRecipe(revision);
   const nextPkgrel = (revision.pkgrel ?? 1) + 1;
   const repairedRecipe = normalizeFactorySuccessorRecipe(revision, recipe);

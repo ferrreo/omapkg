@@ -127,12 +127,15 @@ async function runFactoryCohortPage(params: FactoryWorkflowParams, env: Pipeline
 }
 
 async function runFactoryUnit(params: FactoryWorkflowParams, env: PipelineEnv, step: WorkflowStep) {
-  if (!params.factoryRunId || !params.attempt || !params.buildIds?.length) throw new Error('factory unit workflow identity is incomplete');
+  if (!params.factoryRunId || !params.attempt || !Array.isArray(params.buildIds)) throw new Error('factory unit workflow identity is incomplete');
   const run = await getFactoryRun(env.DB, params.factoryRunId);
   if (!run) throw new Error('factory unit run is missing');
+  const separateCandidate = !params.buildIds.length;
   const prepared = new Map<number, Revision>();
   const initial = await revisionForUnit(env, params.revisionId ?? '');
-  prepared.set(1, initial);
+  if (run.requestedRevisionId !== initial.id) throw new Error('factory unit revision differs from its retained request');
+  if (separateCandidate && !await env.DB.prepare('SELECT 1 FROM builds WHERE revision_id=? LIMIT 1').bind(initial.id).first()) throw new Error('factory unit has no prior candidate build');
+  if (!separateCandidate) prepared.set(1, initial);
 
   const value = await runFactoryRepairLoop({
     db: env.DB,
@@ -141,9 +144,11 @@ async function runFactoryUnit(params: FactoryWorkflowParams, env: PipelineEnv, s
     prepare: async (attempt, previousFailure) => {
       let revision = prepared.get(attempt);
       if (!revision) {
-        const parent = prepared.get(attempt - 1) ?? await revisionForUnit(env, (await getFactoryAttempt(env.DB, params.factoryRunId!, attempt - 1))?.candidateRevisionId ?? '');
+        const parent = attempt === 1 ? initial : prepared.get(attempt - 1) ?? await revisionForUnit(env, (await getFactoryAttempt(env.DB, params.factoryRunId!, attempt - 1))?.candidateRevisionId ?? '');
         const finding = `${params.repairReason ? `Human guidance: ${params.repairReason}\n` : ''}${JSON.stringify(previousFailure ?? { message: 'private preserved build failed' })}`.slice(0, 2_000);
-        const repair = await runPreservedRepair({ requestId: params.targetId ?? params.requestId, runId: params.factoryRunId!, attempt, revisionId: parent.id, recipe: parent.recipe, failure: finding }, PreservedRepairFactory);
+        const repair = attempt === 1 && separateCandidate
+          ? { recipe: parent.recipe, explanation: `New authorized validation: ${params.repairReason ?? 'Validate the reviewed candidate in this run.'}` }
+          : await runPreservedRepair({ requestId: params.targetId ?? params.requestId, runId: params.factoryRunId!, attempt, revisionId: parent.id, recipe: parent.recipe, failure: finding }, PreservedRepairFactory);
         const successorRecipe = normalizeFactorySuccessorRecipe(parent, repair.recipe);
         const repairRef = await retainFactoryRepairRecipe(env, successorRecipe);
         const inspection = preservedRecipe(parent) ? await inspectFactoryRepair(env, step, params.factoryRunId!, attempt, parent, repairRef, successorRecipe, finding) : undefined;

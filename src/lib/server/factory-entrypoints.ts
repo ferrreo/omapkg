@@ -9,6 +9,7 @@ import {
   getFactoryAttempt,
   reserveFactoryAttempt,
   startFactoryRun,
+  stopFactoryRun,
   type FactoryAttempt,
   type FactoryRun,
 } from './factory-runs';
@@ -108,7 +109,10 @@ async function resolveRevision(db: D1Database, actor: Actor, input: FactoryUnitI
       WHERE c.id=? AND m.pkgbase=?`).bind(input.targetId, input.unitKey).first<{ pkgbase: string; recipe_revision_id: string | null; phase: string; condition: string; owner_area: string }>();
     if (!member?.recipe_revision_id || !['review', 'build', 'verify', 'stage'].includes(member.phase) || !['ready', 'blocked'].includes(member.condition)) throw new FactoryRunError('invalid-input', 'Cohort member is not admitted for a private factory build.');
     humanMaintainer(actor, member.owner_area);
-    revisionId = member.recipe_revision_id;
+    if (revisionId && revisionId !== member.recipe_revision_id && !await db.prepare(`SELECT 1 FROM factory_revision_bindings
+      WHERE revision_id=? AND source_revision_id=? AND cohort_id=? AND status IN ('pending','reviewed')`)
+      .bind(revisionId, member.recipe_revision_id, input.targetId).first()) throw new FactoryRunError('invalid-input', 'The repair does not belong to this cohort member.');
+    revisionId ??= member.recipe_revision_id;
   }
   if (!revisionId) throw new FactoryRunError('invalid-input', 'A reviewed revision is required for this factory unit.');
   const revision = await db.prepare(`SELECT r.*,q.name,q.upstream_url,q.source_kind,q.area,q.status AS request_status,
@@ -148,7 +152,7 @@ async function boundExecutionPolicy(db: D1Database, input: FactoryUnitInput, rev
   return { ...requested, network: 'disabled', executionScope: 'private', target: identity };
 }
 
-async function dispatch(db: D1Database, queue: FactoryUnitQueue, run: FactoryRun, input: FactoryUnitInput, revision: UnitRevision, attempt: FactoryAttempt, builds: Array<{ id: string; architecture: 'x86_64' | 'aarch64' }>, sourceRunId?: string, repairReason?: string): Promise<FactoryUnitStartResult> {
+async function dispatch(db: D1Database, queue: FactoryUnitQueue, run: FactoryRun, input: FactoryUnitInput, revision: UnitRevision, attempt: Pick<FactoryAttempt, 'attempt'>, builds: Array<{ id: string; architecture: 'x86_64' | 'aarch64' }>, sourceRunId?: string, repairReason?: string): Promise<FactoryUnitStartResult> {
   const workflowId = `factory-unit-${run.id}`;
   let queued: { workflowId: string };
   try {
@@ -171,6 +175,9 @@ export async function startFactoryUnit(db: D1Database, actor: Actor | null, queu
   const executionValue = { ...value, policy: executionPolicy };
   const run = await startFactoryRun(db, { id: value.runId ?? id(), targetKind: value.targetKind, targetId: value.targetId, unitKey: value.unitKey, policy: executionPolicy, createdBy: reviewer.id, requestedRevisionId: revision.id });
   if (run.status === 'succeeded' || run.status === 'needs-human-intervention' || run.status === 'cancelled') return { run, workflowId: `factory-unit-${run.id}`, dispatchedAt: now() };
+  if (run.attemptCount === 0 && await db.prepare('SELECT 1 FROM builds WHERE revision_id=? LIMIT 1').bind(revision.id).first()) {
+    return dispatch(db, queue, run, executionValue, revision, { attempt: 1 }, []);
+  }
   const existingAttempt = run.currentAttempt ? await getFactoryAttempt(db, run.id, run.currentAttempt) : null;
   const attempt = existingAttempt?.status === 'running' ? existingAttempt : await reserveFactoryAttempt(db, { runId: run.id, reservationKey: `attempt:${run.attemptCount + 1}`, candidateSha256: revision.manifest_sha256, inputSha256: await sha256(canonicalJson({ revisionId: revision.id, policy: executionPolicy })), candidateRevisionId: revision.id, policy: executionPolicy });
   if (!attempt) throw new FactoryRunError('storage', 'Factory attempt was not persisted.');
@@ -200,8 +207,17 @@ export async function startFactoryUnitIntervention(db: D1Database, actor: Actor 
   const executionPolicy = await boundExecutionPolicy(db, sourceValue, revision);
   const executionValue = { ...value, policy: executionPolicy };
   const reason = interventionReason(input.reason ?? '');
+  const interrupted = await db.prepare(`SELECT r.id FROM factory_runs r JOIN factory_run_attempts a ON a.run_id=r.id AND a.attempt=r.current_attempt
+    WHERE r.source_run_id=? AND r.target_kind=? AND r.target_id=? AND r.unit_key=? AND r.status='running' AND a.dispatch_id IS NULL
+      AND NOT EXISTS(SELECT 1 FROM builds b WHERE b.factory_run_id=r.id)
+      AND NOT EXISTS(SELECT 1 FROM recipe_inspections i WHERE i.factory_run_id=r.id AND i.status IN ('queued','leased'))`)
+    .bind(sourceRunId, value.targetKind, value.targetId, value.unitKey).first<{ id: string }>();
+  if (interrupted) await stopFactoryRun(db, interrupted.id, 'Previous startup did not queue any builds; recovered under a new human restart request.');
   const run = await createFactorySuccessorRun(db, sourceRunId, { id: value.runId ?? id(), targetKind: value.targetKind, targetId: value.targetId, unitKey: value.unitKey, policy: executionPolicy, createdBy: reviewer.id, requestedRevisionId: revision.id });
   await audit(db, reviewer.id, 'factory.human_successor_started', run.id, { sourceRunId, reason }).run();
+  if (await db.prepare('SELECT 1 FROM builds WHERE revision_id=? LIMIT 1').bind(revision.id).first()) {
+    return dispatch(db, queue, run, executionValue, revision, { attempt: 1 }, [], sourceRunId, reason);
+  }
   const attempt = await reserveFactoryAttempt(db, { runId: run.id, reservationKey: `start:${run.id}:1`, candidateSha256: revision.manifest_sha256, inputSha256: await sha256(canonicalJson({ revisionId: revision.id, policy: executionPolicy, sourceRunId })), candidateRevisionId: revision.id, policy: executionPolicy });
   const builds = await queuePrivateFactoryBuilds({ DB: db }, run.id, attempt, revision);
   const refreshed = await getFactoryRun(db, run.id);
