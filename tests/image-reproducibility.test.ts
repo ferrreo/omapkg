@@ -23,7 +23,7 @@ const filesystemFixture = join(root, 'system-images/reproducibility/boot-fixture
 
 test('system image archive ownership follows mtree defaults and unset directives', () => {
   const builder = readFileSync(join(root, 'scripts/build-system-image.sh'), 'utf8');
-  const inspection = builder.slice(builder.indexOf('archive_paths_checked=0'), builder.indexOf('normalize_ext4_metadata()'));
+  const inspection = builder.slice(builder.indexOf('archive_paths_checked=0'), builder.indexOf('\ntemporary_root='));
   const script = `set -euo pipefail
 die() { echo "$*" >&2; exit 2; }
 bsdtar() {
@@ -112,6 +112,38 @@ printf '%s\\n' "$archive_code_sha" "$archive_vars_sha"
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test.skipIf(!Bun.which('mkfs.ext4'))('fresh ext4 construction preserves reproducible bytes across staging order and time', async () => {
+  const builder = readFileSync(join(root, 'scripts/build-system-image.sh'), 'utf8');
+  const command = builder.split('\n').find((line) => line.startsWith('mkfs.ext4 ') && line.includes('-d "$root_stage"'));
+  expect(command).toBeDefined();
+  const directory = mkdtempSync(join(tmpdir(), 'omapkg-ext4-repro-'));
+  try {
+    const hashes = [];
+    for (const names of [['z', 'a'], ['a', 'z']]) {
+      const index = hashes.length;
+      const tree = join(directory, `tree-${index}`);
+      const output = join(directory, `image-${index}`);
+      mkdirSync(tree);
+      for (const name of names) writeFileSync(join(tree, name), name);
+      const script = `set -euo pipefail
+root_uuid=11111111-2222-3333-4444-555555555555
+root_stage="$1"
+root_image="$2"
+find "$root_stage" -print0 | xargs -0 touch -h -d @1700000000
+truncate -s 67108864 "$root_image"
+${command}
+sha256sum "$root_image"
+`;
+      const result = spawnSync('bash', ['-c', script, '--', tree, output], { env: { ...process.env, E2FSPROGS_FAKE_TIME: '1700000000', SOURCE_DATE_EPOCH: '1700000000', TZ: 'UTC' }, encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      hashes.push(result.stdout.split(' ')[0]);
+      if (index === 0) await Bun.sleep(1100);
+    }
+    expect(hashes[0]).toMatch(/^[a-f0-9]{64}$/);
+    expect(hashes[1]).toBe(hashes[0]);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('image reproducibility harness keeps raw comparison and explicit incomplete status', () => {
