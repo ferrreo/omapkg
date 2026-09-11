@@ -103,6 +103,16 @@ func TestPreservedSourceObjectsBindOriginalTreeAndNativePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if info, err := os.Lstat(filepath.Join(work, "build")); err != nil || !info.IsDir() {
+		t.Fatal("nested writable build mount has no directory in the read-only recipe")
+	}
+	unsafeWork := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(unsafeWork, "build")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.buildMounts(unsafeWork, t.TempDir(), map[string]string{}); err == nil {
+		t.Fatal("accepted a symlink as the nested build mountpoint")
+	}
 	runner := Runner{Runtime: "podman"}
 	runner.baseContainerArgsForImage("preserved-args", "none", "/opr/work", mounts, env, workerContainerUser(), job.ImageRef)
 	if string(mustReadFile(t, filepath.Join(work, "PKGBUILD"))) != recipe || len(mustReadFile(t, filepath.Join(result.Directory, "sources", "empty"))) != 0 {

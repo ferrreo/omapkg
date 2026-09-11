@@ -11,6 +11,13 @@ import (
 func shellWord(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
 
 func (recipe *materializedRecipe) buildMounts(workdir, output string, env map[string]string) ([]mount, error) {
+	mountpoint := filepath.Join(workdir, "build")
+	if err := os.Mkdir(mountpoint, 0o755); err != nil {
+		info, statErr := os.Lstat(mountpoint)
+		if !os.IsExist(err) || statErr != nil || !info.IsDir() {
+			return nil, fmt.Errorf("build mountpoint must be a regular directory: %s", mountpoint)
+		}
+	}
 	mounts := []mount{{Source: workdir, Target: "/opr/work", ReadOnly: true}, {Source: output, Target: "/opr/output"}}
 	for _, name := range []string{"sources", "caches", "keys", "build"} {
 		directory := filepath.Join(recipe.Directory, name)
