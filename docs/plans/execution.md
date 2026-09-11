@@ -907,3 +907,29 @@ and approved continuing that implementation after this verified deployment.
 Factory retry accounting, single-build reproducibility contracts, the complete
 template/native-fixture matrix, dossiers/diagnostics, and anti-slop review are a
 subsequent workstream; this rollout does not claim those additions complete.
+
+### Factory rollout and bounded production demonstration — 2026-09-11
+
+The factory batch and subsequent deployment fixes are committed and pushed to
+`main`. Web, signer, and pipeline versions from `62fcdb3` were each verified at
+100% traffic. Their deployed version IDs are respectively
+`854844db-00de-4acc-934b-56957114687a`,
+`480493bb-203a-4892-886e-1b80c1328b97`, and
+`8835de6b-a542-4c05-85c3-01be2f265c55`. The native package worker reports
+`v0.1.0-2675af7`; subsequent changes did not alter its production Go code.
+The pushed native test and image-script corrections are `cfb11c8` and `a25b7d3`.
+
+The release UI now selects named changes, generates repository references and
+release notes on the server, and preserves qualification checks. Review policy
+allows one authorized account to supply area and security signoffs; the
+security signoff still requires security permission. Production page checks
+returned 200, unauthenticated maintainer APIs returned 401, and no current
+transaction is active. Distribution mode remains `shadow`.
+
+The requester authorized a bounded test deployment, including actual imports,
+native builds, reviews, and cohort publication. The [demonstration record](../bounded-deployment-demo.md)
+contains three captured metadata records, successful GNU Hello builds on both
+native architectures, GNU Which on x86, retained failure/recovery history,
+reviewed recipes, and verifiable dossier exports. Publication is **not complete**:
+the application records an unresolved owned dependency, and production has no
+owned input locks or qualified System baseline. Those gates were not bypassed.
