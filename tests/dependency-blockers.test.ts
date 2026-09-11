@@ -143,3 +143,17 @@ test('dependency graph rejects a 65th reachable request', async () => {
     expect((await getDependencyBlockers(asD1(db), 'root')).find((item) => item.id === blocker.id)?.dependency_request_id).toBeNull();
   } finally { db.close(); }
 });
+
+test('superseded-finding migration keeps current revision and generation findings open', () => {
+  const db = new TestD1(`CREATE TABLE revisions(id TEXT,request_id TEXT,created_at INTEGER);
+    CREATE TABLE dependency_blockers(id TEXT,request_id TEXT,revision_id TEXT,status TEXT,resolved_at INTEGER);
+    INSERT INTO revisions VALUES('old','request',1),('current','request',2);
+    INSERT INTO dependency_blockers VALUES('old','request','old','open',NULL),
+      ('current','request','current','open',NULL),('generation','request',NULL,'open',NULL);`);
+  try {
+    db.exec(migration('0063_superseded_dependency_findings.sql'));
+    expect(db.prepare('SELECT id,status FROM dependency_blockers ORDER BY id').all().results).toEqual([
+      { id: 'current', status: 'open' }, { id: 'generation', status: 'open' }, { id: 'old', status: 'superseded' },
+    ]);
+  } finally { db.close(); }
+});

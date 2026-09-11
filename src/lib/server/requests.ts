@@ -90,7 +90,7 @@ export async function startFactory(env: Env, actor: Actor | null, requestId: str
     env.DB.prepare('UPDATE requests SET status=\'generating\',factory_run_id=?,updated_at=? WHERE id=? AND status=?').bind(generationId, now(), requestId, request.status),
     env.DB.prepare('INSERT INTO audit_events(actor,action,target,detail,created_at) SELECT ?,?,?,?,? WHERE changes()=1')
       .bind(reviewer.id, request.status === 'pending' ? 'request.approved' : 'factory.regenerated', requestId, JSON.stringify({ previousStatus: request.status, generationId, ...(reason === undefined ? {} : { reason: reason.trim() }) }), now()),
-    ...(request.status === 'blocked' ? [env.DB.prepare("UPDATE dependency_blockers SET status='superseded',resolved_at=? WHERE request_id=? AND status='open' AND EXISTS (SELECT 1 FROM requests WHERE id=? AND status='generating' AND factory_run_id=?)").bind(now(), requestId, requestId, generationId)] : [])
+    env.DB.prepare("UPDATE dependency_blockers SET status='superseded',resolved_at=? WHERE request_id=? AND status='open' AND EXISTS (SELECT 1 FROM requests WHERE id=? AND status='generating' AND factory_run_id=?)").bind(now(), requestId, requestId, generationId)
   ]);
 
   if (!result[0].meta.changes) throw new PolicyError(409, 'Request changed. Refresh and retry.');

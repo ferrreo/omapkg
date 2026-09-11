@@ -92,16 +92,18 @@ describe('core security regressions', () => {
   });
 
   test('a failed factory run can restart without a revision and records the reason', async () => {
-    const db = new TestD1(requestSchema + 'ALTER TABLE requests ADD COLUMN factory_run_id TEXT;');
+    const db = new TestD1(requestSchema + 'ALTER TABLE requests ADD COLUMN factory_run_id TEXT; CREATE TABLE dependency_blockers(request_id TEXT,status TEXT,resolved_at INTEGER);');
 
     try {
       const service = env(db);
       service.PIPELINE = { fetch: async () => new Response('{}') } as unknown as Fetcher;
       const requestId = await submitRequest(service, actor, { name: 'retry-test', description: 'Factory retry test', upstream_url: 'https://example.com/source.tar.gz', source_kind: 'archive', area: 'system', declared_license: 'MIT' });
       await service.DB.prepare("UPDATE requests SET status='failed' WHERE id=?").bind(requestId).run();
+      await service.DB.prepare("INSERT INTO dependency_blockers(request_id,status) VALUES(?,'open')").bind(requestId).run();
       await expect(startFactory(service, actor, requestId, 'x'.repeat(2001))).rejects.toMatchObject({ status: 400 });
       await startFactory(service, actor, requestId, ' Fixed Git shell compatibility. ');
       expect(await service.DB.prepare('SELECT status FROM requests WHERE id=?').bind(requestId).first<{ status: string }>()).toEqual({ status: 'generating' });
+      expect(await service.DB.prepare('SELECT status FROM dependency_blockers').first<{ status: string }>()).toEqual({ status: 'superseded' });
       const event = await service.DB.prepare("SELECT detail FROM audit_events WHERE action='factory.regenerated'").first<{ detail: string }>();
       expect(JSON.parse(event!.detail).reason).toBe('Fixed Git shell compatibility.');
       const { maintainerFeedbackForGeneration } = await import('../services/pipeline/tools');
