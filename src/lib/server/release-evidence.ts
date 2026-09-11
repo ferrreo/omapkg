@@ -244,12 +244,21 @@ export async function assertAttestation(build: JoinedBuild, env: Env) {
 
   for (const [field, value] of expected) if (provenance[field] !== value) fail(409, `Build provenance field ${field} does not match reviewed inputs.`);
 
-  try { await assertRuntimeEvidence(provenance, imageDigest, reviewedRuntimeExceptions(build.sbom_json)); }
-  catch (cause) { fail(409, cause instanceof Error ? cause.message : 'Runtime evidence is invalid.'); }
+  if (!nativeReport) {
+    try { await assertRuntimeEvidence(provenance, imageDigest, reviewedRuntimeExceptions(build.sbom_json)); }
+    catch (cause) { fail(409, cause instanceof Error ? cause.message : 'Runtime evidence is invalid.'); }
+  } else {
+    const artifacts = await query<{ filename: string; sha256: string }>(env.DB,
+      'SELECT a.filename,a.sha256 FROM build_artifacts a JOIN builds b ON b.id=a.build_id AND b.attempt=a.attempt WHERE b.id=?', build.build_id);
+    if (artifacts.length !== nativeReport.outputs.length || nativeReport.outputs.some((output) =>
+      !artifacts.some((artifact) => artifact.filename === output.filename && artifact.sha256 === output.artifactSha256))) {
+      fail(409, 'Build provenance output digests do not match uploaded bytes.');
+    }
+  }
 
   if (provenance.pkgrel !== undefined && provenance.pkgrel !== (build.pkgrel ?? 1)) fail(409, 'Build provenance field pkgrel does not match reviewed inputs.');
 
-  if (provenance.artifactSha256 !== build.artifact_sha256 && build.surface === 'binary') {
+  if (!nativeReport && provenance.artifactSha256 !== build.artifact_sha256 && build.surface === 'binary') {
     fail(409, 'Build provenance artifact digest does not match uploaded bytes.');
   }
 

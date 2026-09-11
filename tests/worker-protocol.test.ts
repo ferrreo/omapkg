@@ -1,3 +1,4 @@
+import { assertAttestation, joinedBuild } from '../src/lib/server/release-evidence';
 import { frozenFixture } from './frozen-fixtures';
 import { fenceFrozenLeases, proposeInputLock, reviewInputLock, selectInputLock, revokeInputReview } from '../src/lib/server/input-locks';
 import { retainNativeInput, revokeNativeInput } from '../src/lib/server/input-owned';
@@ -834,6 +835,7 @@ for (const frozen of [false, true]) test(`v2 ${frozen ? 'frozen' : 'shadow'} com
     expect((await db.prepare('SELECT output_contract_json FROM build_attempts WHERE build_id=? AND attempt=?').bind(job.id, job.attempt).first<{ output_contract_json: string }>())?.output_contract_json).toBe(JSON.stringify(job.outputContract));
     expect(() => holder.exec('DELETE FROM build_attempt_results')).toThrow('immutable');
     const service = { ...testEnv(holder), ARTIFACTS: bucket as unknown as R2Bucket, PACKAGE_SIGNING_FINGERPRINT: 'a'.repeat(40) };
+    await assertAttestation(await joinedBuild(service, job.id), service);
     const verification = await evaluateCohortGate(service, { ...cohort, phase: 'verify' });
     expect(verification.blockers.some((item) => item.code === 'native-evidence')).toBe(false);
     expect(verification.blockers.filter((item) => item.code === 'check-owned-inputs').map((item) => item.pkgbase)).toEqual([seeded.name]);
