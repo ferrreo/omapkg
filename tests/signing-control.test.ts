@@ -13,7 +13,7 @@ import { TestD1, asD1 } from './d1';
 
 const schema = [
   '0001_initial.sql', '0003_distribution.sql', '0007_core_guards.sql', '0010_signing_control.sql', '0011_build_images.sql', '0014_package_metadata.sql', '0015_installed_size.sql', '0022_public_recipes.sql', '0023_dependency_plan.sql', '0024_descriptions.sql', '0026_release_attestations.sql',
-].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n') + '\nALTER TABLE signing_intents ADD COLUMN build_attempt INTEGER; ALTER TABLE builds ADD COLUMN output_contract_json TEXT; ALTER TABLE builds ADD COLUMN input_lock_sha256 TEXT; ALTER TABLE builds ADD COLUMN private_candidate INTEGER NOT NULL DEFAULT 0; ALTER TABLE builds ADD COLUMN factory_run_id TEXT; ALTER TABLE builds ADD COLUMN factory_attempt INTEGER; CREATE TABLE factory_run_attempts(run_id TEXT,attempt INTEGER,input_sha256 TEXT);';
+].map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8')).join('\n') + '\nALTER TABLE revisions ADD COLUMN preserved_origin_revision_id TEXT; ALTER TABLE signing_intents ADD COLUMN build_attempt INTEGER; ALTER TABLE builds ADD COLUMN output_contract_json TEXT; ALTER TABLE builds ADD COLUMN input_lock_sha256 TEXT; ALTER TABLE builds ADD COLUMN private_candidate INTEGER NOT NULL DEFAULT 0; ALTER TABLE builds ADD COLUMN factory_run_id TEXT; ALTER TABLE builds ADD COLUMN factory_attempt INTEGER; CREATE TABLE factory_run_attempts(run_id TEXT,attempt INTEGER,input_sha256 TEXT);';
 
 class MemoryR2 {
   readonly objects = new Map<string, { body: Uint8Array; customMetadata: Record<string, string> }>();
