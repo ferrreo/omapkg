@@ -195,7 +195,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          fixture="$FACTORY_EVIDENCE/filesystem/system-worker"
+          fixture_root="$FACTORY_EVIDENCE/filesystem/filesystem-fixture"
+          sudo chown -R "$(id -u):$(id -g)" "$fixture_root"
+          fixture="$fixture_root/system-worker"
           export SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker
           export SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN"
           export OPR_IMAGE_REPRO_SYSTEM_WORKER=1
@@ -206,8 +208,9 @@ jobs:
           export SYSTEM_IMAGE_REPRO_NATIVE_PLAN="$fixture/native-plan.json"
           export SYSTEM_IMAGE_REPRO_NATIVE_PLAN_SIGNATURE="$fixture/native-plan.json.sig"
           export SYSTEM_IMAGE_REPRO_KEY="$fixture/release-key.asc"
-          export SYSTEM_IMAGE_REPRO_FINGERPRINT="$(cat "$fixture/fingerprint")"
-          export SYSTEM_IMAGE_REPRO_CONTEXT="$FACTORY_EVIDENCE/filesystem/system-context.tar"
+          SYSTEM_IMAGE_REPRO_FINGERPRINT=$(cat "$fixture/fingerprint")
+          export SYSTEM_IMAGE_REPRO_FINGERPRINT
+          export SYSTEM_IMAGE_REPRO_CONTEXT="$fixture_root/system-context.tar"
           (cd worker && go test . -run '^TestFactoryImageSystemNativeExecution$' -count=1 -timeout=45m -v) \
             2>&1 | tee "$FACTORY_EVIDENCE/system-worker.log"
           grep -Fq -- '--- PASS: TestFactoryImageSystemNativeExecution' "$FACTORY_EVIDENCE/system-worker.log"
@@ -462,7 +465,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          fixture="$FACTORY_EVIDENCE/filesystem/system-worker"
+          fixture_root="$FACTORY_EVIDENCE/filesystem/filesystem-fixture"
+          sudo chown -R "$(id -u):$(id -g)" "$fixture_root"
+          fixture="$fixture_root/system-worker"
           export SYSTEM_IMAGE_REPRO_CONTAINER_RUNTIME=docker
           export SYSTEM_IMAGE_REPRO_BOOT_BUILDER_IMAGE="$FACTORY_IMAGE_TOOLCHAIN_ARM"
           export OPR_IMAGE_REPRO_SYSTEM_WORKER=1
@@ -473,8 +478,9 @@ jobs:
           export SYSTEM_IMAGE_REPRO_NATIVE_PLAN="$fixture/native-plan.json"
           export SYSTEM_IMAGE_REPRO_NATIVE_PLAN_SIGNATURE="$fixture/native-plan.json.sig"
           export SYSTEM_IMAGE_REPRO_KEY="$fixture/release-key.asc"
-          export SYSTEM_IMAGE_REPRO_FINGERPRINT="$(cat "$fixture/fingerprint")"
-          export SYSTEM_IMAGE_REPRO_CONTEXT="$FACTORY_EVIDENCE/filesystem/system-context.tar"
+          SYSTEM_IMAGE_REPRO_FINGERPRINT=$(cat "$fixture/fingerprint")
+          export SYSTEM_IMAGE_REPRO_FINGERPRINT
+          export SYSTEM_IMAGE_REPRO_CONTEXT="$fixture_root/system-context.tar"
           (cd worker && go test . -run '^TestFactoryImageSystemNativeExecution$' -count=1 -timeout=45m -v) \
             2>&1 | tee "$FACTORY_EVIDENCE/system-worker.log"
           grep -Fq -- '--- PASS: TestFactoryImageSystemNativeExecution' "$FACTORY_EVIDENCE/system-worker.log"
