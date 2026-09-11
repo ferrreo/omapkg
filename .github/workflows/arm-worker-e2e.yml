@@ -15,6 +15,11 @@ on:
         description: Separately pinned minimal ARM runtime image
         required: true
         type: string
+      followup_job:
+        description: Process one follow-up job after factory preparation
+        required: false
+        type: boolean
+        default: false
       arm_image_digest:
         description: Immutable sha256 digest for arm_image
         required: true
@@ -36,6 +41,7 @@ jobs:
       OPR_ARM_IMAGE: ${{ inputs.arm_image }}
       OPR_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
       OPR_ARM_IMAGE_DIGEST: ${{ inputs.arm_image_digest }}
+      OPR_FOLLOWUP_JOB: ${{ inputs.followup_job }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,7 +86,7 @@ jobs:
             -o "$RUNNER_TEMP/opr-worker" .
           "$RUNNER_TEMP/opr-worker" version
 
-      - name: Enroll and run one approved ARM build
+      - name: Enroll and run approved ARM jobs
         shell: bash
         env:
           OPR_ENROLLMENT_TOKEN: ${{ secrets.OPR_ENROLLMENT_TOKEN }}
@@ -122,6 +128,10 @@ jobs:
           # A cold runner must receive the exact helper through its job's
           # registry grant or retained OCI archive before this check can pass.
           "$RUNNER_TEMP/opr-worker" run --once --config "$state_dir/config.json" 2>&1 | tee "$log_file"
+          if [[ "$OPR_FOLLOWUP_JOB" == true ]]; then
+            sleep 60
+            "$RUNNER_TEMP/opr-worker" run --once --config "$state_dir/config.json" 2>&1 | tee -a "$log_file"
+          fi
           if grep -q '^job:' "$log_file"; then
             echo 'ARM worker job failed' >&2
             exit 1
