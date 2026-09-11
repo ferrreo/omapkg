@@ -85,6 +85,9 @@ source timestamp, and explicit build/runtime roots. The workflow retains one
 runtime environment, limits each root list to 32 packages and transfer to 3 GiB,
 and expires its private artifact after three days. It uses the existing capture
 script and requires a short-lived, pull-only `REGISTRY_NATIVE_TEST_AUTH` secret.
+The OCI index retains the helper reference as well as its immutable digest. Docker
+workers need the [containerd image store](https://docs.docker.com/engine/storage/containerd/)
+to load OCI archives; the hosted ARM worker workflow enables it before enrollment.
 Remove that secret after the run; retain the resulting objects through the app
 before reviewing the lock. The capture grants no build or publication approval.
 

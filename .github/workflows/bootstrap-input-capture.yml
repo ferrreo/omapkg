@@ -81,7 +81,7 @@ jobs:
           chmod 600 "$auth"
           unset REGISTRY_NATIVE_TEST_AUTH
           docker --config "$auth_dir" pull "$HELPER_IMAGE"
-          sudo skopeo copy --preserve-digests --authfile "$auth" "docker://$HELPER_IMAGE" "oci-archive:$capture/helper.oci.tar"
+          sudo skopeo copy --preserve-digests --authfile "$auth" "docker://$HELPER_IMAGE" "oci-archive:$capture/helper.oci.tar:$HELPER_IMAGE"
           rm -f "$auth"
           docker run --rm --network=bridge --pull=never --security-opt=no-new-privileges --cap-drop=ALL \
             -v "$capture:/capture:rw" -v "$PWD/services/pipeline/capture-bootstrap-inputs.py:/capture.py:ro" \
