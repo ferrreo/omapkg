@@ -179,6 +179,9 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   const successorJob = (await claimJob(env.DB, worker, metadata, env))!;
   const derivedLock = (await env.DB.prepare('SELECT derived_lock_sha256 FROM factory_derived_input_locks WHERE revision_id=?').bind(successor.id).first<{ derived_lock_sha256: string }>())!;
   expect(successorJob.revisionId).toBe(successor.id); expect(successorJob.inputLock?.sha256).toBe(derivedLock.derived_lock_sha256); expect(successorJob.inputLock?.sha256).not.toBe(frozen.lock.sha256);
+  job = successorJob;
+  expect(await sha256(new Uint8Array(await (await download(derivedLock.derived_lock_sha256)).arrayBuffer()))).toBe(derivedLock.derived_lock_sha256);
+  await expect(download(frozen.lock.sha256)).rejects.toMatchObject({ status: 403 });
   await stopFactoryRun(env.DB, successorRun.id, 'Fixture successor claim complete.');
   job = originalJob;
   await expect(rejectRequest(env as Env, { ...actor, areas: ['desktop'] }, revision.request_id, 'Wrong owner.')).rejects.toMatchObject({ status: 403 });
