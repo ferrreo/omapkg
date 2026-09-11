@@ -420,6 +420,8 @@ mkdir -p "$esp_stage"
 cp -a "$root/boot/efi/." "$esp_stage/"
 umount -R "$root/sys"; sys_mounted=0; umount -R "$root/proc"; proc_mounted=0; umount -R "$root/dev"; dev_mounted=0
 umount "$root/boot/efi"; esp_mounted=0
+# Installation logs and the ldconfig inode cache describe this build host.
+rm -f -- "$root/var/log/pacman.log" "$root/var/cache/ldconfig/aux-cache"
 find "$root" -xdev -print0 | xargs -0 touch -h -d "@$source_date_epoch"
 find "$esp_stage" -print0 | xargs -0 touch -h -d "@$esp_epoch"
 declare -A image_uids=() image_gids=()

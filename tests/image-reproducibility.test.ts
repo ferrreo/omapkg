@@ -118,6 +118,8 @@ test.skipIf(!Bun.which('mkfs.ext4'))('fresh ext4 construction preserves reproduc
   const builder = readFileSync(join(root, 'scripts/build-system-image.sh'), 'utf8');
   const command = builder.split('\n').find((line) => line.startsWith('mkfs.ext4 ') && line.includes('-d "$root_stage"'));
   expect(command).toBeDefined();
+  const cleanup = builder.split('\n').find((line) => line.startsWith('rm -f -- ') && line.includes('/var/cache/ldconfig/aux-cache'));
+  expect(cleanup).toBeDefined();
   const directory = mkdtempSync(join(tmpdir(), 'omapkg-ext4-repro-'));
   try {
     const hashes = [];
@@ -127,10 +129,16 @@ test.skipIf(!Bun.which('mkfs.ext4'))('fresh ext4 construction preserves reproduc
       const output = join(directory, `image-${index}`);
       mkdirSync(tree);
       for (const name of names) writeFileSync(join(tree, name), name);
+      mkdirSync(join(tree, 'var/log'), { recursive: true });
+      mkdirSync(join(tree, 'var/cache/ldconfig'), { recursive: true });
+      writeFileSync(join(tree, 'var/log/pacman.log'), `build time ${index}`);
+      writeFileSync(join(tree, 'var/cache/ldconfig/aux-cache'), `host inode ${index}`);
       const script = `set -euo pipefail
 root_uuid=11111111-2222-3333-4444-555555555555
 root_stage="$1"
+root="$root_stage"
 root_image="$2"
+${cleanup}
 find "$root_stage" -print0 | xargs -0 touch -h -d @1700000000
 truncate -s 67108864 "$root_image"
 ${command}
