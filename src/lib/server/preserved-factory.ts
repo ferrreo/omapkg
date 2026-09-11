@@ -58,7 +58,7 @@ export function assertPreservedRepairScope(original: string, repaired: string): 
     }
   }
   const requiredFunctions = [...original.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{/gm)].map((match) => match[1]);
-  for (const name of new Set(['build', 'package', ...requiredFunctions])) {
+  for (const name of new Set(requiredFunctions)) {
     if (!new RegExp(`^\\s*${name}\\s*\\(\\)\\s*\\{`, 'm').test(repaired)) throw new FactoryPolicyStopError(`Preserved repair removed required ${name}() policy.`);
   }
 }
@@ -198,7 +198,7 @@ export async function createFactorySuccessorDraft(
     recipeMode: 'custom-shell', buildCommands: [], packageCommands: [], publicRecipe: revision.public_recipe ?? null, explanation: redactText(explanation).slice(0, 8_192), upstreamCommit: revision.upstream_commit,
     sbom: { ...originalEvidence, ...(evidence ? { preservedRecipe: evidence } : {}), factoryRepair: { baseRevisionId: origin, parentRevisionId: revision.id, attempt, failureSha256, ...repairInputs } },
   };
-  const lint = lintRecipe(repairedRecipe, attempt - 1);
+  const lint = lintRecipe(repairedRecipe, attempt - 1, evidence ? 'preserved' : 'generated');
   if (!lint.passed) throw new Error(`Preserved repair failed recipe validation: ${lint.checks.filter((check) => !check.passed).map((check) => check.name).join(', ')}`);
   const draft = await assembleRecipeRevision(candidate, repairedRecipe, lint, revisionId);
   if (evidence) draft.revision.preserved_origin_revision_id = origin;

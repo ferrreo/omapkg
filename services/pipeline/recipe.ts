@@ -59,7 +59,7 @@ function commandSegments(body: string): string[] {
 }
 
 function commandName(segment: string): string {
-  const withoutControl = segment.replace(/^(?:if|then|else|elif|while|until|do)\s+/, '');
+  const withoutControl = segment.trim().replace(/^(?:if|then|else|elif|while|until|do)\s+/, '');
   const withoutAssignments = withoutControl.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '');
 
   return withoutAssignments.split(/\s+/, 1)[0]?.replace(/^.*\//, '') ?? '';
@@ -374,9 +374,10 @@ export function renderPublicRecipe(candidate: FactoryCandidate, options: PublicR
   return renderRecipe(candidate, { sources, prepareCommands: publicVendorCommands(options), vendorKind: options.vendorKind });
 }
 
-export function lintRecipe(recipe: string, repairAttempts = 0): RecipeLint {
+export function lintRecipe(recipe: string, repairAttempts = 0, mode: 'generated' | 'preserved' = 'generated'): RecipeLint {
   const checks: RecipeLint['checks'] = [];
-  const required = ['pkgname=', 'pkgver=', 'pkgrel=', 'arch=', 'license=', 'source=', 'sha256sums=', 'build() {'];
+  // Signed native metadata checks preserved source shape; generated templates use fixed markers and quoting.
+  const required = mode === 'preserved' ? [] : ['pkgname=', 'pkgver=', 'pkgrel=', 'arch=', 'license=', 'source=', 'sha256sums=', 'build() {'];
 
   for (const marker of required) {
     checks.push({
@@ -410,13 +411,15 @@ export function lintRecipe(recipe: string, repairAttempts = 0): RecipeLint {
     detail: buildStagesPackage ? '$pkgdir is referenced from build()' : 'build() does not reference $pkgdir',
   });
 
-  const sourceCount = (recipe.match(/^source=/m)?.[0] ? (recipe.match(/source=\(([^)]*)\)/)?.[1].match(/'/g)?.length ?? 0) / 2 : 0);
-  const checksumCount = (recipe.match(/sha256sums=\(([^)]*)\)/)?.[1].match(/'/g)?.length ?? 0) / 2;
-  checks.push({
-    name: 'source/checksum count',
-    passed: sourceCount > 0 && sourceCount === checksumCount,
-    detail: `${sourceCount} source(s), ${checksumCount} checksum(s)`,
-  });
+  if (mode === 'generated') {
+    const sourceCount = (recipe.match(/^source=/m)?.[0] ? (recipe.match(/source=\(([^)]*)\)/)?.[1].match(/'/g)?.length ?? 0) / 2 : 0);
+    const checksumCount = (recipe.match(/sha256sums=\(([^)]*)\)/)?.[1].match(/'/g)?.length ?? 0) / 2;
+    checks.push({
+      name: 'source/checksum count',
+      passed: sourceCount > 0 && sourceCount === checksumCount,
+      detail: `${sourceCount} source(s), ${checksumCount} checksum(s)`,
+    });
+  }
 
   return { passed: checks.every((check) => check.passed), checks, repairAttempts };
 }

