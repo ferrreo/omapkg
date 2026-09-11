@@ -256,7 +256,7 @@ function expiry(row: IntentRow): number {
 
 function revision(row: IntentRow): Revision {
   return {
-    id: row.id, request_id: row.request_id, version: row.version, recipe: row.recipe,
+    id: row.id, preserved_origin_revision_id: row.preserved_origin_revision_id, request_id: row.request_id, version: row.version, recipe: row.recipe,
     recipe_sha256: row.recipe_sha256, public_recipe: row.public_recipe, public_recipe_sha256: row.public_recipe_sha256, manifest_sha256: row.manifest_sha256,
     sources_json: row.sources_json, dependencies_json: row.dependencies_json, make_dependencies_json: row.make_dependencies_json,
     smoke_commands_json: row.smoke_commands_json, architectures_json: row.architectures_json, build_images_json: row.build_images_json,

@@ -26,6 +26,7 @@ type JoinedBuild = {
   provenance_signature: string | null;
   smoke_passed: number;
   revision_id: string;
+  preserved_origin_revision_id?: string | null;
   request_id: string;
   request_name: string;
   request_status: string;
@@ -302,7 +303,7 @@ export async function assertReviewed(build: JoinedBuild, env: Env) {
 
   try {
     await validateRevision({
-      id: build.revision_id, request_id: build.request_id, version: build.revision_version, recipe: build.recipe,
+      id: build.revision_id, preserved_origin_revision_id: build.preserved_origin_revision_id, request_id: build.request_id, version: build.revision_version, recipe: build.recipe,
       recipe_sha256: build.recipe_sha256, public_recipe: build.public_recipe, public_recipe_sha256: build.public_recipe_sha256,
       manifest_sha256: build.manifest_sha256, sources_json: build.sources_json,
       dependencies_json: build.dependencies_json, make_dependencies_json: build.make_dependencies_json, smoke_commands_json: build.smoke_commands_json,

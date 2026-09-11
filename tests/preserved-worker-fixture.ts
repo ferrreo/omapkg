@@ -1,3 +1,4 @@
+import { assertReviewed, joinedBuild } from '../src/lib/server/release-evidence';
 import { expect } from 'bun:test';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import type { Env } from '../src/lib/server/env';
@@ -207,6 +208,14 @@ export async function checkPreservedWorker(holder: TestD1, storage: Pick<Env, 'D
   expect(await completeJob(env.DB, env.ARTIFACTS, worker, job.id, { leaseToken: job.leaseToken, status: 'succeeded', installedSize: 20,
     smokePassed: true, artifacts: privateArtifacts, provenance: privateProvenance,
     provenanceSignature: Buffer.from(sign(null, Buffer.from(privateProvenance), keys.privateKey)).toString('base64') })).toEqual({ status: 'succeeded', idempotent: false, privateCandidate: true });
+  holder.prepare('UPDATE builds SET private_candidate=0 WHERE id=?').bind(job.id).run();
+  for (const kind of ['area', 'security']) {
+    holder.prepare('INSERT INTO approvals(id,revision_id,actor,kind,manifest_sha256,created_at) VALUES(?,?,?,?,?,?)')
+      .bind(`successor-${kind}`, successor.id, actor.id, kind, successor.manifest_sha256, timestamp).run();
+    holder.prepare("INSERT INTO audit_events(actor,action,target,detail,created_at) VALUES(?,'revision.approved',?,?,?)")
+      .bind(actor.id, successor.request_id, JSON.stringify({ revisionId: successor.id, kind, manifestSha256: successor.manifest_sha256, customShellAcknowledged: true }), timestamp).run();
+  }
+  await assertReviewed(await joinedBuild(env as Env, job.id), env as Env);
   await stopFactoryRun(env.DB, successorRun.id, 'Fixture successor claim complete.');
   job = originalJob;
   await expect(rejectRequest(env as Env, { ...actor, areas: ['desktop'] }, revision.request_id, 'Wrong owner.')).rejects.toMatchObject({ status: 403 });
