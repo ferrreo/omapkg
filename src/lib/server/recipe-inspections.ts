@@ -63,7 +63,7 @@ export async function requestRecipeInspection(env: InspectionEnv, actor: Actor |
   if (options.factoryRunId) {
     const run = await env.DB.prepare(`SELECT created_by FROM factory_runs WHERE id=? AND (
       (status='running' AND current_attempt=? AND lease_token IS NOT NULL AND lease_expires_at>?) OR
-      (status='queued' AND attempt_count=?-1 AND current_attempt=?-1 AND lease_token IS NULL AND lease_expires_at IS NULL))`)
+      (status='queued' AND attempt_count=?-1 AND COALESCE(current_attempt,0)=?-1 AND lease_token IS NULL AND lease_expires_at IS NULL))`)
       .bind(options.factoryRunId, options.factoryAttempt, now(), options.factoryAttempt, options.factoryAttempt).first<{ created_by: string }>();
     if (!run || !/^github:[1-9][0-9]{0,19}$/.test(run.created_by)) throw new PolicyError(409, 'Factory inspection authority is no longer active.');
   }
@@ -88,7 +88,7 @@ export async function requestFactoryRecipeInspection(env: InspectionEnv, runId: 
     .bind(runId, attempt, now(), attempt, attempt).first<{ created_by: string }>();
   if (!run || !/^github:[1-9][0-9]{0,19}$/.test(run.created_by)) throw new PolicyError(409, 'Factory inspection authority is no longer active.');
   const actor = await actorForGithubId(env.DB, run.created_by.slice(7));
-  return requestRecipeInspection(env, actor, captureSha, imageId, reason, { recipeOverride: override, factoryRunId: runId, factoryAttempt: attempt });
+  return requestRecipeInspection(env, actor, captureSha, imageId, reason.replace(/\s+/g, ' '), { recipeOverride: override, factoryRunId: runId, factoryAttempt: attempt });
 }
 
 export async function cancelRecipeInspection(db: D1Database, actor: Actor | null, capture: string, id: string, reason: string) {

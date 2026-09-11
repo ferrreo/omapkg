@@ -27,7 +27,7 @@ import type { FactoryRevisionDraft } from '../services/pipeline/types';
 import { validateRevision } from '../src/lib/server/policy';
 import { reviewedPackageVersion } from '../src/lib/server/build-outputs';
 import { startFactory } from '../src/lib/server/requests';
-import { finishFactoryAttempt, reserveFactoryAttempt, startFactoryRun } from '../src/lib/server/factory-runs';
+import { finishFactoryAttempt, reserveFactoryAttempt, startFactoryRun, stopFactoryRun } from '../src/lib/server/factory-runs';
 import type { Env } from '../src/lib/server/env';
 import { checkPreservedWorker } from './preserved-worker-fixture';
 
@@ -241,6 +241,14 @@ test('real Git recipe capture rejects substitutions and omissions, retains immut
     await expect(completeRecipeInspection(env.DB, worker, overrideLease.id, { leaseToken: overrideLease.leaseToken, report: overrideReport, signature: Buffer.from(sign(null, Buffer.from(overrideReport), keys.privateKey)).toString('base64') })).resolves.toEqual({ status: 'succeeded' });
     const secondRepairAttempt = await reserveFactoryAttempt(env.DB, { runId: 'repair-run', reservationKey: 'repair:2', candidateSha256: 'c'.repeat(64), inputSha256: 'd'.repeat(64), architecture: 'x86_64', policy: {} });
     expect(secondRepairAttempt.attempt).toBe(2);
+
+    await startFactoryRun(env.DB, { id: 'first-inspection-run', targetKind: 'preserved', targetId: 'demo', unitKey: 'first-inspection', policy: {}, createdBy: actor.id });
+    const firstInspection = await requestFactoryRecipeInspection(env, 'first-inspection-run', 1, ref.sha256, image.id, repairOverride, 'Inspect the first candidate.\nBefore an attempt is reserved.');
+    expect(await env.DB.prepare('SELECT reason FROM recipe_inspections WHERE id=?').bind(firstInspection.id).first()).toEqual({ reason: 'Inspect the first candidate. Before an attempt is reserved.' });
+    const firstInspectionLease = (await claimRecipeInspection(env.DB, worker, overrideMetadata))!;
+    expect(firstInspectionLease).toMatchObject({ id: firstInspection.id, factoryRunId: 'first-inspection-run', factoryAttempt: 1 });
+    await stopFactoryRun(env.DB, 'first-inspection-run', 'First-inspection fixture complete.');
+    await expect(requireRecipeInspectionLease(env.DB, worker, firstInspection.id, firstInspectionLease.leaseToken)).rejects.toThrow('unavailable');
 
     expect(await recipeSourcePlan(env, ref.sha256, second.id, second.attempt)).toMatchObject({ capture: ref, architecture: 'x86_64', version: '2:1.4-3.2',
       inspection: { jobId: second.id, attempt: 2, srcinfoSha256: report.srcinfoSha256 }, sources: [{ kind: 'file', name: 'demo.tar.xz', url: 'https://example.org/source.tar.xz', checksums: { sha256: 'a'.repeat(64) } }] });
